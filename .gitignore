@@ -3,3 +3,6 @@
 .claude/
 .superpowers/
 graphify-out/
+
+# Private notes, kept local only
+idea.md
