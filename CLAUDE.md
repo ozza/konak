@@ -6,7 +6,7 @@ Native Windows 11 desktop app that turns the user's PC into a self-hosted servic
 - Name: Konak.
 - Target: Windows 11 x64 only for the MVP.
 - VM layer: WSL2 with our own imported distro, not `podman machine`.
-- Container engine: Podman or Docker Engine (moby), still open. The spike decides.
+- Container engine: Podman, decided by the spike step 1 rule on 2026-11-11. Both engines ran the upstream compose files unmodified; Podman won because it does not change the shared WSL `FORWARD` policy. See `.audit/spike-results.md`.
 - Kept from idea.md, unchallenged: Tauri shell, Caddy and the mDNS responder as native Windows processes, compose-format app definitions, remote access through a guided Tailscale install.
 
 ## Proposed, not final (confirm with the user before UI work starts)

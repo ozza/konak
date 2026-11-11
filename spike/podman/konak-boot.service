@@ -1,0 +1,11 @@
+[Unit]
+Description=Konak spike: clear stale netavark rules, then start restartable containers
+After=network-online.target podman.socket
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStartPre=-/usr/sbin/nft delete table inet netavark
+ExecStart=/usr/bin/podman start --all --filter restart-policy=always
+ExecStart=/usr/bin/podman start --all --filter restart-policy=unless-stopped
+[Install]
+WantedBy=default.target

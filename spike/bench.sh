@@ -7,6 +7,8 @@ SRC=/mnt/j/Dev/self_hosting_project/spike/apps/$APP
 WORK=/root/apps/$APP
 if [ "$ENGINE" = podman ]; then export DOCKER_HOST=unix:///run/podman/podman.sock; C="docker-compose"; else C="docker compose"; fi
 rm -rf "$WORK"; mkdir -p "$WORK"; cp -a "$SRC/." "$WORK/"; cd "$WORK"
+# Install-time secret generation, as Konak would do: replace upstream 'change-me' placeholders in the local copy only.
+for f in .env *.env; do [ -f "$f" ] && sed -i "s/=change-me\$/=$(head -c 48 /dev/urandom | base64 | tr -dc A-Za-z0-9)/" "$f"; done
 LOG=/root/bench-$APP.log
 t0=$(date +%s)
 $C pull >"$LOG" 2>&1; pull_rc=$?
