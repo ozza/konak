@@ -13,6 +13,13 @@ Native Windows 11 desktop app that turns the user's PC into a self-hosted servic
   3. Fallback: IP address and port.
   No sub-path hosting (`konak.local/app`), because many apps break under it.
 - LAN exposure: the installer adds Private-profile allow rules and Public-profile block rules for Konak's programs, so the Windows "allow access" popup never appears. Konak detects a Public home network and offers a one-click switch to Private.
+- App runtimes, decided 2026-11-11: hybrid. Each catalog entry declares its runtime.
+  - **container:** the default, in Konak's Podman distro.
+  - **native:** a Konak-managed Windows build. Use it only for apps that ship an official Windows build and gain something real from it, such as media servers like Jellyfin. Running in a container on a Windows host is unsupported upstream; native gives GPU transcoding on every vendor and sees files added from Windows.
+  - Proposed, not final:
+    - Prefer a portable/zip build run as a process the tray agent supervises: no Windows service, no admin, updates pinned to a version Konak has tested.
+    - Fall back to the vendor installer only when no portable build exists.
+    - Native apps sit behind the same Caddy, mDNS names, firewall rules, backups and MCP tools as container apps.
 - Kept from idea.md, unchallenged: Tauri shell, Caddy and the mDNS responder as native Windows processes, compose-format app definitions, remote access through a guided Tailscale install.
 
 ## Planned features
