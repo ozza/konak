@@ -15,6 +15,18 @@ Native Windows 11 desktop app that turns the user's PC into a self-hosted servic
 - LAN exposure: the installer adds Private-profile allow rules and Public-profile block rules for Konak's programs, so the Windows "allow access" popup never appears. Konak detects a Public home network and offers a one-click switch to Private.
 - Kept from idea.md, unchallenged: Tauri shell, Caddy and the mDNS responder as native Windows processes, compose-format app definitions, remote access through a guided Tailscale install.
 
+## Planned features
+- **MCP server** (requested 2026-11-11). It lets AI agents do configuration, installs and troubleshooting through Konak, instead of driving PowerShell or WSL directly. The scope below is proposed, not yet confirmed:
+  - **Placement:** it runs inside the tray agent (Rust), reusing the same code paths as the UI.
+  - **Transport:** local stdio only by default. Nothing is reachable from the LAN.
+  - **Read-only tools first:** app list and status, logs, network profile and firewall check, mDNS name check, disk and RAM usage, and a "diagnose" tool that runs the known spike checks:
+    - shared-namespace `FORWARD` policy;
+    - stale netavark rules;
+    - distro keepalive;
+    - port 80 owner;
+    - LAN adapter choice.
+  - **Write tools:** install, remove, restart, change settings, back up and restore. Each one needs explicit user confirmation in the Konak UI for destructive or outward-facing actions. Secrets are redacted from every tool output.
+
 ## Proposed, not final (confirm with the user before UI work starts)
 - UI: Svelte + Tailwind CSS.
 - Tray agent: Rust, sharing code with the Tauri core.
