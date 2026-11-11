@@ -7,6 +7,12 @@ Native Windows 11 desktop app that turns the user's PC into a self-hosted servic
 - Target: Windows 11 x64 only for the MVP.
 - VM layer: WSL2 with our own imported distro, not `podman machine`.
 - Container engine: Podman, decided by the spike step 1 rule on 2026-11-11. Both engines ran the upstream compose files unmodified; Podman won because it does not change the shared WSL `FORWARD` policy. See `.audit/spike-results.md`.
+- App naming, approved 2026-11-11, three levels:
+  1. Default: mDNS `.local` names, editable by the user, with a conflict check before every announcement.
+  2. Optional custom domain such as `home.arpa` or `ev.lan`. The user adds a wildcard DNS record pointing at the PC, Konak serves those names, and mDNS turns off.
+  3. Fallback: IP address and port.
+  No sub-path hosting (`konak.local/app`), because many apps break under it.
+- LAN exposure: the installer adds Private-profile allow rules and Public-profile block rules for Konak's programs, so the Windows "allow access" popup never appears. Konak detects a Public home network and offers a one-click switch to Private.
 - Kept from idea.md, unchallenged: Tauri shell, Caddy and the mDNS responder as native Windows processes, compose-format app definitions, remote access through a guided Tailscale install.
 
 ## Proposed, not final (confirm with the user before UI work starts)

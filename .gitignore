@@ -6,3 +6,6 @@ graphify-out/
 
 # Private notes, kept local only
 idea.md
+
+# Rust build output
+target/
