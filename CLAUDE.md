@@ -16,7 +16,7 @@ Native Windows 11 desktop app that turns the user's PC into a self-hosted servic
 - Kept from idea.md, unchallenged: Tauri shell, Caddy and the mDNS responder as native Windows processes, compose-format app definitions, remote access through a guided Tailscale install.
 
 ## Planned features
-- **MCP server** (requested 2026-11-11). It lets AI agents do configuration, installs and troubleshooting through Konak, instead of driving PowerShell or WSL directly. The scope below is proposed, not yet confirmed:
+- **MCP server** (requested 2026-11-11). It lets AI agents do configuration, installs and troubleshooting through Konak, instead of driving PowerShell or WSL directly. Scope confirmed 2026-11-11: read-only tools in the MVP, more tools added later as needed.
   - **Placement:** it runs inside the tray agent (Rust), reusing the same code paths as the UI.
   - **Transport:** local stdio only by default. Nothing is reachable from the LAN.
   - **Read-only tools first:** app list and status, logs, network profile and firewall check, mDNS name check, disk and RAM usage, and a "diagnose" tool that runs the known spike checks:
