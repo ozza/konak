@@ -1,0 +1,2 @@
+# Files are consumed inside Linux (WSL), so keep LF everywhere.
+* text=auto eol=lf
