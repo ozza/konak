@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+/* Semantic tokens; components use these names, never raw colors. Calm, Windows 11-like palette. */
+@theme {
+  --color-surface: #f6f6f4;
+  --color-panel: #ffffff;
+  --color-border: #dedcd6;
+  --color-text: #1d1d1b;
+  --color-muted: #5f5e59;
+  --color-accent: #1f5f8b;
+  --color-accent-strong: #174a6d;
+  --color-on-accent: #ffffff;
+  --color-ok: #2d6a3e;
+  --color-warn-bg: #fdf3e1;
+  --color-warn-border: #e2b766;
+  --color-error-bg: #fbeaea;
+  --color-error-border: #d98c8c;
+  --color-error: #9b2c2c;
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-surface: #1c1c1b;
+    --color-panel: #262624;
+    --color-border: #3a3936;
+    --color-text: #ecebe7;
+    --color-muted: #a9a79f;
+    --color-accent: #6aa9d6;
+    --color-accent-strong: #8cc0e4;
+    --color-on-accent: #0f1e29;
+    --color-ok: #7cc28e;
+    --color-warn-bg: #3a2f1c;
+    --color-warn-border: #8a6a2c;
+    --color-error-bg: #3a2222;
+    --color-error-border: #8a4444;
+    --color-error: #f0a3a3;
+  }
+}
+
+html,
+body {
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}

@@ -1,0 +1,66 @@
+{
+  "app": {
+    "tagline": "Your PC as a home server"
+  },
+  "install": {
+    "title": "Install Jellyfin",
+    "intro": "Konak sets up everything Jellyfin needs on this PC and makes it reachable from your phone and other devices at home.",
+    "button": "Install Jellyfin",
+    "retry": "Try again",
+    "running": "Installing… you can keep using your PC.",
+    "admin_note": "Windows will ask once for administrator permission."
+  },
+  "network": {
+    "public_title": "This network is set to Public",
+    "public_body": "Windows blocks devices at home from reaching this PC on Public networks. Switch it to Private if this is your home network.",
+    "switch_label": "Switch this network to Private"
+  },
+  "steps": {
+    "preflight": "Check this PC",
+    "admin": "Administrator setup (WSL, firewall)",
+    "reboot": "Restart Windows",
+    "distro": "Create Konak's Linux environment",
+    "systemd": "Configure the environment",
+    "engine": "Install the container engine",
+    "app": "Download and start Jellyfin",
+    "network": "Make it reachable on your network"
+  },
+  "state": {
+    "pending": "Waiting",
+    "running": "In progress",
+    "done": "Done",
+    "skipped": "Not needed",
+    "failed": "Failed"
+  },
+  "reboot": {
+    "title": "Restart needed",
+    "body": "Windows needs a restart to finish installing WSL. Konak continues on its own after you sign in again.",
+    "button": "Restart now"
+  },
+  "done": {
+    "title": "Jellyfin is ready",
+    "body": "Open this address from any device on your home network:",
+    "open": "Open Jellyfin",
+    "media": "Put your videos in the Konak\\Media folder in your user folder.",
+    "tray": "Konak keeps running in the system tray when you close this window."
+  },
+  "summary": {
+    "title": "Install measurements",
+    "time": "Total time",
+    "minutes": "{n} min",
+    "uac": "Administrator prompts",
+    "reboots": "Restarts",
+    "download": "Downloaded",
+    "mb": "{n} MB"
+  },
+  "errors": {
+    "title": "Something went wrong",
+    "uac_declined": "Administrator permission was declined. Konak needs it once to set up WSL and the firewall.",
+    "virtualization_off": "Virtualization is turned off in this PC's firmware (BIOS/UEFI). Turn it on, then try again.",
+    "details": "Details"
+  },
+  "tray": {
+    "open": "Open Konak",
+    "quit": "Quit Konak"
+  }
+}

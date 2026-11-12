@@ -1,0 +1,66 @@
+{
+  "app": {
+    "tagline": "Bilgisayarınız ev sunucunuz olsun"
+  },
+  "install": {
+    "title": "Jellyfin'i kur",
+    "intro": "Konak, Jellyfin'in ihtiyaç duyduğu her şeyi bu bilgisayara kurar ve evdeki telefonunuzdan ve diğer cihazlardan erişilebilir hale getirir.",
+    "button": "Jellyfin'i kur",
+    "retry": "Tekrar dene",
+    "running": "Kuruluyor… bilgisayarınızı kullanmaya devam edebilirsiniz.",
+    "admin_note": "Windows bir kez yönetici izni isteyecek."
+  },
+  "network": {
+    "public_title": "Bu ağ Ortak olarak ayarlı",
+    "public_body": "Windows, Ortak ağlarda evdeki cihazların bu bilgisayara ulaşmasını engeller. Bu sizin ev ağınızsa Özel olarak değiştirin.",
+    "switch_label": "Bu ağı Özel olarak değiştir"
+  },
+  "steps": {
+    "preflight": "Bilgisayarı kontrol et",
+    "admin": "Yönetici kurulumu (WSL, güvenlik duvarı)",
+    "reboot": "Windows'u yeniden başlat",
+    "distro": "Konak'ın Linux ortamını oluştur",
+    "systemd": "Ortamı yapılandır",
+    "engine": "Konteyner motorunu kur",
+    "app": "Jellyfin'i indir ve başlat",
+    "network": "Ağda erişilebilir yap"
+  },
+  "state": {
+    "pending": "Bekliyor",
+    "running": "Sürüyor",
+    "done": "Tamam",
+    "skipped": "Gerekmedi",
+    "failed": "Başarısız"
+  },
+  "reboot": {
+    "title": "Yeniden başlatma gerekiyor",
+    "body": "WSL kurulumunun tamamlanması için Windows'un yeniden başlaması gerekiyor. Tekrar oturum açtığınızda Konak kendiliğinden devam eder.",
+    "button": "Şimdi yeniden başlat"
+  },
+  "done": {
+    "title": "Jellyfin hazır",
+    "body": "Ev ağınızdaki herhangi bir cihazdan bu adresi açın:",
+    "open": "Jellyfin'i aç",
+    "media": "Videolarınızı kullanıcı klasörünüzdeki Konak\\Media klasörüne koyun.",
+    "tray": "Bu pencereyi kapattığınızda Konak sistem tepsisinde çalışmaya devam eder."
+  },
+  "summary": {
+    "title": "Kurulum ölçümleri",
+    "time": "Toplam süre",
+    "minutes": "{n} dk",
+    "uac": "Yönetici izni istekleri",
+    "reboots": "Yeniden başlatmalar",
+    "download": "İndirilen",
+    "mb": "{n} MB"
+  },
+  "errors": {
+    "title": "Bir sorun oluştu",
+    "uac_declined": "Yönetici izni reddedildi. Konak'ın WSL'i ve güvenlik duvarını kurmak için bu izne bir kez ihtiyacı var.",
+    "virtualization_off": "Bu bilgisayarın donanım ayarlarında (BIOS/UEFI) sanallaştırma kapalı. Açıp tekrar deneyin.",
+    "details": "Ayrıntılar"
+  },
+  "tray": {
+    "open": "Konak'ı aç",
+    "quit": "Konak'tan çık"
+  }
+}
