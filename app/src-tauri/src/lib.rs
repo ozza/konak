@@ -1,7 +1,9 @@
 pub mod apps;
 pub mod ca;
 pub mod catalog;
+pub mod diag;
 pub mod installer;
+pub mod mcp;
 pub mod paths;
 pub mod redact;
 pub mod services;
@@ -328,6 +330,12 @@ pub fn ui_text(key: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Headless MCP server on stdio, before Tauri so the single-instance plugin never sees it.
+    // Resources sit next to the exe, as Tauri's resource_dir has them on Windows.
+    if std::env::args().any(|a| a == "--mcp") {
+        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Into::into)).unwrap_or_default();
+        return mcp::serve(Paths::new(exe_dir));
+    }
     let autostart = std::env::args().any(|a| a == "--autostart");
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {

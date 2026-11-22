@@ -52,6 +52,25 @@ Caddyfile on 127.0.0.1:18080/18443 into that folder. Run `resources/bin/caddy.ex
 then `openssl s_client -connect 127.0.0.1:18443 -servername test.local -CAfile <dir>/ca/root.crt -verify_hostname test.local`
 must verify, and the same for `outside.example` must fail with "permitted subtree violation".
 
+## MCP server
+`konak.exe --mcp` runs a headless MCP server on stdin/stdout (official Rust SDK `rmcp`), so AI agents can inspect Konak instead of driving PowerShell or WSL themselves.
+- **Local stdio only.** No network listener; the client starts the process.
+- **Read-only.** No tool changes anything, and none starts the Konak distro: when it is stopped, tools say "distro not running".
+- **Redacted.** Every string in every reply passes through the same redactor as the UI.
+
+Register it with an MCP client, for example Claude Code:
+`claude mcp add konak -- "<install folder>\konak.exe" --mcp`. The per-user installer's default folder is `%LOCALAPPDATA%\Konak`.
+The dev environment variables above (`KONAK_HOME`, `KONAK_DISTRO`) apply to it too.
+
+| Tool | Returns |
+|---|---|
+| `konak_status` | Setup steps, distro state, installed apps with status, URL and containers, supervisor heartbeat age (stale after 60 s) |
+| `app_logs {app, lines?}` | Last log lines of an app, by id or name (default 200, at most 1000) |
+| `network_check` | LAN IP, its adapter and network category, Konak's firewall rules for `caddy.exe` and `mdns-responder.exe`, the owner of port 80 on the LAN IP |
+| `mdns_check {name}` | Name syntax, use by Konak, and whether another LAN device answers to `<name>.local` |
+| `resources` | Free space on the Konak drive, distro disk size, host RAM, memory and disk inside the distro when running |
+| `diagnose` | ok/warn/fail, evidence and a suggested fix for: shared-namespace `FORWARD` policy, stale netavark rules, distro keepalive, port 80 owner, LAN adapter choice |
+
 ## Uninstall (manual for now)
 1. Quit from the tray.
 2. Run the uninstaller from Windows Settings.
