@@ -52,10 +52,26 @@ Caddyfile on 127.0.0.1:18080/18443 into that folder. Run `resources/bin/caddy.ex
 then `openssl s_client -connect 127.0.0.1:18443 -servername test.local -CAfile <dir>/ca/root.crt -verify_hostname test.local`
 must verify, and the same for `outside.example` must fail with "permitted subtree violation".
 
-## Uninstall (manual for now)
-1. Quit from the tray.
-2. Run the uninstaller from Windows Settings.
-3. `wsl --unregister konak`
-4. Delete `%LOCALAPPDATA%\Konak`.
-5. Delete the `Konak` firewall rule group (admin).
-6. Delete the `HKCU\...\Run\Konak` value.
+## Uninstall
+Run the uninstaller from Windows Settings. Before it removes any file, it asks one question: also
+delete all Konak data? The default is No. Silent (`/S`) and passive runs take No without asking, and
+updates (`/UPDATE`) skip the cleanup. Then it runs `konak.exe --uninstall [--purge]`
+(`src-tauri/src/uninstall.rs`, hooked in through `src-tauri/windows/hooks.nsh`):
+
+- `--uninstall` stops a running Konak and the caddy, mdns-responder and wsl keepalive it started.
+  They are matched by exact executable path and command line, never by name. It then runs
+  `wsl --terminate` on Konak's distro, removes `HKCU\...\Run\Konak` only if it points at this install,
+  and removes the Konak root from the CurrentUser Root store if its thumbprint is there (Windows asks to
+  confirm). It also removes the `Konak` firewall group with one UAC prompt, only if such rules exist.
+- `--purge` also runs `wsl --unregister` on the distro and deletes the Konak home. The default home is
+  also the install folder, so the installed files are left for the uninstaller. A path guard refuses
+  any folder that holds the Media/Photos folders, the user profile, AppData or Temp, and any folder that
+  is neither the default home nor a folder with Konak's `state.json`.
+- The Media and Photos folders under the user profile are never deleted.
+- Without `--purge` the data, the distro and the CA stay in `%LOCALAPPDATA%\Konak`. The uninstaller
+  deletes only its own files there, so a reinstall picks up where it left off.
+- Every action is logged to `%TEMP%\konak-uninstall-<unix time>.log`, and a summary is printed on stdout.
+
+Dev runs use the same overrides as above (`KONAK_HOME`, `KONAK_DISTRO`, `KONAK_MEDIA`, `KONAK_PHOTOS`).
+With `KONAK_SKIP_ELEVATION=1`, the Run value, the certificate store and the firewall steps are
+skipped and logged as skipped.
