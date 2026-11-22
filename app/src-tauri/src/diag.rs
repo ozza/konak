@@ -345,12 +345,14 @@ pub fn forward_policy(f: &Facts) -> Check {
 }
 
 pub fn stale_netavark(f: &Facts) -> Check {
-    const FIX: &str = "In the Konak distro as root: `nft delete table inet netavark && podman network reload --all` (what konak-boot.service does at boot).";
+    // Never `nft delete table inet netavark`: every WSL distro shares one network namespace, so that
+    // also wipes the port forwards of any other Podman distro on the PC.
+    const FIX: &str = "In Konak's distro as root, run `podman network reload --all`: it rebuilds the port forwards of Konak's running containers and leaves other distros' rules alone. konak-boot.service runs the same reload at every boot of Konak's distro. Do not delete the shared `inet netavark` table.";
     let Some(out) = &f.netavark else { return check("stale_netavark", "warn", not_running(&f.distro), "Start Konak from the tray so the distro runs, then diagnose again.") };
     let containers = out.lines().filter(|l| l.starts_with("container ")).count();
     let closed: Vec<String> = out.lines().filter_map(|l| l.strip_prefix("probe ")).filter(|l| l.ends_with(" closed")).map(|l| l.trim_end_matches(" closed").replace(' ', ":")).collect();
     if containers > 0 && out.lines().any(|l| l == "table missing") {
-        return check("stale_netavark", "fail", format!("{containers} containers running but the inet netavark table is missing"), FIX);
+        return check("stale_netavark", "fail", format!("{containers} containers running but the shared inet netavark table is missing (another Podman distro may have flushed it)"), FIX);
     }
     if !closed.is_empty() {
         return check("stale_netavark", "warn", format!("published ports not answering inside the distro: {} (container still starting, or stale DNAT rules)", closed.join(", ")), FIX);
@@ -492,6 +494,7 @@ mod tests {
         assert!(checks.iter().all(|c| c.status == "fail" && !c.fix.is_empty()), "{checks:?}");
         assert!(checks[0].evidence.contains("-P FORWARD DROP"));
         assert!(checks[3].evidence.contains("httpd.exe"));
+        assert!(checks[1].fix.contains("podman network reload --all") && !checks[1].fix.contains("nft delete"));
 
         // Only a closed port while the table exists: a warning (container may still be starting).
         let mut f = facts();
