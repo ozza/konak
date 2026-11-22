@@ -91,6 +91,8 @@ updates (`/UPDATE`) skip the cleanup. Then it runs `konak.exe --uninstall [--pur
   deletes only its own files there, so a reinstall picks up where it left off.
 - Every action is logged to `%TEMP%\konak-uninstall-<unix time>.log`, and a summary is printed on stdout.
 
-Dev runs use the same overrides as above (`KONAK_HOME`, `KONAK_DISTRO`, `KONAK_MEDIA`, `KONAK_PHOTOS`).
+Dev runs use the same overrides as above (`KONAK_HOME`, `KONAK_DISTRO`, `KONAK_MEDIA`, `KONAK_PHOTOS`),
+but only together with `KONAK_SKIP_ELEVATION=1`; otherwise `--uninstall` ignores them and works on
+the default home and the `konak` distro.
 With `KONAK_SKIP_ELEVATION=1`, the Run value, the certificate store and the firewall steps are
 skipped and logged as skipped.

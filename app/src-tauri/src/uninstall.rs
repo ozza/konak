@@ -291,7 +291,7 @@ fn purge_home(paths: &Paths, exe: &Path) -> Result<String, String> {
 /// Runs the uninstall and returns the process exit code.
 pub fn run(opts: Opts) -> i32 {
     let exe = std::env::current_exe().unwrap_or_default();
-    let paths = Paths::new(exe.parent().unwrap_or(Path::new(".")).to_path_buf());
+    let paths = Paths::for_uninstall(exe.parent().unwrap_or(Path::new(".")).to_path_buf());
     let log_path = std::env::temp_dir().join(format!("konak-uninstall-{}.log", crate::installer::now()));
     let file = std::fs::File::create(&log_path).ok();
     let mut r = Report { file, log_path, summary: vec![], failed: false };
