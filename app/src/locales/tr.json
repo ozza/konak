@@ -37,9 +37,6 @@
     "button": "Şimdi yeniden başlat"
   },
   "done": {
-    "title": "Konak hazır",
-    "body": "Ev ağınızdaki herhangi bir cihazdan erişebileceğiniz Konak ana sayfası:",
-    "open": "Ana sayfayı aç",
     "tray": "Bu pencereyi kapattığınızda Konak sistem tepsisinde çalışmaya devam eder."
   },
   "summary": {
@@ -76,6 +73,108 @@
     "cert_body": "Bazı uygulamalar Konak'ın kendi sertifikasıyla HTTPS kullanır. Onlara güvenmek için bu sertifikayı her cihaza bir kez kurun.",
     "cert_link": "Konak sertifikasını indir",
     "cert_fingerprint": "SHA-256 parmak izi. Sertifikaya güvenmeden önce cihazınızın aynı değeri gösterdiğini kontrol edin:"
+  },
+  "panel": {
+    "home_link": "konak.local",
+    "home_link_label": "Konak ana sayfasını aç, konak.local",
+    "installed_title": "Uygulamalarınız",
+    "loading": "Yükleniyor…",
+    "empty": "Henüz kurulu uygulama yok. Kurmak için aşağıdan birini seçin.",
+    "status": {
+      "running": "Çalışıyor",
+      "starting": "Başlıyor",
+      "unhealthy": "Yanıt vermiyor",
+      "stopped": "Durdu",
+      "missing": "Konteynerler eksik",
+      "unknown": "Durum bilinmiyor"
+    },
+    "busy": {
+      "install": "Kuruluyor…",
+      "remove": "Kaldırılıyor…",
+      "rename": "Adı değiştiriliyor…",
+      "restart": "Yeniden başlatılıyor…"
+    },
+    "failed": {
+      "install": "Kurulum başarısız oldu.",
+      "remove": "Kaldırma başarısız oldu.",
+      "rename": "Ad değiştirme başarısız oldu.",
+      "restart": "Yeniden başlatma başarısız oldu."
+    },
+    "dismiss": "Kapat",
+    "actions": {
+      "open": "Aç",
+      "restart": "Yeniden başlat",
+      "logs": "Kayıtlar",
+      "rename": "Adını değiştir",
+      "remove": "Kaldır",
+      "group": "{name} işlemleri"
+    },
+    "rename": {
+      "label": "Ağdaki adı",
+      "hint": "Küçük harf, rakam ve tire kullanın. Uygulama yeni adrese taşınır.",
+      "save": "Kaydet",
+      "cancel": "Vazgeç"
+    },
+    "logs": {
+      "title": "Kayıtlar: {name}",
+      "refresh": "Yenile",
+      "close": "Kapat",
+      "loading": "Kayıtlar yükleniyor…",
+      "empty": "Henüz kayıt satırı yok.",
+      "note": "Son {n} satır. Parolalar ve anahtarlar gizlenir."
+    },
+    "remove": {
+      "title": "{name} kaldırılsın mı?",
+      "body": "Uygulama durur ve ağınızdan kaybolur.",
+      "keep_note": "Ayarları ve verileri saklanır; uygulamayı yeniden kurduğunuzda geri gelir.",
+      "delete_label": "Uygulamanın verilerini de sil",
+      "delete_warning": "Bu işlem uygulamanın ayarlarını, hesaplarını ve veritabanını kalıcı olarak siler. Geri alınamaz. Medya ve Fotoğraflar klasörlerinizdeki dosyalara dokunulmaz.",
+      "confirm": "Kaldır",
+      "confirm_delete": "Kaldır ve verileri sil",
+      "cancel": "Vazgeç"
+    },
+    "catalog": {
+      "title": "Uygulama ekle",
+      "empty": "Katalogdaki tüm uygulamalar kurulu.",
+      "ram": "En az {amount} bellek gerekir",
+      "https": "Güvenli bağlantı (HTTPS) kullanır. Her cihaza Konak sertifikasının bir kez kurulması gerekir, aşağıya bakın.",
+      "install": "Kur",
+      "install_label": "{name} uygulamasını kur"
+    },
+    "cert": {
+      "title": "Güvenli bağlantılar (HTTPS)",
+      "what": "Parola yöneticisi gibi bazı uygulamalar yalnızca güvenli bağlantıyla çalışır. Konak bu bağlantıları yalnızca bu bilgisayarda bulunan kendi sertifikasıyla imzalar. Sertifikayı bir cihaza bir kez kurduğunuzda o cihaz bu uygulamalara güvenir.",
+      "download": "Cihazda bu adresi açın veya kodu okutun:",
+      "qr_label": "{url} için QR kodu",
+      "fingerprint": "Sertifika parmak izi (SHA-256)",
+      "fingerprint_check": "Sertifika şifresiz bir bağlantıyla indirilir, bu yüzden kontrol edin: güvenmeden önce cihazınızın gösterdiği parmak izinin bu penceredekiyle birebir aynı olduğundan emin olun. Farklıysa kurmayın.",
+      "loading": "Sertifika hazırlanıyor…",
+      "steps_title": "Sertifikayı kurun",
+      "ios": "iPhone ve iPad",
+      "android": "Android",
+      "windows": "Başka bir Windows bilgisayar",
+      "macos": "Mac",
+      "this_pc_title": "Bu bilgisayar",
+      "this_pc_body": "Bu bilgisayardaki tarayıcıların da sertifikaya ihtiyacı var. Windows onaylamanızı ister.",
+      "trust": "Bu bilgisayarda güven",
+      "trusting": "Windows bekleniyor…",
+      "trusted": "Sertifikaya bu bilgisayarda güveniliyor.",
+      "trust_failed": "Sertifika eklenmedi.",
+      "ios_1": "Adresi Safari'de açın ve indirmeye izin verin.",
+      "ios_2": "Ayarlar'ı açın, Profil İndirildi'ye ve ardından Yükle'ye dokunun. Parmak izini Diğer Ayrıntılar altında karşılaştırın.",
+      "ios_3": "Ayarlar > Genel > Hakkında > Sertifika Güven Ayarları'na gidin ve Konak için tam güveni açın.",
+      "android_1": "Adresi açın ve dosyayı indirin.",
+      "android_2": "Ayarlar > Güvenlik > Şifreleme ve kimlik bilgileri > Sertifika yükle > CA sertifikası'nı açın ve dosyayı seçin. Menü adları telefon markasına göre değişir.",
+      "android_3": "Parmak izini Güvenilen kimlik bilgileri > Kullanıcı > Konak altında karşılaştırın.",
+      "windows_1": "Dosyayı indirin ve bir terminalde üzerinde certutil -dump çalıştırın. Cert Hash(sha256) satırını karşılaştırın.",
+      "windows_2": "Dosyayı açın, Sertifika Yükle > Geçerli Kullanıcı'yı seçin ve Güvenilen Kök Sertifika Yetkilileri deposuna yerleştirin.",
+      "macos_1": "Dosyayı indirip açın. Anahtar Zinciri Erişimi onu oturum açma anahtar zincirine ekler.",
+      "macos_2": "Sertifikayı Anahtar Zinciri Erişimi'nde açın ve SHA-256 parmak izini karşılaştırın.",
+      "macos_3": "Güven bölümünü açın ve Bu sertifikayı kullanırken seçeneğini Her Zaman Güven yapın."
+    },
+    "network": {
+      "public": "Bu ağ Ortak olarak ayarlı, bu yüzden evdeki diğer cihazlar uygulamalarınıza ulaşamaz. Bu sizin ev ağınızsa Windows ağ ayarlarından Özel olarak değiştirin."
+    }
   },
   "apps": {
     "jellyfin": {
