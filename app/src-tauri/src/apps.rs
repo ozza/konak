@@ -215,11 +215,12 @@ fn b64(s: &str) -> String {
 
 /// Where Caddy's requests come from, as the apps see them: Caddy connects to 127.0.0.1:<port> on
 /// Windows, WSL relays that to the distro's loopback, and Podman's port forward then masquerades it
-/// to the gateway of the app's compose network. Compose networks get /24s from Podman's first default
-/// subnet pool, and the WSL VM's network namespace is shared with other distros, so the exact /24
-/// varies (10.89.4.1 was measured); the pool is the narrowest stable choice. Apps trust
-/// X-Forwarded-For only from here, and Caddy overwrites that header with the real client address.
-pub const PROXY_NET: &str = "10.89.0.0/16";
+/// to the gateway of the app's compose network. Compose networks get /24s from Konak's own subnet
+/// pool (`default_subnet_pools` in engine.sh, kept off Podman's default 10.89.0.0/16 so it never
+/// collides with another Podman distro in the shared WSL network namespace); the exact /24 varies,
+/// so the pool is the narrowest stable choice. Apps trust X-Forwarded-For only from here, and Caddy
+/// overwrites that header with the real client address.
+pub const PROXY_NET: &str = "10.234.0.0/16";
 
 /// Values written to the app's `.env` by Konak (secrets and mounts are added by the script).
 /// `claimed_env` is added only once the app is claimed.
@@ -478,6 +479,34 @@ mod tests {
         assert!(again && after);
     }
 
+    /// Needs a throwaway distro provisioned with base.sh and engine.sh:
+    /// `KONAK_TEST_DISTRO=konak-<name> cargo test live_install -- --ignored --nocapture`.
+    /// Installs Forgejo through the real scripts, then checks that its network comes from Konak's
+    /// subnet pool and that Windows reaches it on 127.0.0.1.
+    #[test]
+    #[ignore]
+    fn live_install_uses_the_konak_subnet_pool() {
+        use std::io::{Read, Write};
+        let distro = std::env::var("KONAK_TEST_DISTRO").expect("set KONAK_TEST_DISTRO");
+        assert!(distro.starts_with("konak-") && distro != "konak-podman", "only a throwaway Konak distro");
+        let home = std::env::temp_dir().join(format!("konak-live-{distro}"));
+        let res = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+        let paths = Paths { home: home.clone(), distro: distro.clone(), bin: res.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let app = install(&paths, "forgejo").unwrap();
+        println!("installed as {}", app.name);
+        let script = "for n in $(podman inspect forgejo --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'); do\n  podman network inspect \"$n\" --format '{{range .Subnets}}{{.Subnet}} gw {{.Gateway}}{{end}}'\ndone\n";
+        let net = shell::distro_script(&distro, script, &[]);
+        println!("forgejo networks: {}", net.text.trim());
+        assert!(net.ok && net.text.trim().starts_with("10.234."), "{}", net.text);
+        let mut s = std::net::TcpStream::connect("127.0.0.1:47105").unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        write!(s, "GET /api/healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
+        let mut reply = String::new();
+        let _ = s.read_to_string(&mut reply);
+        println!("{}", reply.lines().next().unwrap_or(""));
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    }
+
     #[test]
     fn logs_are_merged_by_time_and_capped_in_total() {
         let text = "db-1      | 2026-11-22T10:00:01Z ready
@@ -527,7 +556,7 @@ c");
         m.env.insert("PUBLIC_URL".into(), "${KONAK_URL}/x".into());
         m.env.insert("HOST".into(), "${KONAK_HOST}".into());
         let env = env_lines(&m, "movies", true);
-        assert!(env.contains("KONAK_HOST=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=47101\nKONAK_PROXY_NET=10.89.0.0/16"));
+        assert!(env.contains("KONAK_HOST=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=47101\nKONAK_PROXY_NET=10.234.0.0/16"));
         assert!(env.contains("PUBLIC_URL=http://movies.local/x"));
         assert!(env.contains("HOST=movies.local"));
     }
@@ -535,9 +564,11 @@ c");
     #[test]
     fn apps_trust_only_the_proxy_net() {
         let env = |id: &str| env_lines(catalog::get(id).unwrap(), id, true);
-        assert!(env("nextcloud").lines().any(|l| l == "TRUSTED_PROXIES=10.89.0.0/16"));
+        assert!(env("nextcloud").lines().any(|l| l == "TRUSTED_PROXIES=10.234.0.0/16"));
         assert!(env("nextcloud").lines().any(|l| l == "FORWARDED_FOR_HEADERS=HTTP_X_FORWARDED_FOR"));
-        assert!(env("immich").lines().any(|l| l == "IMMICH_TRUSTED_PROXIES=10.89.0.0/16"));
+        assert!(env("immich").lines().any(|l| l == "IMMICH_TRUSTED_PROXIES=10.234.0.0/16"));
+        // The trusted range is the subnet pool engine.sh gives Konak's Podman.
+        assert!(include_str!("../scripts/engine.sh").contains(&format!("{{\"base\" = \"{PROXY_NET}\", \"size\" = 24}}")));
         let compose = |id: &str| catalog::get(id).unwrap().compose;
         assert!(compose("forgejo").contains("FORGEJO__security__REVERSE_PROXY_TRUSTED_PROXIES=${KONAK_PROXY_NET}"));
         assert!(compose("forgejo").contains("FORGEJO__security__REVERSE_PROXY_LIMIT=1"));

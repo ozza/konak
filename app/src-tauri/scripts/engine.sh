@@ -8,6 +8,19 @@ apt-get update -qq
 apt-get install -y -qq podman curl ca-certificates >/dev/null
 systemctl enable --now podman.socket
 
+# Konak's own subnet pool for compose networks. All WSL distros share one network namespace, so
+# another Podman install on the default pool (10.89.0.0/16) would get the same subnets and
+# aardvark-dns gateway addresses, and whichever starts second cannot start its containers.
+# 10.234.0.0/16 is a private range that home routers, VPNs, WSL and other container tools rarely
+# use. PROXY_NET in apps.rs must match it.
+mkdir -p /etc/containers/containers.conf.d
+cat > /etc/containers/containers.conf.d/konak.conf <<'EOF'
+[network]
+default_subnet_pools = [
+  {"base" = "10.234.0.0/16", "size" = 24},
+]
+EOF
+
 cd /tmp
 base="https://github.com/docker/compose/releases/download/$COMPOSE_VERSION"
 curl -fsSL -o docker-compose "$base/docker-compose-linux-x86_64"
