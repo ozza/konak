@@ -6,7 +6,7 @@
 
 use crate::paths::Paths;
 use crate::shell::{self, tail};
-use rcgen::{BasicConstraints, CertificateParams, CidrSubnet, DnType, GeneralSubtree, IsCa, KeyPair, KeyUsagePurpose, NameConstraints, SerialNumber};
+use rcgen::{BasicConstraints, CertificateParams, CidrSubnet, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, KeyPair, KeyUsagePurpose, NameConstraints, SerialNumber};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use time::{Duration, OffsetDateTime};
@@ -21,7 +21,10 @@ pub fn generate_root(common_name: &str) -> Result<Root, String> {
     let mut p = CertificateParams::default();
     p.distinguished_name.push(DnType::CommonName, common_name);
     p.distinguished_name.push(DnType::OrganizationName, "Konak");
-    p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    // Path length 1: Caddy's intermediate sits under the root, leaves under the intermediate, and
+    // nothing below that. serverAuth only: the root cannot vouch for code signing, mail and so on.
+    p.is_ca = IsCa::Ca(BasicConstraints::Constrained(1));
+    p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
     p.name_constraints = Some(NameConstraints {
         permitted_subtrees: vec![GeneralSubtree::DnsName("local".into())],
@@ -149,6 +152,12 @@ mod tests {
         // nameConstraints OID 2.5.29.30 and the permitted dNSName "local" ([2] IA5String).
         assert!(der.windows(5).any(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x1e]));
         assert!(der.windows(7).any(|w| w == [0x82, 0x05, b'l', b'o', b'c', b'a', b'l']));
+        // basicConstraints cA TRUE with pathLenConstraint 1, and EKU 2.5.29.37 with only serverAuth.
+        assert!(der.windows(8).any(|w| w == [0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x01]));
+        assert!(der.windows(5).any(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x25]));
+        let kp = [0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03]; // id-kp arc, 1.3.6.1.5.5.7.3
+        let purposes: Vec<u8> = der.windows(10).filter(|w| w[..9] == kp).map(|w| w[9]).collect();
+        assert_eq!(purposes, [1], "serverAuth and nothing else");
         let serial = x509_serial(&der).unwrap();
         assert_eq!(serial.len(), 16);
     }
