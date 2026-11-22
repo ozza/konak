@@ -82,6 +82,14 @@ pub fn caddyfile(ip: &str, routes: &[Route], f: &CaddyFiles) -> String {
             s += &format!("http://{host}:80 {{\n\tbind {ip}\n\tredir https://{host}{{uri}} permanent\n}}\n");
         }
     }
+    // Any other name (or the bare IP) gets a 404 instead of Caddy's empty 200. Caddy matches the
+    // named sites first. On 443 only when HTTPS sites exist, so the catch-all never brings up a
+    // listener of its own; it issues no certificate, so an unknown SNI still fails the handshake
+    // and only a request whose Host differs from its SNI reaches it.
+    s += &format!("http://:80 {{\n\tbind {ip}\n\trespond 404\n}}\n");
+    if f.ca.is_some() && routes.iter().any(|r| r.https) {
+        s += &format!("https://:443 {{\n\tbind {ip}\n\ttls internal\n\trespond 404\n}}\n");
+    }
     s
 }
 
@@ -296,11 +304,16 @@ mod tests {
         assert!(c.contains(&format!("http://jellyfin.local:80 {{\n\tbind 192.168.1.5\n{}", proxy(47101))));
         assert!(c.contains(&format!("https://vault.local:443 {{\n\tbind 192.168.1.5\n\ttls internal\n{}", proxy(47103))));
         assert!(c.contains("http://vault.local:80 {\n\tbind 192.168.1.5\n\tredir https://vault.local{uri} permanent\n}"));
+        assert!(c.ends_with("http://:80 {\n\tbind 192.168.1.5\n\trespond 404\n}\nhttps://:443 {\n\tbind 192.168.1.5\n\ttls internal\n\trespond 404\n}\n"));
         assert_eq!(c.matches('{').count(), c.matches('}').count());
 
         // Without the CA, HTTPS apps are dropped rather than served by some other CA.
         let no_ca = caddyfile("192.168.1.5", &routes, &CaddyFiles { storage: &storage, site: &site, ca: None });
         assert!(!no_ca.contains("pki") && !no_ca.contains("vault.local") && no_ca.contains("jellyfin.local"));
+        assert!(no_ca.contains("http://:80 {\n\tbind 192.168.1.5\n\trespond 404\n}") && !no_ca.contains(":443") && !no_ca.contains("tls internal"));
+        // No HTTPS app: no 443 listener at all.
+        let http_only = caddyfile("192.168.1.5", &routes[..1], &files);
+        assert!(http_only.contains("http://:80 {") && !http_only.contains(":443"));
     }
 
     #[test]
