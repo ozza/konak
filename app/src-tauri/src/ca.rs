@@ -9,6 +9,7 @@ use crate::shell::{self, tail};
 use rcgen::{BasicConstraints, CertificateParams, CidrSubnet, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, KeyPair, KeyUsagePurpose, NameConstraints, SerialNumber};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::Mutex;
 use time::{Duration, OffsetDateTime};
 
 pub struct Root {
@@ -60,8 +61,15 @@ fn restrict_to_user(path: &Path, dir: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Creates the root on first use. The key is written only after its folder is locked down.
+/// Serializes `ensure` between the callers in this process (the supervisor and UI commands), so two
+/// of them never generate two roots and leave a key next to the other one's certificate.
+static ENSURE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Creates the root on first use. The key is written only after its folder is locked down. Both
+/// files are written under temporary names and renamed into place, the certificate last: a root
+/// counts as present only when both files exist, so an interrupted run is simply redone.
 pub fn ensure(paths: &Paths) -> Result<(), String> {
+    let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if paths.ca_cert().exists() && paths.ca_key().exists() {
         return Ok(());
     }
@@ -70,9 +78,12 @@ pub fn ensure(paths: &Paths) -> Result<(), String> {
     restrict_to_user(&dir, true)?;
     let host = std::env::var("COMPUTERNAME").unwrap_or_default();
     let root = generate_root(format!("Konak Local CA {host}").trim())?;
-    std::fs::write(paths.ca_key(), &root.key_pem).map_err(|e| e.to_string())?;
-    restrict_to_user(&paths.ca_key(), false)?;
-    std::fs::write(paths.ca_cert(), &root.cert_pem).map_err(|e| e.to_string())?;
+    let (key_tmp, cert_tmp) = (dir.join("root.key.tmp"), dir.join("root.crt.tmp"));
+    std::fs::write(&key_tmp, &root.key_pem).map_err(|e| e.to_string())?;
+    restrict_to_user(&key_tmp, false)?;
+    std::fs::write(&cert_tmp, &root.cert_pem).map_err(|e| e.to_string())?;
+    std::fs::rename(&key_tmp, paths.ca_key()).map_err(|e| e.to_string())?;
+    std::fs::rename(&cert_tmp, paths.ca_cert()).map_err(|e| e.to_string())?;
     crate::log(paths, "ca: root created");
     Ok(())
 }
@@ -160,6 +171,25 @@ mod tests {
         assert_eq!(purposes, [1], "serverAuth and nothing else");
         let serial = x509_serial(&der).unwrap();
         assert_eq!(serial.len(), 16);
+    }
+
+    #[test]
+    fn concurrent_ensure_leaves_one_matching_root() {
+        let home = std::env::temp_dir().join(format!("konak-ca-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let paths = Paths { home: home.clone(), distro: String::new(), bin: home.clone(), media: home.clone(), photos: home.clone() };
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| ensure(&paths).unwrap());
+            }
+        });
+        let key = KeyPair::from_pem(&std::fs::read_to_string(paths.ca_key()).unwrap()).unwrap();
+        let der = cert_der(&paths).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(paths.ca_dir()).unwrap().flatten().map(|e| e.file_name()).collect();
+        let _ = std::fs::remove_dir_all(&home);
+        // The certificate carries the public half of the key on disk.
+        assert!(der.windows(key.public_key_raw().len()).any(|w| w == key.public_key_raw()));
+        assert_eq!(leftovers.len(), 2, "no temp files left: {leftovers:?}");
     }
 
     /// Manual check against the real Caddy (README "Checking the local CA"): writes a root (with the
