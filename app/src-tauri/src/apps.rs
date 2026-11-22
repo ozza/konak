@@ -376,16 +376,47 @@ pub fn restart(paths: &Paths, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Last `lines` log lines of all the app's containers (at most `MAX_LOG_LINES`), redacted.
+/// Last `lines` log lines of all the app's containers together (at most `MAX_LOG_LINES`), redacted.
 pub fn logs(paths: &Paths, id: &str, lines: u32) -> Result<String, String> {
     installed(paths, id)?;
     let n = lines.clamp(1, MAX_LOG_LINES);
-    let out = compose(paths, id, &format!("logs --no-color --tail {n}"));
+    // `--tail` counts per container, so the merged output is cut to `n` here.
+    let out = compose(paths, id, &format!("logs --no-color --timestamps --tail {n}"));
     let text = redacted(paths, &out.text);
     if !out.ok {
         return Err(format!("logs of {id} failed: {}", tail(&text, 6)));
     }
-    Ok(text)
+    Ok(last_lines(&text, n as usize))
+}
+
+/// Sort key of a `docker-compose logs --timestamps` line (`svc-1  | 2026-11-22T10:00:00.5Z msg`):
+/// the time with its fraction padded to nanoseconds, so keys compare as text. `None` without one.
+fn time_key(line: &str) -> Option<String> {
+    let ts = line.split_once("| ")?.1.split_whitespace().next()?;
+    let b = ts.as_bytes();
+    if b.len() < 19 || !b[0].is_ascii_digit() || b[10] != b'T' {
+        return None;
+    }
+    let frac: String = ts[19..].strip_prefix('.').unwrap_or("").chars().take_while(char::is_ascii_digit).collect();
+    Some(format!("{}{frac:0<9}", &ts[..19]))
+}
+
+/// Merges the containers' lines by time and keeps the last `n`. A line without a timestamp stays
+/// with the line before it; without any timestamps, this only keeps the last `n` lines.
+pub fn last_lines(text: &str, n: usize) -> String {
+    let mut key = String::new();
+    let mut lines: Vec<(String, &str)> = text
+        .lines()
+        .map(|l| {
+            if let Some(k) = time_key(l) {
+                key = k;
+            }
+            (key.clone(), l)
+        })
+        .collect();
+    lines.sort_by(|a, b| a.0.cmp(&b.0));
+    lines[lines.len().saturating_sub(n)..].iter().map(|(_, l)| *l).collect::<Vec<_>>().join("
+")
 }
 
 #[cfg(test)]
@@ -445,6 +476,28 @@ mod tests {
         assert_eq!(clash.as_deref(), Some("name_in_use"));
         assert_eq!(saved_clash.as_deref(), Some("name_in_use"));
         assert!(again && after);
+    }
+
+    #[test]
+    fn logs_are_merged_by_time_and_capped_in_total() {
+        let text = "db-1      | 2026-11-22T10:00:01Z ready
+db-1      | 2026-11-22T10:00:03.5Z checkpoint
+server-1  | 2026-11-22T10:00:00.25Z start
+server-1  |   continued line
+server-1  | 2026-11-22T10:00:01.000000001Z listening
+server-1  | 2026-11-22T10:00:04Z request";
+        assert_eq!(
+            last_lines(text, 10).lines().map(|l| l.rsplit(' ').next().unwrap()).collect::<Vec<_>>(),
+            ["start", "line", "ready", "listening", "checkpoint", "request"]
+        );
+        assert_eq!(last_lines(text, 2), "db-1      | 2026-11-22T10:00:03.5Z checkpoint
+server-1  | 2026-11-22T10:00:04Z request");
+        // No timestamps (an older engine): still at most n lines.
+        assert_eq!(last_lines("a
+b
+c", 2), "b
+c");
+        assert_eq!(last_lines("", 5), "");
     }
 
     #[test]
