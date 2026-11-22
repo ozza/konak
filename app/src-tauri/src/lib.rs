@@ -6,6 +6,7 @@ pub mod paths;
 pub mod redact;
 pub mod services;
 pub mod shell;
+pub mod uninstall;
 
 use installer::{Flow, Preflight, State, STEPS};
 use paths::Paths;
@@ -328,6 +329,10 @@ pub fn ui_text(key: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Headless modes run before the Tauri builder, so the single-instance plugin cannot swallow them.
+    if let Some(opts) = uninstall::parse(&std::env::args().collect::<Vec<_>>()) {
+        std::process::exit(uninstall::run(opts));
+    }
     let autostart = std::env::args().any(|a| a == "--autostart");
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
