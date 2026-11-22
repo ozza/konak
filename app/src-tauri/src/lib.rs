@@ -8,6 +8,7 @@ pub mod paths;
 pub mod redact;
 pub mod services;
 pub mod shell;
+pub mod uninstall;
 
 use installer::{Flow, Preflight, State, STEPS};
 use paths::Paths;
@@ -330,8 +331,11 @@ pub fn ui_text(key: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Headless MCP server on stdio, before Tauri so the single-instance plugin never sees it.
-    // Resources sit next to the exe, as Tauri's resource_dir has them on Windows.
+    // Headless modes run before the Tauri builder, so the single-instance plugin cannot swallow them.
+    if let Some(opts) = uninstall::parse(&std::env::args().collect::<Vec<_>>()) {
+        std::process::exit(uninstall::run(opts));
+    }
+    // Headless MCP server on stdio. Resources sit next to the exe, as Tauri's resource_dir has them on Windows.
     if std::env::args().any(|a| a == "--mcp") {
         let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Into::into)).unwrap_or_default();
         return mcp::serve(Paths::new(exe_dir));

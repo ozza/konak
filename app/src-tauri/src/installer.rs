@@ -126,7 +126,7 @@ pub fn wsl_installed() -> bool {
     shell::run("wsl.exe", &["--version"]).ok
 }
 
-fn distro_exists(distro: &str) -> bool {
+pub fn distro_exists(distro: &str) -> bool {
     let out = shell::run("wsl.exe", &["-l", "-q"]);
     out.ok && out.text.lines().any(|l| l.trim() == distro)
 }

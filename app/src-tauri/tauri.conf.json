@@ -32,7 +32,8 @@
       "nsis": {
         "installMode": "currentUser",
         "languages": ["English", "Turkish"],
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "./windows/hooks.nsh"
       }
     },
     "resources": {
