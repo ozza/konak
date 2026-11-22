@@ -42,9 +42,11 @@ printf '%s\n' "$compose" > compose.yml
 
 export DOCKER_HOST=unix:///run/podman/podman.sock
 docker-compose -p "$id" up -d --quiet-pull --remove-orphans
+# A wall-clock deadline: a black-holed port makes every curl hang until its own timeout.
 healthy=0
-for _ in $(seq 1 150); do
-  if curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$port$health"; then healthy=1; break; fi
+deadline=$((SECONDS + 300))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  if curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$port$health"; then healthy=1; break; fi
   sleep 2
 done
 [ "$healthy" = 1 ] || { echo "$id did not answer on $health within 5 minutes" >&2; exit 1; }
