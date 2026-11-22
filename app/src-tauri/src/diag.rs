@@ -287,7 +287,140 @@ podman ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null | while IFS='|' read -r n
     if timeout 3 bash -c "</dev/tcp/127.0.0.1/$hp" 2>/dev/null; then echo "probe $name $hp open"; else echo "probe $name $hp closed"; fi
   done
 done
+if ids=$(podman network ls --no-trunc --format '{{.ID}}' 2>/dev/null); then echo '## podman networks'; printf '%s\n' "$ids"; fi
+if j=$(nft -j list table inet netavark 2>/dev/null) && [ "${j#\{}" != "$j" ]; then echo '## nft json'; printf '%s\n' "$j"
+elif t=$(nft -a list table inet netavark 2>/dev/null); then echo '## nft text'; printf '%s\n' "$t"; fi
 "#;
+
+/// The lines of `NETAVARK_SH` output under `## <name>`, up to the next `## ` line.
+fn section<'a>(out: &'a str, name: &str) -> Option<Vec<&'a str>> {
+    let mut lines = out.lines().skip_while(|l| l.strip_prefix("## ") != Some(name));
+    lines.next()?;
+    Some(lines.take_while(|l| !l.starts_with("## ")).collect())
+}
+
+/// One rule of the `inet netavark` table, reduced to what the stale-rule check needs.
+#[derive(Debug, PartialEq, Default)]
+pub struct NftRule {
+    pub chain: String,
+    pub handle: Option<u64>,
+    pub dports: Vec<u16>,
+    pub jump: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Default)]
+pub struct NftTable {
+    pub chains: Vec<String>,
+    pub rules: Vec<NftRule>,
+}
+
+/// `nft [-a] list table inet netavark`. Handles are read when `-a` printed them (`# handle N`).
+pub fn parse_nft_text(text: &str) -> NftTable {
+    let mut t = NftTable::default();
+    let mut chain: Option<String> = None;
+    for line in text.lines() {
+        let (body, handle) = match line.split_once("# handle ") {
+            Some((b, h)) => (b.trim(), h.trim().parse().ok()),
+            None => (line.trim(), None),
+        };
+        if let Some(name) = body.strip_prefix("chain ").and_then(|r| r.strip_suffix('{')) {
+            t.chains.push(name.trim().to_string());
+            chain = Some(name.trim().to_string());
+            continue;
+        }
+        if body == "}" {
+            chain = None;
+            continue;
+        }
+        let Some(c) = &chain else { continue };
+        if body.is_empty() || body.starts_with("type ") {
+            continue;
+        }
+        let words: Vec<&str> = body.split_whitespace().collect();
+        let dports = words.windows(2).filter(|w| w[0] == "dport").filter_map(|w| w[1].parse().ok()).collect();
+        let jump = words.windows(2).find(|w| w[0] == "jump" || w[0] == "goto").map(|w| w[1].to_string());
+        t.rules.push(NftRule { chain: c.clone(), handle, dports, jump });
+    }
+    t
+}
+
+/// `nft -j list table inet netavark` (libnftables JSON); `None` when it is not that.
+pub fn parse_nft_json(text: &str) -> Option<NftTable> {
+    let v: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let mut t = NftTable::default();
+    for item in v.get("nftables")?.as_array()? {
+        if let Some(name) = item.get("chain").and_then(|c| c.get("name")).and_then(|n| n.as_str()) {
+            t.chains.push(name.to_string());
+        }
+        let Some(r) = item.get("rule") else { continue };
+        let mut rule = NftRule { chain: r.get("chain").and_then(|c| c.as_str()).unwrap_or_default().to_string(), handle: r.get("handle").and_then(|h| h.as_u64()), ..Default::default() };
+        for e in r.get("expr").and_then(|e| e.as_array()).into_iter().flatten() {
+            if let Some(m) = e.get("match").filter(|m| m.pointer("/left/payload/field").and_then(|f| f.as_str()) == Some("dport")) {
+                rule.dports.extend(m.get("right").and_then(|p| p.as_u64()).and_then(|p| u16::try_from(p).ok()));
+            }
+            if let Some(target) = e.get("jump").or(e.get("goto")).and_then(|j| j.get("target")).and_then(|t| t.as_str()) {
+                rule.jump = Some(target.to_string());
+            }
+        }
+        t.rules.push(rule);
+    }
+    Some(t)
+}
+
+/// The network id prefix netavark puts in its chain names: `nv_<first 8 hex of the id>_<subnet>`.
+fn nv_id(chain: &str) -> Option<&str> {
+    let id = chain.strip_prefix("nv_")?.split('_').next()?;
+    (id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit())).then_some(id)
+}
+
+/// A netavark network unknown to Konak's Podman that still forwards one of Konak's catalog ports.
+#[derive(Debug, PartialEq)]
+pub struct ForeignNetwork {
+    pub id: String,
+    pub ports: Vec<u16>,
+    /// Rules outside the network's own chains that jump into them, as (chain, handle).
+    pub jumps: Vec<(String, Option<u64>)>,
+    pub chains: Vec<String>,
+}
+
+/// Spike finding N1: a removed distro's network keeps a DNAT jump for a Konak port in
+/// `NETAVARK-HOSTPORT-DNAT`; when it sits before Konak's own jump, that port is black-holed.
+pub fn foreign_konak_dnat(t: &NftTable, known: &[&str]) -> Vec<ForeignNetwork> {
+    let mut found: Vec<ForeignNetwork> = vec![];
+    for r in t.rules.iter().filter(|r| r.chain == "NETAVARK-HOSTPORT-DNAT") {
+        let Some(id) = r.jump.as_deref().and_then(nv_id) else { continue };
+        let ports: Vec<u16> = r.dports.iter().copied().filter(|p| crate::catalog::PORT_RANGE.contains(p)).collect();
+        if ports.is_empty() || known.iter().any(|k| k.starts_with(id)) {
+            continue;
+        }
+        match found.iter_mut().find(|n| n.id == id) {
+            Some(n) => n.ports.extend(ports),
+            None => found.push(ForeignNetwork { id: id.to_string(), ports, jumps: vec![], chains: vec![] }),
+        }
+    }
+    for n in &mut found {
+        let own = |c: &str| nv_id(c) == Some(n.id.as_str());
+        n.chains = t.chains.iter().filter(|c| own(c)).cloned().collect();
+        n.jumps = t.rules.iter().filter(|r| !own(&r.chain) && r.jump.as_deref().is_some_and(own)).map(|r| (r.chain.clone(), r.handle)).collect();
+        n.ports.sort_unstable();
+        n.ports.dedup();
+    }
+    found
+}
+
+/// Commands that delete only this network's jumps, then its chains.
+fn foreign_fix(n: &ForeignNetwork) -> String {
+    let mut cmds: Vec<String> = n
+        .jumps
+        .iter()
+        .map(|(chain, handle)| match handle {
+            Some(h) => format!("nft delete rule inet netavark {chain} handle {h}"),
+            None => format!("nft delete rule inet netavark {chain} handle <N> (N: the handle of its `jump nv_{}_…` rule in `nft -a list chain inet netavark {chain}`)", n.id),
+        })
+        .collect();
+    cmds.extend(n.chains.iter().map(|c| format!("nft delete chain inet netavark {c}")));
+    cmds.join("; ")
+}
 
 pub const RESOURCES_SH: &str = "free -m\necho ---\ndf -P -m /\n";
 
@@ -348,16 +481,31 @@ pub fn stale_netavark(f: &Facts) -> Check {
     // Never `nft delete table inet netavark`: every WSL distro shares one network namespace, so that
     // also wipes the port forwards of any other Podman distro on the PC.
     const FIX: &str = "In Konak's distro as root, run `podman network reload --all`: it rebuilds the port forwards of Konak's running containers and leaves other distros' rules alone. konak-boot.service runs the same reload at every boot of Konak's distro. Do not delete the shared `inet netavark` table.";
-    let Some(out) = &f.netavark else { return check("stale_netavark", "warn", not_running(&f.distro), "Start Konak from the tray so the distro runs, then diagnose again.") };
-    let containers = out.lines().filter(|l| l.starts_with("container ")).count();
-    let closed: Vec<String> = out.lines().filter_map(|l| l.strip_prefix("probe ")).filter(|l| l.ends_with(" closed")).map(|l| l.trim_end_matches(" closed").replace(' ', ":")).collect();
-    if containers > 0 && out.lines().any(|l| l == "table missing") {
+    let Some(all) = &f.netavark else { return check("stale_netavark", "warn", not_running(&f.distro), "Start Konak from the tray so the distro runs, then diagnose again.") };
+    // The probe lines come before the first `## ` section (networks, rule dump).
+    let probes: Vec<&str> = all.lines().take_while(|l| !l.starts_with("## ")).collect();
+    let containers = probes.iter().filter(|l| l.starts_with("container ")).count();
+    let closed: Vec<String> = probes.iter().filter_map(|l| l.strip_prefix("probe ")).filter(|l| l.ends_with(" closed")).map(|l| l.trim_end_matches(" closed").replace(' ', ":")).collect();
+    if containers > 0 && probes.contains(&"table missing") {
         return check("stale_netavark", "fail", format!("{containers} containers running but the shared inet netavark table is missing (another Podman distro may have flushed it)"), FIX);
+    }
+    // Only when Konak's Podman listed its networks: otherwise every network would look foreign.
+    if let Some(known) = section(all, "podman networks") {
+        let table = section(all, "nft json").and_then(|j| parse_nft_json(&j.join("\n"))).or_else(|| section(all, "nft text").map(|t| parse_nft_text(&t.join("\n"))));
+        let foreign = table.map(|t| foreign_konak_dnat(&t, &known)).unwrap_or_default();
+        if !foreign.is_empty() {
+            let evidence = foreign.iter().map(|n| format!("network {} is not one of Konak's Podman networks (left by a removed distro?) but still forwards port {}", n.id, n.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join("; ");
+            let fix = format!(
+                "In Konak's distro as root, delete only that network's rules: {}. Then run `podman network reload --all`. Do not delete the shared `inet netavark` table.",
+                foreign.iter().map(foreign_fix).collect::<Vec<_>>().join("; ")
+            );
+            return Check { check: "stale_netavark", status: "fail", evidence, fix };
+        }
     }
     if !closed.is_empty() {
         return check("stale_netavark", "warn", format!("published ports not answering inside the distro: {} (container still starting, or stale DNAT rules)", closed.join(", ")), FIX);
     }
-    let open = out.lines().filter(|l| l.ends_with(" open")).count();
+    let open = probes.iter().filter(|l| l.ends_with(" open")).count();
     check("stale_netavark", "ok", format!("{containers} running containers, {open} published ports answering"), "")
 }
 
@@ -501,6 +649,86 @@ mod tests {
         f.netavark = Some("table present\ncontainer immich\nprobe immich 47102 closed\n".into());
         assert_eq!(stale_netavark(&f).status, "warn");
         assert!(stale_netavark(&f).evidence.contains("immich:47102"));
+    }
+
+    // Run 3 of the spike (finding N1): the dead konak-subnettest network 872ecb86 still forwards
+    // 47105, in front of the forgejo network 655c363a of Konak's own Podman.
+    const N1_BEFORE: &str = include_str!("testdata/nft-stale-before-forgejo.txt");
+    const N1_AFTER: &str = include_str!("testdata/nft-after-stale-cleanup.txt");
+    const FORGEJO_NET: &str = "655c363a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6";
+    const DEFAULT_NET: &str = "2f259bab93aaaaa2542ba43ef33eb990d0999ee1b9924b557b7be53c0b7a1bb9";
+
+    #[test]
+    fn parses_the_n1_dump_and_finds_the_foreign_network() {
+        let t = parse_nft_text(N1_BEFORE);
+        assert!(t.chains.contains(&"nv_872ecb86_10_234_0_0_nm24_dnat".to_string()));
+        let dnat: Vec<&NftRule> = t.rules.iter().filter(|r| r.chain == "NETAVARK-HOSTPORT-DNAT").collect();
+        assert_eq!(dnat.len(), 3);
+        assert_eq!(dnat[0], &NftRule { chain: "NETAVARK-HOSTPORT-DNAT".into(), handle: None, dports: vec![47105], jump: Some("nv_872ecb86_10_234_0_0_nm24_dnat".into()) });
+
+        let found = foreign_konak_dnat(&t, &[FORGEJO_NET, DEFAULT_NET]);
+        assert_eq!(
+            found,
+            vec![ForeignNetwork {
+                id: "872ecb86".into(),
+                ports: vec![47105],
+                jumps: vec![("POSTROUTING".into(), None), ("NETAVARK-HOSTPORT-DNAT".into(), None)],
+                chains: vec!["nv_872ecb86_10_234_0_0_nm24".into(), "nv_872ecb86_10_234_0_0_nm24_dnat".into()],
+            }]
+        );
+        // The spike's 8000 forward (network ff1513d2, another distro) is outside Konak's ports.
+        // Without forgejo's network known, its 47105 forward is foreign too.
+        assert_eq!(foreign_konak_dnat(&t, &[DEFAULT_NET]).iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["872ecb86", "655c363a"]);
+        // After the manual cleanup nothing is left to report.
+        assert!(foreign_konak_dnat(&parse_nft_text(N1_AFTER), &[DEFAULT_NET]).is_empty());
+    }
+
+    #[test]
+    fn reads_handles_from_text_and_json() {
+        let text = "table inet netavark { # handle 7\n\tchain NETAVARK-HOSTPORT-DNAT { # handle 4\n\t\tip daddr 127.0.0.1 tcp dport 47105 jump nv_872ecb86_10_234_0_0_nm24_dnat # handle 105\n\t}\n\tchain POSTROUTING { # handle 2\n\t\ttype nat hook postrouting priority srcnat; policy accept;\n\t\tip saddr 10.234.0.0/24 jump nv_872ecb86_10_234_0_0_nm24 # handle 103\n\t}\n\tchain nv_872ecb86_10_234_0_0_nm24 { # handle 50\n\t\tip daddr 10.234.0.0/24 accept # handle 51\n\t}\n\tchain nv_872ecb86_10_234_0_0_nm24_dnat { # handle 52\n\t\tip daddr 127.0.0.1 tcp dport 47105 dnat ip to 10.234.0.2:3000 # handle 53\n\t}\n}\n";
+        let json = r#"{"nftables": [{"metainfo": {"version": "1.0.9", "json_schema_version": 1}},
+            {"table": {"family": "inet", "name": "netavark", "handle": 7}},
+            {"chain": {"family": "inet", "table": "netavark", "name": "NETAVARK-HOSTPORT-DNAT", "handle": 4}},
+            {"chain": {"family": "inet", "table": "netavark", "name": "POSTROUTING", "handle": 2, "type": "nat", "hook": "postrouting", "prio": 100, "policy": "accept"}},
+            {"chain": {"family": "inet", "table": "netavark", "name": "nv_872ecb86_10_234_0_0_nm24", "handle": 50}},
+            {"chain": {"family": "inet", "table": "netavark", "name": "nv_872ecb86_10_234_0_0_nm24_dnat", "handle": 52}},
+            {"rule": {"family": "inet", "table": "netavark", "chain": "NETAVARK-HOSTPORT-DNAT", "handle": 105, "expr": [
+                {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.1"}},
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 47105}},
+                {"jump": {"target": "nv_872ecb86_10_234_0_0_nm24_dnat"}}]}},
+            {"rule": {"family": "inet", "table": "netavark", "chain": "POSTROUTING", "handle": 103, "expr": [
+                {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": {"prefix": {"addr": "10.234.0.0", "len": 24}}}},
+                {"jump": {"target": "nv_872ecb86_10_234_0_0_nm24"}}]}},
+            {"rule": {"family": "inet", "table": "netavark", "chain": "nv_872ecb86_10_234_0_0_nm24", "handle": 51, "expr": [{"accept": null}]}},
+            {"rule": {"family": "inet", "table": "netavark", "chain": "nv_872ecb86_10_234_0_0_nm24_dnat", "handle": 53, "expr": [
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 47105}},
+                {"dnat": {"family": "ip", "addr": "10.234.0.2", "port": 3000}}]}}]}"#;
+        let from_json = parse_nft_json(json).unwrap();
+        assert_eq!(parse_nft_text(text), from_json);
+        assert_eq!(parse_nft_json("table inet netavark {"), None);
+        let found = foreign_konak_dnat(&from_json, &[DEFAULT_NET]);
+        assert_eq!(found[0].jumps, vec![("NETAVARK-HOSTPORT-DNAT".to_string(), Some(105)), ("POSTROUTING".to_string(), Some(103))]);
+        assert_eq!(
+            foreign_fix(&found[0]),
+            "nft delete rule inet netavark NETAVARK-HOSTPORT-DNAT handle 105; nft delete rule inet netavark POSTROUTING handle 103; nft delete chain inet netavark nv_872ecb86_10_234_0_0_nm24; nft delete chain inet netavark nv_872ecb86_10_234_0_0_nm24_dnat"
+        );
+    }
+
+    #[test]
+    fn stale_netavark_reports_a_foreign_network_as_fail() {
+        let mut f = facts();
+        let probes = "table present\ncontainer forgejo\nprobe forgejo 47105 closed\n";
+        f.netavark = Some(format!("{probes}## podman networks\n{FORGEJO_NET}\n{DEFAULT_NET}\n## nft text\n{N1_BEFORE}"));
+        let c = stale_netavark(&f);
+        assert_eq!(c.status, "fail");
+        assert!(c.evidence.contains("network 872ecb86") && c.evidence.contains("47105") && !c.evidence.contains("655c363a"), "{c:?}");
+        assert!(c.fix.contains("nft delete chain inet netavark nv_872ecb86_10_234_0_0_nm24_dnat") && !c.fix.contains("655c363a") && !c.fix.contains("delete table"), "{c:?}");
+        // Without Konak's network list, nothing is called foreign: back to the closed-port warning.
+        f.netavark = Some(format!("{probes}## nft text\n{N1_BEFORE}"));
+        assert_eq!(stale_netavark(&f).status, "warn");
+        // After the cleanup: ok.
+        f.netavark = Some(format!("table present\ncontainer forgejo\nprobe forgejo 47105 open\n## podman networks\n{FORGEJO_NET}\n## nft text\n{N1_AFTER}"));
+        assert_eq!(stale_netavark(&f).status, "ok");
     }
 
     #[test]
