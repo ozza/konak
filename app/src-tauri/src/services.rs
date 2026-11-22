@@ -86,9 +86,10 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// The static `konak.local` page: installed apps with links, and the root certificate download with
-/// its SHA-256 fingerprint (`None` when the CA is unavailable).
-pub fn home_page(routes: &[Route], fingerprint: Option<&str>, text: &dyn Fn(&str) -> String) -> String {
+/// The static `konak.local` page: installed apps with links, and the root certificate download. It is
+/// served over plain HTTP, so it never shows the fingerprint (a LAN attacker could change both the
+/// file and the number); it points the user at the Konak window on the PC instead.
+pub fn home_page(routes: &[Route], text: &dyn Fn(&str) -> String) -> String {
     let items: String = if routes.is_empty() {
         format!("<li>{}</li>", esc(&text("home.no_apps")))
     } else {
@@ -100,18 +101,17 @@ pub fn home_page(routes: &[Route], fingerprint: Option<&str>, text: &dyn Fn(&str
             })
             .collect()
     };
-    let fp = fingerprint.map(|f| format!("<p>{}<br><code>{}</code></p>", esc(&text("home.cert_fingerprint")), esc(f))).unwrap_or_default();
     format!(
         "<!doctype html>\n<html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
 <title>Konak</title><style>body{{font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;line-height:1.5}}\
-li{{margin:.4rem 0}}span{{color:#666;font-family:monospace;margin-left:.5rem}}code{{word-break:break-all}}</style></head><body>\
-<h1>Konak</h1><h2>{}</h2><ul>{}</ul><h2>{}</h2><p>{}</p><p><a href=\"/konak-root.crt\" download>{}</a></p>{}</body></html>\n",
+li{{margin:.4rem 0}}span{{color:#666;font-family:monospace;margin-left:.5rem}}</style></head><body>\
+<h1>Konak</h1><h2>{}</h2><ul>{}</ul><h2>{}</h2><p>{}</p><p><a href=\"/konak-root.crt\" download>{}</a></p><p>{}</p></body></html>\n",
         esc(&text("home.apps")),
         items,
         esc(&text("home.cert_title")),
         esc(&text("home.cert_body")),
         esc(&text("home.cert_link")),
-        fp,
+        esc(&text("home.cert_check")),
     )
 }
 
@@ -192,8 +192,7 @@ impl Supervisor {
         let site = p.site_dir();
         let _ = std::fs::create_dir_all(&site);
         let _ = std::fs::create_dir_all(p.caddy_storage());
-        let fp = if https { crate::ca::fingerprint(p).ok() } else { None };
-        let _ = std::fs::write(site.join("index.html"), home_page(routes, fp.as_deref(), &crate::ui_text));
+        let _ = std::fs::write(site.join("index.html"), home_page(routes, &crate::ui_text));
         if https {
             let _ = std::fs::copy(p.ca_cert(), site.join("konak-root.crt"));
         }
@@ -309,16 +308,17 @@ mod tests {
     #[test]
     fn home_page_lists_apps_escaped() {
         let text = |k: &str| if k == "apps.jellyfin.name" { "Jelly<fin>".to_string() } else { k.to_string() };
-        let page = home_page(&[route("jellyfin", 47101, false)], None, &text);
+        let page = home_page(&[route("jellyfin", 47101, false)], &text);
         assert!(page.contains("<a href=\"http://jellyfin.local\">Jelly&lt;fin&gt;</a>"));
         assert!(page.contains("/konak-root.crt"));
-        assert!(!page.contains("home.cert_fingerprint"));
-        assert!(home_page(&[], None, &text).contains("home.no_apps"));
+        assert!(home_page(&[], &text).contains("home.no_apps"));
     }
 
     #[test]
-    fn home_page_shows_the_fingerprint_escaped() {
-        let page = home_page(&[], Some("AB:CD<x>"), &|k: &str| k.to_string());
-        assert!(page.contains("<p>home.cert_fingerprint<br><code>AB:CD&lt;x&gt;</code></p>"));
+    fn home_page_has_no_fingerprint_and_points_at_the_pc() {
+        // Plain HTTP: a fingerprint here would come from the same attacker as the file.
+        let page = home_page(&[], &|k: &str| k.to_string());
+        assert!(!page.contains("fingerprint") && !page.contains("<code>"));
+        assert!(page.contains("<p>home.cert_check</p>"));
     }
 }

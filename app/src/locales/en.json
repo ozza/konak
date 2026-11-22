@@ -72,7 +72,7 @@
     "cert_title": "Secure connections",
     "cert_body": "Some apps use HTTPS with Konak's own certificate. Install this certificate once on each device to trust them.",
     "cert_link": "Download Konak's certificate",
-    "cert_fingerprint": "SHA-256 fingerprint. Check that your device shows the same value before you trust the certificate:"
+    "cert_check": "Before you trust it, compare its SHA-256 fingerprint with the one shown in the Konak window on the PC. If you cannot see that window, do not install the certificate."
   },
   "panel": {
     "home_link": "konak.local",
@@ -170,15 +170,15 @@
       "trusted": "The certificate is trusted on this PC.",
       "trust_failed": "The certificate was not added.",
       "ios_1": "Open the address in Safari and allow the download.",
-      "ios_2": "Open Settings, tap Profile Downloaded, then Install. Compare the fingerprint under More Details.",
+      "ios_2": "Open Settings, tap Profile Downloaded, then Install. Under More Details, compare the fingerprint with the one in the Konak window on the PC. If it differs, do not install it.",
       "ios_3": "Go to Settings > General > About > Certificate Trust Settings and turn on full trust for Konak.",
       "android_1": "Open the address and download the file.",
       "android_2": "Open Settings > Security > Encryption & credentials > Install a certificate > CA certificate, then pick the file. Menu names vary by phone maker.",
-      "android_3": "Compare the fingerprint under Trusted credentials > User > Konak.",
-      "windows_1": "Download the file and run certutil -dump on it in a terminal. Compare the Cert Hash(sha256) line.",
+      "android_3": "Under Trusted credentials > User > Konak, compare the fingerprint with the one in the Konak window on the PC. If it differs, remove the certificate.",
+      "windows_1": "Download the file and run certutil -dump on it in a terminal. Compare the Cert Hash(sha256) line with the fingerprint in the Konak window on the PC. If it differs, do not install it.",
       "windows_2": "Open the file, choose Install Certificate > Current User, and place it in Trusted Root Certification Authorities.",
       "macos_1": "Download the file and open it. Keychain Access adds it to the login keychain.",
-      "macos_2": "Open the certificate in Keychain Access and compare the SHA-256 fingerprint.",
+      "macos_2": "Open the certificate in Keychain Access and compare the SHA-256 fingerprint with the one in the Konak window on the PC. If it differs, delete it.",
       "macos_3": "Expand Trust and set When using this certificate to Always Trust."
     },
     "network": {

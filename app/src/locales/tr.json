@@ -72,7 +72,7 @@
     "cert_title": "Güvenli bağlantılar",
     "cert_body": "Bazı uygulamalar Konak'ın kendi sertifikasıyla HTTPS kullanır. Onlara güvenmek için bu sertifikayı her cihaza bir kez kurun.",
     "cert_link": "Konak sertifikasını indir",
-    "cert_fingerprint": "SHA-256 parmak izi. Sertifikaya güvenmeden önce cihazınızın aynı değeri gösterdiğini kontrol edin:"
+    "cert_check": "Güvenmeden önce SHA-256 parmak izini bilgisayardaki Konak penceresinde gösterilenle karşılaştırın. O pencereyi göremiyorsanız sertifikayı kurmayın."
   },
   "panel": {
     "home_link": "konak.local",
@@ -170,15 +170,15 @@
       "trusted": "Sertifikaya bu bilgisayarda güveniliyor.",
       "trust_failed": "Sertifika eklenmedi.",
       "ios_1": "Adresi Safari'de açın ve indirmeye izin verin.",
-      "ios_2": "Ayarlar'ı açın, Profil İndirildi'ye ve ardından Yükle'ye dokunun. Parmak izini Diğer Ayrıntılar altında karşılaştırın.",
+      "ios_2": "Ayarlar'ı açın, Profil İndirildi'ye ve ardından Yükle'ye dokunun. Diğer Ayrıntılar altındaki parmak izini bilgisayardaki Konak penceresindekiyle karşılaştırın. Farklıysa kurmayın.",
       "ios_3": "Ayarlar > Genel > Hakkında > Sertifika Güven Ayarları'na gidin ve Konak için tam güveni açın.",
       "android_1": "Adresi açın ve dosyayı indirin.",
       "android_2": "Ayarlar > Güvenlik > Şifreleme ve kimlik bilgileri > Sertifika yükle > CA sertifikası'nı açın ve dosyayı seçin. Menü adları telefon markasına göre değişir.",
-      "android_3": "Parmak izini Güvenilen kimlik bilgileri > Kullanıcı > Konak altında karşılaştırın.",
-      "windows_1": "Dosyayı indirin ve bir terminalde üzerinde certutil -dump çalıştırın. Cert Hash(sha256) satırını karşılaştırın.",
+      "android_3": "Güvenilen kimlik bilgileri > Kullanıcı > Konak altındaki parmak izini bilgisayardaki Konak penceresindekiyle karşılaştırın. Farklıysa sertifikayı kaldırın.",
+      "windows_1": "Dosyayı indirin ve bir terminalde üzerinde certutil -dump çalıştırın. Cert Hash(sha256) satırını bilgisayardaki Konak penceresindeki parmak iziyle karşılaştırın. Farklıysa kurmayın.",
       "windows_2": "Dosyayı açın, Sertifika Yükle > Geçerli Kullanıcı'yı seçin ve Güvenilen Kök Sertifika Yetkilileri deposuna yerleştirin.",
       "macos_1": "Dosyayı indirip açın. Anahtar Zinciri Erişimi onu oturum açma anahtar zincirine ekler.",
-      "macos_2": "Sertifikayı Anahtar Zinciri Erişimi'nde açın ve SHA-256 parmak izini karşılaştırın.",
+      "macos_2": "Sertifikayı Anahtar Zinciri Erişimi'nde açın ve SHA-256 parmak izini bilgisayardaki Konak penceresindekiyle karşılaştırın. Farklıysa silin.",
       "macos_3": "Güven bölümünü açın ve Bu sertifikayı kullanırken seçeneğini Her Zaman Güven yapın."
     },
     "network": {
