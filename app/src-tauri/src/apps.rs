@@ -335,7 +335,16 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
         return Err("name_taken_on_lan".into());
     }
     if let Err(e) = run_install(paths, m, new_name, app.claimed, m.post_rename.as_deref()) {
-        let _ = run_install(paths, m, &app.name, app.claimed, m.post_rename.as_deref());
+        if let Err(back) = run_install(paths, m, &app.name, app.claimed, m.post_rename.as_deref()) {
+            // The containers may still carry the new name: render the saved one again at next start.
+            crate::log(paths, &format!("rename of {id}: restoring {} failed: {back}", app.name));
+            let _ = update_state(paths, |s| {
+                if !s.rerender.iter().any(|r| r == id) {
+                    s.rerender.push(id.to_string());
+                }
+            });
+            return Err(format!("{e} (could not restore the old name)"));
+        }
         return Err(e);
     }
     update_state(paths, |s| {
