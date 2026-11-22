@@ -2,6 +2,8 @@
 //! removes Konak's files. It undoes what Konak set up outside its install folder:
 //! - stops a running Konak instance and the caddy / mdns-responder / wsl keepalive it started,
 //!   matched by exact executable path and command line, never by name alone;
+//! - stops the containers in Konak's distro, so netavark removes its rules from the shared WSL
+//!   network namespace;
 //! - `wsl --terminate` of Konak's distro, the autostart Run value, the root certificate in the
 //!   current user's store and the `Konak` firewall rule group (one UAC prompt).
 //!
@@ -215,6 +217,37 @@ fn distro_cmd(paths: &Paths, verb: &str) -> Result<String, String> {
     }
 }
 
+/// Run as root in Konak's distro before it is terminated. Waits for boot to finish first (a stopped
+/// distro is started by this very call, and konak-boot.service then starts the containers), so no
+/// container comes up after the stop.
+const STOP_CONTAINERS_SH: &str = r#"set -uo pipefail
+timeout 120 systemctl is-system-running --wait >/dev/null 2>&1 || true
+command -v podman >/dev/null || { echo 'podman not installed, nothing to stop'; exit 0; }
+if out=$(podman stop --all --time 15 2>&1); then echo "podman stop --all: $(printf '%s' "$out" | grep -c .) containers stopped"; else echo "podman stop --all failed: $out"; exit 1; fi
+if out=$(podman network prune -f 2>&1); then echo "podman network prune: $(printf '%s' "$out" | grep -c .) networks removed"; else echo "podman network prune failed: $out"; exit 1; fi
+"#;
+
+/// Stops every container in Konak's distro so netavark removes its own port forwards, chains and
+/// bridges from the WSL network namespace, which all distros share and which outlives the distro.
+/// Terminating or unregistering it with containers running leaves them behind, and a dead
+/// network's DNAT jump then black-holes the same port for a later install (spike finding N1).
+fn stop_containers(paths: &Paths) -> Result<String, String> {
+    let d = &paths.distro;
+    if !own_distro(d) {
+        return Err(format!("refusing to touch distro '{d}', it is not a Konak distro"));
+    }
+    if !crate::installer::distro_exists(d) {
+        return Ok(format!("distro '{d}' not found, nothing to do"));
+    }
+    let out = shell::distro_script(d, STOP_CONTAINERS_SH, &[]);
+    let text = out.text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ");
+    if out.ok {
+        Ok(text)
+    } else {
+        Err(text)
+    }
+}
+
 /// The Run value is Konak's when it is `"<this exe>" --autostart`, as `register_autostart` writes it.
 pub fn run_value_owned(reg_query: &str, exe: &Path) -> bool {
     reg_query
@@ -361,6 +394,8 @@ pub fn run(opts: Opts) -> i32 {
 
     let o = stop_processes(&paths, &exe);
     r.step("processes", o);
+    let o = stop_containers(&paths);
+    r.step("containers", o);
     let o = distro_cmd(&paths, "--terminate");
     r.step("distro terminate", o);
     if skip_elevation() {
@@ -509,5 +544,8 @@ mod tests {
     fn only_konak_distros() {
         assert!(own_distro("konak") && own_distro("konak-nonexistent"));
         assert!(!own_distro("Ubuntu-24.04") && !own_distro("docker-desktop") && !own_distro("konakx") && !own_distro(""));
+        // Refused before any wsl.exe call.
+        let p = |d: &str| Paths { home: PathBuf::from(r"C:\k"), distro: d.into(), bin: PathBuf::from(r"C:\k\bin"), media: PathBuf::new(), photos: PathBuf::new() };
+        assert!(stop_containers(&p("Ubuntu-24.04")).unwrap_err().contains("not a Konak distro"));
     }
 }
