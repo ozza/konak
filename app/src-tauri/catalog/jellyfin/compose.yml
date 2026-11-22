@@ -1,0 +1,15 @@
+# From the Jellyfin docs compose example; image pinned by digest. Konak fills KONAK_PORT and
+# MEDIA_DIR in .env and binds the port to 127.0.0.1 so the LAN reaches Jellyfin only through Caddy.
+services:
+  jellyfin:
+    image: docker.io/jellyfin/jellyfin@sha256:7da5184caa38c553f219f6772476540081f392a68049e2b68c923f6daf877f8e
+    container_name: jellyfin
+    ports:
+      - 127.0.0.1:${KONAK_PORT}:8096/tcp
+    volumes:
+      - ./config:/config
+      - ./cache:/cache
+      - type: bind
+        source: ${MEDIA_DIR}
+        target: /media
+    restart: unless-stopped
