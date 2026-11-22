@@ -124,19 +124,40 @@ fn stop_processes_of(paths: &Paths, exe: &Path, with_konak: bool) -> Result<Stri
         return Ok("nothing running".into());
     }
     let mut stopped = vec![];
+    let mut gone = vec![];
     let mut errors = vec![];
     for (pid, what) in targets {
-        let out = shell::run("taskkill.exe", &["/PID", &pid.to_string(), "/F"]);
-        if out.ok {
-            stopped.push(format!("{what} ({pid})"));
-        } else {
-            errors.push(format!("{what} ({pid}): {}", tail(&out.text, 1)));
+        match kill(pid) {
+            Ok(true) => stopped.push(format!("{what} ({pid})")),
+            Ok(false) => gone.push(format!("{what} ({pid})")),
+            Err(e) => errors.push(format!("{what} ({pid}): {e}")),
         }
     }
-    if errors.is_empty() {
-        Ok(format!("stopped {}", stopped.join(", ")))
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    let mut parts = vec![];
+    if !stopped.is_empty() {
+        parts.push(format!("stopped {}", stopped.join(", ")));
+    }
+    if !gone.is_empty() {
+        parts.push(format!("already gone {}", gone.join(", ")));
+    }
+    Ok(parts.join("; "))
+}
+
+/// `Ok(true)` when taskkill stopped the process, `Ok(false)` when it was already gone. Killing
+/// Konak first lets its job object take the children down, so their own taskkill then finds
+/// nothing; that is success. Checked by asking whether the pid is still alive, not by parsing
+/// taskkill's (localized) message.
+fn kill(pid: u32) -> Result<bool, String> {
+    let out = shell::run("taskkill.exe", &["/PID", &pid.to_string(), "/F"]);
+    if out.ok {
+        Ok(true)
+    } else if crate::diag::process_image(pid).is_none() {
+        Ok(false)
     } else {
-        Err(errors.join("; "))
+        Err(tail(&out.text, 1))
     }
 }
 
@@ -468,6 +489,20 @@ mod tests {
         ];
         let got = owned_processes(&procs, 1, &exe, &paths, wsl);
         assert_eq!(got, vec![(2, "konak"), (3, "caddy"), (4, "mdns-responder"), (5, "wsl keepalive")]);
+    }
+
+    #[test]
+    fn killing_a_process_that_is_already_gone_succeeds() {
+        // A live process this test started: stopped.
+        let mut live = shell::hidden("ping.exe").args(["-n", "30", "127.0.0.1"]).spawn().unwrap();
+        assert_eq!(kill(live.id()), Ok(true));
+        let _ = live.wait();
+        // One that has exited (as the job object leaves Konak's children): already gone, not an error.
+        let mut done = shell::hidden("cmd.exe").args(["/c", "exit 0"]).spawn().unwrap();
+        let pid = done.id();
+        done.wait().unwrap();
+        drop(done);
+        assert_eq!(kill(pid), Ok(false));
     }
 
     #[test]
