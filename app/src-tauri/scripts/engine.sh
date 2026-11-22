@@ -1,5 +1,5 @@
 # Container engine: Podman with its API socket, plus the official docker-compose binary (pinned and
-# checksum-verified), plus Konak's boot unit that clears stale netavark rules and restarts containers.
+# checksum-verified), plus Konak's boot unit that restarts containers and rebuilds their netavark rules.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 COMPOSE_VERSION=v5.7.1
@@ -18,14 +18,16 @@ rm -f docker-compose docker-compose.sha256
 
 cat > /etc/systemd/system/konak-boot.service <<'EOF'
 [Unit]
-Description=Konak: clear stale netavark rules, then start restartable containers
+Description=Konak: start restartable containers, then rebuild their netavark rules
 After=network-online.target podman.socket
 [Service]
 Type=oneshot
 RemainAfterExit=true
-ExecStartPre=-/usr/sbin/nft delete table inet netavark
 ExecStart=/usr/bin/podman start --all --filter restart-policy=always
 ExecStart=/usr/bin/podman start --all --filter restart-policy=unless-stopped
+# Rebuild rules for Konak's own networks only. Dropping the whole `inet netavark` table would also
+# wipe the port forwards of any other Podman distro, since all WSL distros share one network namespace.
+ExecStartPost=-/usr/bin/podman network reload --all
 [Install]
 WantedBy=default.target
 EOF
