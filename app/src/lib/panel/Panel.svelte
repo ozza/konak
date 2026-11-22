@@ -12,7 +12,13 @@
   import RemoveDialog from "./RemoveDialog.svelte";
 
   const POLL_MS = 5000;
-  let { networkCategory }: { networkCategory: string | null } = $props();
+  let {
+    networkCategory,
+    firewallMissing,
+    repairing,
+    repairError,
+  }: { networkCategory: string | null; firewallMissing: boolean; repairing: boolean; repairError: string | null } = $props();
+  let repairFailure = $derived(repairError ? errorText(repairError) : null);
 
   let apps = $state<AppInfo[] | null>(null);
   let catalog = $state<Manifest[]>([]);
@@ -51,6 +57,8 @@
   onMount(() => {
     invoke<Manifest[]>("list_catalog").then((c) => (catalog = c));
     refresh();
+    // Network category and firewall rules can change while Konak is not running; both reads are cheap.
+    invoke("refresh_network");
     // Poll only while the window is visible; the tray keeps Konak running when it is hidden.
     const timer = setInterval(() => document.visibilityState === "visible" && refresh(), POLL_MS);
     const onVisible = () => document.visibilityState === "visible" && refresh();
@@ -78,6 +86,32 @@
       <span class="font-mono">{t("panel.home_link")}</span><span aria-hidden="true">↗</span>
     </button>
   </header>
+
+  {#if firewallMissing}
+    <section class="flex flex-col gap-2 rounded-md border border-warn-border bg-warn-bg p-3 text-sm" aria-labelledby="repair-title">
+      <h2 id="repair-title" class="font-semibold">{t("panel.repair.title")}</h2>
+      <p>{t("panel.repair.body")}</p>
+      {#if repairFailure}
+        <div class="text-error" role="alert">
+          <p class="font-medium">{t("panel.repair.failed")}</p>
+          {#if repairFailure.message}
+            <p>{repairFailure.message}</p>
+          {:else}
+            <details>
+              <summary class="cursor-pointer">{t("errors.details")}</summary>
+              <pre class="mt-2 text-xs whitespace-pre-wrap">{repairFailure.details}</pre>
+            </details>
+          {/if}
+        </div>
+      {/if}
+      <div>
+        <button type="button" class="btn-primary" disabled={repairing} onclick={() => invoke("repair_network")}>
+          {repairing ? t("panel.repair.running") : t("panel.repair.button")}
+        </button>
+      </div>
+      {#if repairing}<p class="sr-only" role="status">{t("panel.repair.running")}</p>{/if}
+    </section>
+  {/if}
 
   {#if networkCategory === "Public"}
     <p class="rounded-md border border-warn-border bg-warn-bg p-3 text-sm" role="status">{t("panel.network.public")}</p>

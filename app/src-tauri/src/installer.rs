@@ -216,7 +216,7 @@ pub fn register_autostart() {
 }
 
 /// One UAC prompt for everything that needs admin. Returns whether a reboot is required.
-fn elevate(paths: &Paths, state: &mut State, enable_wsl: bool, set_private_interface: i64) -> Result<bool, String> {
+fn elevate(paths: &Paths, enable_wsl: bool, set_private_interface: i64) -> Result<bool, String> {
     let dir = paths.home.join("scripts");
     let _ = std::fs::create_dir_all(&dir);
     let script = dir.join("elevated.ps1");
@@ -238,8 +238,6 @@ fn elevate(paths: &Paths, state: &mut State, enable_wsl: bool, set_private_inter
         q(&script),
         q(&params)
     );
-    state.uac_prompts += 1;
-    state.save(paths);
     let out = shell::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &cmd]);
     if out.code == Some(1223) {
         return Err("uac_declined".into());
@@ -251,6 +249,34 @@ fn elevate(paths: &Paths, state: &mut State, enable_wsl: bool, set_private_inter
     }
     crate::log(paths, &format!("wsl --install output: {}", tail(v["wsl_output"].as_str().unwrap_or(""), 4)));
     Ok(v["reboot_required"].as_bool().unwrap_or(false))
+}
+
+/// Whether Konak's firewall rules for the current caddy.exe and mdns-responder.exe are missing
+/// (read-only; the same facts as the MCP network check). A reinstall that kept the data or a moved
+/// install loses them, and nothing re-adds them on its own. `false` in dev runs, which never have
+/// rules, and when the rules cannot be read.
+pub fn firewall_missing(paths: &Paths) -> bool {
+    if skip_elevation() {
+        return false;
+    }
+    match crate::diag::net_facts(paths, None) {
+        Ok(f) => rules_missing(&f.firewall),
+        Err(e) => {
+            crate::log(paths, &format!("firewall check failed: {e}"));
+            false
+        }
+    }
+}
+
+pub fn rules_missing(firewall: &[crate::diag::FwProgram]) -> bool {
+    firewall.is_empty() || firewall.iter().any(|p| !p.private_allow())
+}
+
+/// Re-adds the firewall rules through the same elevated step as the setup (one UAC prompt). Only
+/// ever run when the user clicks "Repair network access" in the panel.
+pub fn repair_network(paths: &Paths) -> Result<(), String> {
+    crate::log(paths, "repairing the firewall rules");
+    elevate(paths, false, 0).map(|_| ())
 }
 
 fn http_status(ip: &str, host: &str) -> Option<u16> {
@@ -282,7 +308,9 @@ pub fn run_step(step: &str, paths: &Paths, state: &mut State, pre: &Preflight, s
                 state.skipped.push(step.into());
                 return Ok(Flow::Next);
             }
-            if elevate(paths, state, enable_wsl, iface)? {
+            state.uac_prompts += 1;
+            state.save(paths);
+            if elevate(paths, enable_wsl, iface)? {
                 state.reboot_pending = true;
                 state.boot_time = boot_time();
             }
@@ -432,5 +460,15 @@ mod tests {
         assert_eq!(r.err().as_deref(), Some("state_unreadable"));
         assert!(text.contains("forg"), "the damaged file is left as it is");
         assert!(State::from_json("").is_err());
+    }
+
+    #[test]
+    fn firewall_rules_count_only_when_private_allow_exists() {
+        use crate::diag::{FwProgram, FwRule};
+        let rule = |action: &str, profile: &str| FwRule { name: "r".into(), enabled: true, action: action.into(), profile: profile.into(), direction: "Inbound".into() };
+        let prog = |rules| FwProgram { program: "caddy.exe".into(), rules };
+        assert!(rules_missing(&[]));
+        assert!(rules_missing(&[prog(vec![rule("Allow", "Private")]), prog(vec![rule("Block", "Public")])]));
+        assert!(!rules_missing(&[prog(vec![rule("Allow", "Private"), rule("Block", "Public")]), prog(vec![rule("Allow", "Private")])]));
     }
 }

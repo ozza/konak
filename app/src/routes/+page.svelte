@@ -15,6 +15,9 @@
     done: boolean;
     url: string | null;
     network_category: string | null;
+    firewall_missing: boolean;
+    repairing: boolean;
+    repair_error: string | null;
     summary: { minutes: number; uac_prompts: number; reboots: number; download_mb: number } | null;
   };
 
@@ -37,7 +40,12 @@
 </script>
 
 {#if status?.done}
-  <Panel networkCategory={status.network_category} />
+  <Panel
+    networkCategory={status.network_category}
+    firewallMissing={status.firewall_missing}
+    repairing={status.repairing}
+    repairError={status.repair_error}
+  />
   <footer class="mx-auto flex max-w-4xl flex-col gap-4 px-4 pb-6 sm:px-6">
     <p class="text-sm text-muted">{t("done.tray")}</p>
     {#if status.summary}

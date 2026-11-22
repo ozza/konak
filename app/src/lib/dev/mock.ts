@@ -37,6 +37,8 @@ const logs = [
   "jellyfin  | [10:43:00] [INF] API_KEY=[redacted] loaded from environment",
 ].join("\n");
 
+let firewallMissing = q.has("firewall");
+let repairing = false;
 const steps = ["preflight", "admin", "reboot", "distro", "systemd", "engine", "network"];
 const status = () => ({
   steps: steps.map((id) => ({ id, state: q.has("setup") ? "pending" : "done" })),
@@ -46,6 +48,9 @@ const status = () => ({
   done: !q.has("setup"),
   url: "http://konak.local",
   network_category: q.has("public") ? "Public" : "Private",
+  firewall_missing: firewallMissing,
+  repairing,
+  repair_error: null,
   summary: q.has("setup") ? null : { minutes: 11.4, uac_prompts: 1, reboots: 1, download_mb: 612 },
 });
 
@@ -64,6 +69,17 @@ export function installMock() {
       switch (cmd) {
         case "get_status":
           return status();
+        case "refresh_network":
+          emit("status", status());
+          return null;
+        case "repair_network":
+          repairing = true;
+          emit("status", status());
+          await wait(1500);
+          repairing = false;
+          firewallMissing = false;
+          emit("status", status());
+          return null;
         case "list_catalog":
           return catalog;
         case "list_apps":

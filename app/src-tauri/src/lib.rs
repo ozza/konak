@@ -38,6 +38,10 @@ struct Runtime {
     failed: Option<String>,
     error: Option<String>,
     preflight: Option<Preflight>,
+    /// Konak's firewall rules are missing (checked when the panel loads); the panel offers a repair.
+    firewall_missing: bool,
+    repairing: bool,
+    repair_error: Option<String>,
 }
 
 struct Konak {
@@ -71,6 +75,9 @@ struct Status {
     done: bool,
     url: Option<String>,
     network_category: Option<String>,
+    firewall_missing: bool,
+    repairing: bool,
+    repair_error: Option<String>,
     summary: Option<Summary>,
 }
 
@@ -105,6 +112,9 @@ fn build_status(k: &Konak) -> Status {
         done: s.done,
         url: s.done.then(|| format!("http://{}.local", services::HOME_NAME)),
         network_category: rt.preflight.as_ref().map(|p| p.network_category.clone()),
+        firewall_missing: rt.firewall_missing,
+        repairing: rt.repairing,
+        repair_error: rt.repair_error.clone(),
         summary: s.done.then(|| Summary {
             minutes: (s.finished_unix.saturating_sub(s.started_unix)) as f64 / 60.0,
             uac_prompts: s.uac_prompts,
@@ -177,6 +187,12 @@ fn run_all(app: AppHandle, set_private: bool) {
         let result = installer::run_step(step, &paths, &mut state, &pre, set_private, &k.sup);
         log(&paths, &format!("step {step}: {:.1}s", t0.elapsed().as_secs_f64()));
         state.save(&paths);
+        // The admin step may have switched the network to Private; the panel's notice follows.
+        if step == "admin" && result.is_ok() {
+            if let Ok(p) = installer::preflight(&paths) {
+                k.rt.lock().unwrap().preflight = Some(p);
+            }
+        }
         match result {
             Ok(Flow::Next) => emit(&app),
             Ok(Flow::Pause) => break,
@@ -225,6 +241,53 @@ fn restart_pc(k: tauri::State<Konak>) -> Result<(), String> {
     State::load(&k.paths).may_restart_pc()?;
     shell::run("shutdown.exe", &["/r", "/t", "0"]);
     Ok(())
+}
+
+/// Re-reads the network category and, once set up, whether Konak's firewall rules exist. Both are
+/// read-only; the panel calls this when it loads, and the result arrives as a `status` event.
+#[tauri::command]
+async fn refresh_network(app: AppHandle) -> Result<(), String> {
+    let handle = app.clone();
+    blocking(app, move |p| {
+        let pre = installer::preflight(p).ok();
+        let missing = State::load(p).done && installer::firewall_missing(p);
+        let k = handle.state::<Konak>();
+        let mut rt = k.rt.lock().unwrap();
+        if pre.is_some() {
+            rt.preflight = pre;
+        }
+        rt.firewall_missing = missing;
+        drop(rt);
+        emit(&handle);
+    })
+    .await
+}
+
+/// "Repair network access" in the panel: the setup's elevated step again, so one UAC prompt, only
+/// ever on this click. Progress and result arrive as `status` events.
+#[tauri::command]
+fn repair_network(app: AppHandle) {
+    let k = app.state::<Konak>();
+    {
+        let mut rt = k.rt.lock().unwrap();
+        if rt.repairing {
+            return;
+        }
+        rt.repairing = true;
+        rt.repair_error = None;
+    }
+    emit(&app);
+    std::thread::spawn(move || {
+        let k = app.state::<Konak>();
+        let result = installer::repair_network(&k.paths);
+        let missing = installer::firewall_missing(&k.paths);
+        let mut rt = k.rt.lock().unwrap();
+        rt.repairing = false;
+        rt.firewall_missing = missing;
+        rt.repair_error = result.err();
+        drop(rt);
+        emit(&app);
+    });
 }
 
 /// Progress of a long app operation, emitted as `app-progress`: `state` is running, done or failed.
@@ -394,6 +457,8 @@ pub fn run() {
                 resume = true;
             }
             if state.done {
+                // An uninstall that kept the data removed the Run value; put it back (not in dev runs).
+                installer::register_autostart();
                 let (paths, sup) = (paths.clone(), Arc::clone(&sup));
                 std::thread::spawn(move || {
                     // A Caddy left from an earlier run would keep port 80 and serve its old config.
@@ -469,6 +534,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             start_install,
+            refresh_network,
+            repair_network,
             restart_pc,
             list_catalog,
             list_apps,

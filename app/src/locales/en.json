@@ -76,6 +76,13 @@
     "cert_check": "Before you trust it, compare its SHA-256 fingerprint with the one shown in the Konak window on the PC. If you cannot see that window, do not install the certificate."
   },
   "panel": {
+    "repair": {
+      "title": "Other devices may not reach Konak",
+      "body": "Konak's firewall rules are missing, for example after Konak was reinstalled. Without them, Windows blocks your apps for other devices or asks for permission. Repairing needs administrator permission once.",
+      "button": "Repair network access",
+      "running": "Repairing network access…",
+      "failed": "Repair did not finish."
+    },
     "home_link": "konak.local",
     "home_link_label": "Open Konak's home page, konak.local",
     "installed_title": "Your apps",
