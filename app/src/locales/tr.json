@@ -80,6 +80,22 @@
     "jellyfin": {
       "name": "Jellyfin",
       "description": "Filmlerinizi, dizilerinizi ve müziğinizi her cihazda izleyin."
+    },
+    "immich": {
+      "name": "Immich",
+      "description": "Telefonunuzdaki fotoğraf ve videoları yedekleyin, hepsine tek yerden göz atın."
+    },
+    "nextcloud": {
+      "name": "Nextcloud",
+      "description": "Dosyalarınız, takviminiz ve kişileriniz için cihazlarınız arasında eşitlenen kendi bulutunuz."
+    },
+    "vaultwarden": {
+      "name": "Vaultwarden",
+      "description": "Bitwarden uygulamaları ve tarayıcı eklentileriyle çalışan bir parola yöneticisi."
+    },
+    "forgejo": {
+      "name": "Forgejo",
+      "description": "Kendi Git depolarınızı barındırın; konu takibi ve çekme istekleri dahil."
     }
   }
 }

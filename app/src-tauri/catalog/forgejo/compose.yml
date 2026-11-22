@@ -1,0 +1,31 @@
+# Forgejo 15.0.12 (current LTS series, supported until 2027-07-15): the docs' basic Docker example
+# (SQLite under ./forgejo on the distro's ext4 disk), with the image pinned by digest, the web port
+# bound to 127.0.0.1:${KONAK_PORT} and no SSH port (HTTP only). Konak adds the FORGEJO__* lines; the
+# image re-applies them to app.ini on every start, so a rename only recreates the container.
+# INSTALL_LOCK skips the web installer, which would let anyone on the LAN pick database settings; as
+# the installer documents, the first registered user then becomes the administrator. Skipping the
+# installer also skips its SECRET_KEY generation, so Konak supplies a generated one.
+networks:
+  forgejo:
+    external: false
+
+services:
+  server:
+    image: codeberg.org/forgejo/forgejo:15.0.12@sha256:9a95f97ccfdf374472c96d958f6e3788d54076e0349fdce7af56ba8541d066b2
+    container_name: forgejo
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__server__DOMAIN=${KONAK_HOST}
+      - FORGEJO__server__ROOT_URL=${KONAK_URL}/
+      - FORGEJO__server__DISABLE_SSH=true
+      - FORGEJO__security__INSTALL_LOCK=true
+      - FORGEJO__security__SECRET_KEY=${FORGEJO_SECRET_KEY}
+    restart: always
+    networks:
+      - forgejo
+    volumes:
+      - ./forgejo:/data
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - '127.0.0.1:${KONAK_PORT}:3000'

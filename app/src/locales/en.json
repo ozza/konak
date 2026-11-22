@@ -80,6 +80,22 @@
     "jellyfin": {
       "name": "Jellyfin",
       "description": "Watch your movies, shows and music on any device."
+    },
+    "immich": {
+      "name": "Immich",
+      "description": "Back up the photos and videos from your phone and browse them in one place."
+    },
+    "nextcloud": {
+      "name": "Nextcloud",
+      "description": "Your own cloud for files, calendars and contacts, synced across your devices."
+    },
+    "vaultwarden": {
+      "name": "Vaultwarden",
+      "description": "A password manager that works with the Bitwarden apps and browser extensions."
+    },
+    "forgejo": {
+      "name": "Forgejo",
+      "description": "Host your own Git repositories, with issues and pull requests."
     }
   }
 }

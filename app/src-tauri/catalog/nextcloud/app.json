@@ -1,0 +1,19 @@
+{
+  "id": "nextcloud",
+  "default_name": "nextcloud",
+  "port": 47103,
+  "https": false,
+  "health_path": "/status.php",
+  "secrets": ["POSTGRES_PASSWORD"],
+  "mounts": {},
+  "min_ram_mb": 1024,
+  "env": {
+    "POSTGRES_DB": "nextcloud",
+    "POSTGRES_USER": "nextcloud",
+    "NEXTCLOUD_TRUSTED_DOMAINS": "${KONAK_HOST}",
+    "OVERWRITEHOST": "${KONAK_HOST}",
+    "OVERWRITEPROTOCOL": "http",
+    "OVERWRITECLIURL": "${KONAK_URL}"
+  },
+  "post_rename": "occ() { docker-compose -p nextcloud exec -T -u www-data app php occ \"$@\" </dev/null; }\nst=$(occ status --output=json)\ncase \"$st\" in *'\"installed\":true'*) occ config:system:set trusted_domains 0 --value=\"$KONAK_HOST\"; occ config:system:set overwrite.cli.url --value=\"$KONAK_URL\" ;; esac\n"
+}
