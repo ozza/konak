@@ -39,12 +39,25 @@ impl Route {
 /// Routes for the installed apps that are still in the catalog and claimed. An unclaimed app is
 /// reachable only from this PC (`http://127.0.0.1:<port>`) until its admin account exists.
 pub fn routes(state: &State) -> Vec<Route> {
-    state
-        .apps
-        .iter()
-        .filter(|a| a.claimed)
-        .filter_map(|a| catalog::get(&a.id).map(|m| Route { id: a.id.clone(), name: a.name.clone(), port: m.port, https: m.https }))
-        .collect()
+    routes_checked(state).0
+}
+
+/// Routes, plus the ids of apps left out because their name is already taken (by an earlier app or
+/// the home page). Caddy rejects a config with two sites of the same name, so one bad entry in
+/// `state.json` must never reach it and take down every route.
+pub fn routes_checked(state: &State) -> (Vec<Route>, Vec<String>) {
+    let mut seen = vec![HOME_NAME.to_string()];
+    let (mut routes, mut skipped) = (vec![], vec![]);
+    for a in state.apps.iter().filter(|a| a.claimed) {
+        let Some(m) = catalog::get(&a.id) else { continue };
+        if seen.contains(&a.name) {
+            skipped.push(a.id.clone());
+            continue;
+        }
+        seen.push(a.name.clone());
+        routes.push(Route { id: a.id.clone(), name: a.name.clone(), port: m.port, https: m.https });
+    }
+    (routes, skipped)
 }
 
 /// Files the generated Caddyfile points at.
@@ -231,11 +244,11 @@ impl Supervisor {
         }
 
         // A state.json that cannot be read keeps the running config rather than dropping every app.
-        let routes = match State::try_load(&self.paths) {
-            Ok(s) => routes(&s),
+        let (routes, skipped) = match State::try_load(&self.paths) {
+            Ok(s) => routes_checked(&s),
             Err(_) => match &p.config {
-                Some((_, r)) => r.clone(),
-                None => vec![],
+                Some((_, r)) => (r.clone(), vec![]),
+                None => (vec![], vec![]),
             },
         };
         let mut names = vec![HOME_NAME.to_string()];
@@ -249,6 +262,9 @@ impl Supervisor {
                 kill(&mut p.mdns);
                 https = self.write_config(ip, &routes);
                 crate::log(&self.paths, &format!("supervisor: LAN IP {ip}, names {}", names.join(",")));
+                if !skipped.is_empty() {
+                    crate::log(&self.paths, &format!("supervisor: no route for {}: name already in use", skipped.join(",")));
+                }
                 p.config = config;
             }
             if !alive(&mut p.caddy) {
@@ -332,6 +348,19 @@ mod tests {
         let r = routes(&s);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].name, "movies");
+    }
+
+    #[test]
+    fn a_duplicate_name_drops_only_the_later_route() {
+        use crate::installer::InstalledApp;
+        let app = |id: &str, name: &str| InstalledApp { id: id.into(), name: name.into(), installed_unix: 0, claimed: true };
+        let mut s = State::default();
+        s.apps = vec![app("jellyfin", "media"), app("immich", "media"), app("forgejo", "konak"), app("nextcloud", "cloud")];
+        let (r, skipped) = routes_checked(&s);
+        assert_eq!(r.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["jellyfin", "nextcloud"]);
+        assert_eq!(skipped, ["immich", "forgejo"]);
+        let files = CaddyFiles { storage: Path::new("s"), site: Path::new("w"), ca: None };
+        assert_eq!(caddyfile("10.0.0.2", &r, &files).matches("http://media.local:80").count(), 1);
     }
 
     #[test]

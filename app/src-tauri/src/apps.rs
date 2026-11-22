@@ -159,12 +159,47 @@ pub fn name_free_on_lan(paths: &Paths, name: &str) -> Result<bool, String> {
     Ok(out.ok)
 }
 
-/// First free name from `base`, `base-2`, ... `base-5`.
-fn pick_name(paths: &Paths, state: &State, id: &str, base: &str) -> Result<String, String> {
+/// Names held by install and rename operations in progress (app id, name), so two of them cannot
+/// pick the same name before either one is saved in `state.json`.
+static RESERVED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Holds a reserved name until the operation ends.
+struct Reservation(String);
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        RESERVED.lock().unwrap_or_else(|e| e.into_inner()).retain(|(id, _)| *id != self.0);
+    }
+}
+
+fn reserved_by_other(reserved: &[(String, String)], id: &str, name: &str) -> bool {
+    reserved.iter().any(|(i, n)| i != id && n == name)
+}
+
+/// Checks `name` for app `id` against the saved apps and the names other operations hold, and
+/// reserves it, all under the state lock.
+fn reserve(paths: &Paths, id: &str, name: &str) -> Result<Reservation, String> {
+    let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    validate_name(&State::try_load(paths)?, id, name)?;
+    let mut reserved = RESERVED.lock().unwrap_or_else(|e| e.into_inner());
+    if reserved_by_other(&reserved, id, name) {
+        return Err("name_in_use".into());
+    }
+    reserved.retain(|(i, _)| i != id);
+    reserved.push((id.to_string(), name.to_string()));
+    Ok(Reservation(id.to_string()))
+}
+
+/// First free name from `base`, `base-2`, ... `base-5`, reserved for `id`.
+fn pick_name(paths: &Paths, state: &State, id: &str, base: &str) -> Result<(String, Reservation), String> {
     for i in 1..=5 {
         let name = if i == 1 { base.to_string() } else { format!("{base}-{i}") };
-        if validate_name(state, id, &name).is_ok() && name_free_on_lan(paths, &name)? {
-            return Ok(name);
+        let held = reserved_by_other(&RESERVED.lock().unwrap_or_else(|e| e.into_inner()), id, &name);
+        if validate_name(state, id, &name).is_ok() && !held && name_free_on_lan(paths, &name)? {
+            // Another operation may have taken it during the LAN check; then try the next one.
+            if let Ok(r) = reserve(paths, id, &name) {
+                return Ok((name, r));
+            }
         }
     }
     Err(format!("names {base} to {base}-5 are all taken on this network"))
@@ -233,9 +268,12 @@ fn installed(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
 pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
     let m = manifest(id)?;
     let state = State::try_load(paths)?;
-    let (name, claimed) = match state.apps.iter().find(|a| a.id == id) {
-        Some(a) => (a.name.clone(), a.claimed),
-        None => (pick_name(paths, &state, id, &m.default_name)?, false),
+    let (name, claimed, _reservation) = match state.apps.iter().find(|a| a.id == id) {
+        Some(a) => (a.name.clone(), a.claimed, None),
+        None => {
+            let (name, r) = pick_name(paths, &state, id, &m.default_name)?;
+            (name, false, Some(r))
+        }
     };
     run_install(paths, m, &name, claimed, None)?;
     let mut result = None;
@@ -281,6 +319,7 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
     if app.name == new_name {
         return Ok(());
     }
+    let _reservation = reserve(paths, id, new_name)?;
     if !name_free_on_lan(paths, new_name)? {
         return Err("name_taken_on_lan".into());
     }
@@ -376,6 +415,26 @@ mod tests {
         assert_eq!(not_installed, "not_installed");
         assert!(failed.is_err());
         assert!(!after.apps[0].claimed, "claimed only after a successful re-render");
+    }
+
+    #[test]
+    fn a_reserved_name_cannot_be_taken_by_another_app() {
+        let home = std::env::temp_dir().join(format!("konak-reserve-test-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let mut s = State::default();
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true });
+        s.save(&paths);
+        let r = reserve(&paths, "forgejo", "code").unwrap();
+        let clash = reserve(&paths, "immich", "code").err();
+        let saved_clash = reserve(&paths, "immich", "movies").err();
+        // The same app may reserve again (a retry); once released, the name is free for others.
+        let again = reserve(&paths, "forgejo", "code").map(std::mem::forget).is_ok();
+        drop(r);
+        let after = reserve(&paths, "immich", "code").is_ok();
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(clash.as_deref(), Some("name_in_use"));
+        assert_eq!(saved_clash.as_deref(), Some("name_in_use"));
+        assert!(again && after);
     }
 
     #[test]
