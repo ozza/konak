@@ -97,7 +97,7 @@
       "claim": "Making it available…"
     },
     "failed": {
-      "install": "Install failed.",
+      "install": "Install failed. Konak stopped the app and kept its data, so you can try again.",
       "remove": "Removing failed.",
       "rename": "Renaming failed.",
       "restart": "Restart failed.",

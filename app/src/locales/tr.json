@@ -97,7 +97,7 @@
       "claim": "Ağda erişime açılıyor…"
     },
     "failed": {
-      "install": "Kurulum başarısız oldu.",
+      "install": "Kurulum başarısız oldu. Konak uygulamayı durdurdu ve verilerini sakladı, yeniden deneyebilirsiniz.",
       "remove": "Kaldırma başarısız oldu.",
       "rename": "Ad değiştirme başarısız oldu.",
       "restart": "Yeniden başlatma başarısız oldu.",

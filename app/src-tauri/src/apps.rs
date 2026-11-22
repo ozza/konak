@@ -276,7 +276,15 @@ pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
         }
     };
     let repair = reservation.is_none();
-    run_install(paths, m, &name, claimed, None)?;
+    if let Err(e) = run_install(paths, m, &name, claimed, None) {
+        if !repair {
+            // The containers may already run, holding the port and RAM, while the panel shows the app
+            // as not installed. Stop them; the data stays, so a retry reuses its secrets.
+            let out = shell::distro_script(&paths.distro, REMOVE_SH, &[id, "keep"]);
+            crate::log(paths, &format!("install of {id} failed; containers removed, data kept: {}", tail(&out.text, 1)));
+        }
+        return Err(e);
+    }
     let mut result = None;
     update_state(paths, |s| {
         s.rerender.retain(|r| r != id);
