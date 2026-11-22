@@ -19,11 +19,15 @@ const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 #[derive(Debug, PartialEq)]
 pub struct Opts {
     pub purge: bool,
+    /// The installer runs silently (/S): skip the steps that show a dialog or a UAC prompt, which
+    /// nobody would answer, and log them as left behind.
+    pub silent: bool,
 }
 
 /// `Some` when the command line asks for an uninstall.
 pub fn parse(args: &[String]) -> Option<Opts> {
-    args.iter().skip(1).any(|a| a == "--uninstall").then(|| Opts { purge: args.iter().skip(1).any(|a| a == "--purge") })
+    let has = |flag: &str| args.iter().skip(1).any(|a| a == flag);
+    has("--uninstall").then(|| Opts { purge: has("--purge"), silent: has("--silent") })
 }
 
 struct Report {
@@ -332,7 +336,7 @@ pub fn run(opts: Opts) -> i32 {
     let log_path = std::env::temp_dir().join(format!("konak-uninstall-{}.log", crate::installer::now()));
     let file = std::fs::File::create(&log_path).ok();
     let mut r = Report { file, log_path, summary: vec![], failed: false };
-    r.log(&format!("uninstall: purge={} exe={} home={} distro={}", opts.purge, exe.display(), paths.home.display(), paths.distro));
+    r.log(&format!("uninstall: purge={} silent={} exe={} home={} distro={}", opts.purge, opts.silent, exe.display(), paths.home.display(), paths.distro));
 
     let o = stop_processes(&paths, &exe);
     r.step("processes", o);
@@ -345,10 +349,16 @@ pub fn run(opts: Opts) -> i32 {
     } else {
         let o = remove_run_value(&exe);
         r.step("autostart", o);
-        let o = remove_root(&paths);
-        r.step("root certificate", o);
-        let o = remove_firewall_rules();
-        r.step("firewall", o);
+        if opts.silent {
+            for s in ["root certificate", "firewall"] {
+                r.step(s, Ok("left behind (silent uninstall: it needs a Windows dialog or a UAC prompt)".into()));
+            }
+        } else {
+            let o = remove_root(&paths);
+            r.step("root certificate", o);
+            let o = remove_firewall_rules();
+            r.step("firewall", o);
+        }
     }
     if opts.purge {
         let o = distro_cmd(&paths, "--unregister");
@@ -380,9 +390,10 @@ mod tests {
     fn parses_uninstall_flags() {
         assert_eq!(parse(&args(&["konak.exe"])), None);
         assert_eq!(parse(&args(&["konak.exe", "--autostart"])), None);
-        assert_eq!(parse(&args(&["konak.exe", "--uninstall"])), Some(Opts { purge: false }));
-        assert_eq!(parse(&args(&["konak.exe", "--uninstall", "--purge"])), Some(Opts { purge: true }));
-        assert_eq!(parse(&args(&["konak.exe", "--purge", "--uninstall"])), Some(Opts { purge: true }));
+        assert_eq!(parse(&args(&["konak.exe", "--uninstall"])), Some(Opts { purge: false, silent: false }));
+        assert_eq!(parse(&args(&["konak.exe", "--uninstall", "--purge"])), Some(Opts { purge: true, silent: false }));
+        assert_eq!(parse(&args(&["konak.exe", "--purge", "--uninstall"])), Some(Opts { purge: true, silent: false }));
+        assert_eq!(parse(&args(&["konak.exe", "--uninstall", "--silent"])), Some(Opts { purge: false, silent: true }));
         // --purge alone does nothing; argv[0] is never a flag.
         assert_eq!(parse(&args(&["konak.exe", "--purge"])), None);
         assert_eq!(parse(&args(&["--uninstall"])), None);

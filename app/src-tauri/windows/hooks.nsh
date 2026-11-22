@@ -34,6 +34,11 @@
         StrCpy $R9 " --purge"
       ${EndIf}
     ${EndIf}
+    ; Silent: nobody answers the root-certificate dialog or a UAC prompt, so --silent skips those
+    ; two steps (logged as left behind) instead of blocking ExecWait.
+    ${If} ${Silent}
+      StrCpy $R9 "$R9 --silent"
+    ${EndIf}
     DetailPrint "Konak cleanup: --uninstall$R9"
     ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --uninstall$R9' $R7
     DetailPrint "Konak cleanup finished with exit code $R7 (log in %TEMP%\konak-uninstall-*.log)"
