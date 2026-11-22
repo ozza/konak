@@ -99,6 +99,7 @@
               busy={busy[app.id]}
               failed={failed[app.id]}
               onrestart={() => run(app.id, "restart")}
+              onclaim={() => run(app.id, "claim")}
               onlogs={() => (logsFor = app)}
               onremove={() => (removeFor = app)}
               ondismiss={() => setFailed(app.id, null)}

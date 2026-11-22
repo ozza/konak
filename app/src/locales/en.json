@@ -92,13 +92,15 @@
       "install": "Installing…",
       "remove": "Removing…",
       "rename": "Renaming…",
-      "restart": "Restarting…"
+      "restart": "Restarting…",
+      "claim": "Making it available…"
     },
     "failed": {
       "install": "Install failed.",
       "remove": "Removing failed.",
       "rename": "Renaming failed.",
-      "restart": "Restart failed."
+      "restart": "Restart failed.",
+      "claim": "Could not make it available on your network."
     },
     "dismiss": "Dismiss",
     "actions": {
@@ -108,6 +110,13 @@
       "rename": "Rename",
       "remove": "Remove",
       "group": "Actions for {name}"
+    },
+    "claim": {
+      "notice": "Finish setup on this PC first: create your admin account, then make it available on your network.",
+      "local_only": "For now only this PC can open it, at {url}. Other devices cannot reach it yet.",
+      "open_setup": "Open setup",
+      "done": "Done, make it available",
+      "future_name": "Name on your network after setup: {name}"
     },
     "rename": {
       "label": "Name on your network",

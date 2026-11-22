@@ -5,16 +5,20 @@ export type AppStatus = "running" | "starting" | "unhealthy" | "stopped" | "miss
 export type AppInfo = {
   id: string;
   name: string;
+  /** The `.local` URL, served on the network only once the app is claimed. */
   url: string;
+  /** http://127.0.0.1:<port>, reachable from this PC only; used to finish setup before claiming. */
+  local_url: string;
   https: boolean;
   port: number;
   installed_unix: number;
+  claimed: boolean;
   status: AppStatus;
   containers: { name: string; state: string; health: string | null }[];
 };
 export type Manifest = { id: string; default_name: string; port: number; https: boolean; min_ram_mb: number };
 export type CaInfo = { path: string; fingerprint: string };
-export type Op = "install" | "remove" | "rename" | "restart";
+export type Op = "install" | "remove" | "rename" | "restart" | "claim";
 export type AppProgress = { id: string; op: Op; state: "running" | "done" | "failed"; error: string | null };
 /** A backend error: `message` when it is a known error code, otherwise `details` holds technical text. */
 export type ErrorText = { message: string | null; details: string | null };

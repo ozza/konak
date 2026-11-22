@@ -26,6 +26,15 @@ pub struct InstalledApp {
     /// `.local` name without the suffix, chosen by the user.
     pub name: String,
     pub installed_unix: u64,
+    /// False until the user has created the admin account on this PC. Unclaimed apps get no `.local`
+    /// name and no Caddy route, so nobody on the LAN can take over the first-run admin setup. State
+    /// entries from before this field were already exposed, so they load as claimed.
+    #[serde(default = "claimed_by_default")]
+    pub claimed: bool,
+}
+
+fn claimed_by_default() -> bool {
+    true
 }
 
 /// Persisted install progress, measurements and the installed apps. Missing fields default, so
@@ -90,7 +99,7 @@ impl State {
         let mut s: State = serde_json::from_str(text).unwrap_or_default();
         if let Some(name) = s.app_name.take() {
             if !s.apps.iter().any(|a| a.id == "jellyfin") {
-                s.apps.push(InstalledApp { id: "jellyfin".into(), name, installed_unix: s.finished_unix });
+                s.apps.push(InstalledApp { id: "jellyfin".into(), name, installed_unix: s.finished_unix, claimed: true });
                 s.rerender.push("jellyfin".into());
             }
         }
@@ -295,7 +304,7 @@ mod tests {
             "app_name":"jellyfin-2","done":true}"#;
         let s = State::from_json(old);
         assert!(s.done);
-        assert_eq!(s.apps, vec![InstalledApp { id: "jellyfin".into(), name: "jellyfin-2".into(), installed_unix: 20 }]);
+        assert_eq!(s.apps, vec![InstalledApp { id: "jellyfin".into(), name: "jellyfin-2".into(), installed_unix: 20, claimed: true }]);
         assert_eq!(s.rerender, vec!["jellyfin".to_string()]);
         let saved = serde_json::to_string(&s).unwrap();
         assert!(!saved.contains("app_name"));
@@ -303,6 +312,15 @@ mod tests {
         let again = State::from_json(&saved);
         assert_eq!(again.apps.len(), 1);
         assert_eq!(again.rerender.len(), 1);
+    }
+
+    #[test]
+    fn apps_saved_before_the_claim_step_load_as_claimed() {
+        let s = State::from_json(r#"{"apps":[{"id":"immich","name":"photos","installed_unix":5}]}"#);
+        assert!(s.apps[0].claimed);
+        let unclaimed = InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 6, claimed: false };
+        let back: InstalledApp = serde_json::from_str(&serde_json::to_string(&unclaimed).unwrap()).unwrap();
+        assert_eq!(back, unclaimed);
     }
 
     #[test]

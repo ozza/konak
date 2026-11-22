@@ -43,10 +43,15 @@ pub struct Container {
 pub struct AppInfo {
     pub id: String,
     pub name: String,
+    /// The `.local` URL; served on the LAN only once the app is claimed.
     pub url: String,
+    /// `http://127.0.0.1:<port>`, reachable from this PC only. Used to finish an unclaimed app's
+    /// first-run setup (a browser secure context, so Vaultwarden's web vault works there too).
+    pub local_url: String,
     pub https: bool,
     pub port: u16,
     pub installed_unix: u64,
+    pub claimed: bool,
     /// running | starting | unhealthy | stopped | missing (no containers) | unknown (distro unreadable)
     pub status: &'static str,
     pub containers: Vec<Container>,
@@ -101,7 +106,7 @@ fn podman_ps(paths: &Paths) -> Result<HashMap<String, Vec<Container>>, String> {
     parse_ps(&out.text)
 }
 
-fn url(m: &Manifest, name: &str) -> String {
+pub fn url(m: &Manifest, name: &str) -> String {
     format!("{}://{name}.local", if m.https { "https" } else { "http" })
 }
 
@@ -119,9 +124,11 @@ pub fn list(paths: &Paths) -> Vec<AppInfo> {
                 id: a.id.clone(),
                 name: a.name.clone(),
                 url: url(m, &a.name),
+                local_url: format!("http://127.0.0.1:{}", m.port),
                 https: m.https,
                 port: m.port,
                 installed_unix: a.installed_unix,
+                claimed: a.claimed,
                 status: containers.as_deref().map(status_of).unwrap_or("unknown"),
                 containers: containers.unwrap_or_default(),
             })
@@ -226,7 +233,8 @@ pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
         let app = match s.apps.iter().find(|a| a.id == id) {
             Some(a) => a.clone(),
             None => {
-                let a = InstalledApp { id: id.into(), name: name.clone(), installed_unix: now() };
+                // New apps stay off the LAN until the user has created the admin account (`claim`).
+                let a = InstalledApp { id: id.into(), name: name.clone(), installed_unix: now(), claimed: false };
                 s.apps.push(a.clone());
                 a
             }
@@ -277,6 +285,18 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Marks an app as claimed (its admin account exists), which gives it its `.local` name and Caddy
+/// route at the supervisor's next tick.
+pub fn claim(paths: &Paths, id: &str) -> Result<(), String> {
+    installed(paths, id)?;
+    update_state(paths, |s| {
+        if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
+            a.claimed = true;
+        }
+    });
+    Ok(())
+}
+
 /// Runs a docker-compose command for an installed app in its directory.
 fn compose(paths: &Paths, id: &str, args: &str) -> shell::Out {
     let script = format!("set -e\ncd /var/lib/konak/apps/\"$1\"\nexport DOCKER_HOST=unix:///run/podman/podman.sock\ndocker-compose -p \"$1\" {args}\n");
@@ -310,7 +330,7 @@ mod tests {
 
     fn state_with(apps: &[(&str, &str)]) -> State {
         let mut s = State::default();
-        s.apps = apps.iter().map(|(id, name)| InstalledApp { id: id.to_string(), name: name.to_string(), installed_unix: 0 }).collect();
+        s.apps = apps.iter().map(|(id, name)| InstalledApp { id: id.to_string(), name: name.to_string(), installed_unix: 0, claimed: true }).collect();
         s
     }
 
@@ -324,6 +344,21 @@ mod tests {
         for bad in ["", "Movies", "-a", "a-", "a.b", "a b", &"x".repeat(64)] {
             assert_eq!(validate_name(&s, "jellyfin", bad).unwrap_err(), "invalid_name", "{bad}");
         }
+    }
+
+    #[test]
+    fn claim_marks_the_app_and_unknown_apps_fail() {
+        let home = std::env::temp_dir().join(format!("konak-claim-test-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let mut s = State::default();
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: false });
+        s.save(&paths);
+        let not_installed = claim(&paths, "immich").unwrap_err();
+        claim(&paths, "forgejo").unwrap();
+        let after = State::load(&paths);
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(not_installed, "not_installed");
+        assert!(after.apps[0].claimed);
     }
 
     #[test]

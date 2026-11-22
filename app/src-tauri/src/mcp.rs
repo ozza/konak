@@ -6,7 +6,7 @@ use crate::diag::{self, Distro};
 use crate::installer::{now, State, STEPS};
 use crate::paths::Paths;
 use crate::redact::Redactor;
-use crate::services::{lan_ip, routes, HOME_NAME};
+use crate::services::{lan_ip, HOME_NAME};
 use crate::shell::{self, tail};
 use crate::{apps, catalog};
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
@@ -75,7 +75,10 @@ fn status(paths: &Paths, d: &Distro) -> Value {
     let apps = if d.running {
         serde_json::to_value(apps::list(paths)).unwrap_or_default()
     } else {
-        routes(&s).iter().map(|r| json!({"id": r.id, "name": r.name, "url": r.url(), "status": "distro_not_running"})).collect()
+        s.apps
+            .iter()
+            .filter_map(|a| catalog::get(&a.id).map(|m| json!({"id": a.id, "name": a.name, "url": apps::url(m, &a.name), "claimed": a.claimed, "status": "distro_not_running"})))
+            .collect()
     };
     json!({"setup": {"done": s.done, "steps": steps}, "distro": d, "apps": apps, "heartbeat": heartbeat_json(paths)})
 }
@@ -173,7 +176,7 @@ impl Server {
         .map_err(|e| e.to_string())?
     }
 
-    #[tool(description = "Konak overview: setup steps and whether setup is done, the distro state, installed apps with live status, URL and containers, and the supervisor heartbeat age (stale after 60 s).")]
+    #[tool(description = "Konak overview: setup steps and whether setup is done, the distro state, installed apps with live status, URL, containers and whether they are claimed (unclaimed apps are reachable only from this PC until their admin account exists, and have no .local name yet), and the supervisor heartbeat age (stale after 60 s).")]
     async fn konak_status(&self) -> Result<String, String> {
         self.run(|p, d| Ok(status(p, d))).await
     }
@@ -243,7 +246,7 @@ mod tests {
         assert_eq!(log_lines(Some(0)), 1);
         assert_eq!(log_lines(Some(5000)), 1000);
         let mut s = State::default();
-        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 0 });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 0, claimed: true });
         assert_eq!(resolve_app(&s, "jellyfin").unwrap(), "jellyfin");
         assert_eq!(resolve_app(&s, "movies.local").unwrap(), "jellyfin");
         assert!(resolve_app(&State::default(), "jellyfin").unwrap_err().starts_with("not_installed"));
@@ -266,7 +269,8 @@ mod tests {
         let mut s = State::default();
         s.done = true;
         s.completed = vec!["preflight".into(), "network".into()];
-        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1 });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true });
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 2, claimed: false });
         s.save(&paths);
         let d = Distro { name: paths.distro.clone(), ..Default::default() };
         let v = status(&paths, &d);
@@ -276,7 +280,8 @@ mod tests {
         assert_eq!(v["setup"]["done"], true);
         assert_eq!(v["setup"]["steps"][0], json!({"id": "preflight", "state": "done"}));
         assert_eq!(v["setup"]["steps"][1], json!({"id": "admin", "state": "pending"}));
-        assert_eq!(v["apps"][0], json!({"id": "jellyfin", "name": "movies", "url": "http://movies.local", "status": "distro_not_running"}));
+        assert_eq!(v["apps"][0], json!({"id": "jellyfin", "name": "movies", "url": "http://movies.local", "claimed": true, "status": "distro_not_running"}));
+        assert_eq!(v["apps"][1]["claimed"], false);
         assert!(v["heartbeat"].is_null());
     }
 }

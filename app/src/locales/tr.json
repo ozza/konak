@@ -92,13 +92,15 @@
       "install": "Kuruluyor…",
       "remove": "Kaldırılıyor…",
       "rename": "Adı değiştiriliyor…",
-      "restart": "Yeniden başlatılıyor…"
+      "restart": "Yeniden başlatılıyor…",
+      "claim": "Ağda erişime açılıyor…"
     },
     "failed": {
       "install": "Kurulum başarısız oldu.",
       "remove": "Kaldırma başarısız oldu.",
       "rename": "Ad değiştirme başarısız oldu.",
-      "restart": "Yeniden başlatma başarısız oldu."
+      "restart": "Yeniden başlatma başarısız oldu.",
+      "claim": "Ağda erişime açılamadı."
     },
     "dismiss": "Kapat",
     "actions": {
@@ -108,6 +110,13 @@
       "rename": "Adını değiştir",
       "remove": "Kaldır",
       "group": "{name} işlemleri"
+    },
+    "claim": {
+      "notice": "Önce kurulumu bu bilgisayarda tamamlayın: yönetici hesabınızı oluşturun, ardından uygulamayı ağınızda erişime açın.",
+      "local_only": "Şimdilik yalnızca bu bilgisayardan {url} adresinde açılabilir. Diğer cihazlar henüz erişemez.",
+      "open_setup": "Kurulumu aç",
+      "done": "Tamam, ağda erişime aç",
+      "future_name": "Kurulumdan sonra ağdaki adı: {name}"
     },
     "rename": {
       "label": "Ağdaki adı",

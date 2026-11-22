@@ -1,10 +1,10 @@
 // Dev-only stand-in for the Tauri backend, so the UI can be viewed in a plain browser with `npm run dev`.
 // Loaded from +layout.ts only when import.meta.env.DEV is true and the page is not inside Tauri; the
 // production build drops it. URL flags: ?setup (first-run flow), ?public (Public network notice),
-// ?empty (no apps installed). Rename to "taken" to see the LAN conflict error.
+// ?empty (no apps installed). Forgejo starts unclaimed; newly installed apps are unclaimed too. Rename to "taken" to see the LAN conflict error.
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { AppInfo, Manifest } from "$lib/panel/api";
+import type { AppInfo, Manifest, Op } from "$lib/panel/api";
 
 const q = new URLSearchParams(location.search);
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -17,15 +17,16 @@ const catalog: Manifest[] = [
   { id: "forgejo", default_name: "git", port: 47105, https: false, min_ram_mb: 1024 },
 ];
 
-function info(id: string, name: string, status: AppInfo["status"]): AppInfo {
+function info(id: string, name: string, status: AppInfo["status"], claimed = true): AppInfo {
   const m = catalog.find((c) => c.id === id)!;
   const url = `${m.https ? "https" : "http"}://${name}.local`;
-  return { id, name, url, https: m.https, port: m.port, installed_unix: 1763800000, status, containers: [] };
+  const local_url = `http://127.0.0.1:${m.port}`;
+  return { id, name, url, local_url, https: m.https, port: m.port, installed_unix: 1763800000, claimed, status, containers: [] };
 }
 
 let apps: AppInfo[] = q.has("empty")
   ? []
-  : [info("jellyfin", "movies", "running"), info("nextcloud", "cloud", "starting"), info("forgejo", "git", "unhealthy"), info("immich", "photos", "stopped")];
+  : [info("jellyfin", "movies", "running"), info("nextcloud", "cloud", "starting"), info("forgejo", "git", "running", false), info("immich", "photos", "stopped")];
 
 const logs = [
   "jellyfin  | [10:41:02] [INF] Jellyfin version: 10.11.2",
@@ -48,7 +49,7 @@ const status = () => ({
   summary: q.has("setup") ? null : { minutes: 11.4, uac_prompts: 1, reboots: 1, download_mb: 612 },
 });
 
-function op(id: string, name: "install" | "remove" | "rename" | "restart", work: () => string | null, ms = 1500) {
+function op(id: string, name: Op, work: () => string | null, ms = 1500) {
   emit("app-progress", { id, op: name, state: "running", error: null });
   wait(ms).then(() => {
     const error = work();
@@ -81,17 +82,19 @@ export function installMock() {
         case "install_app":
           return op(a.id, "install", () => {
             const m = catalog.find((c) => c.id === a.id)!;
-            apps = [...apps, info(a.id, m.default_name, "starting")];
+            apps = [...apps, info(a.id, m.default_name, "starting", false)];
             return null;
           });
         case "restart_app":
           return op(a.id, "restart", () => null);
+        case "claim_app":
+          return op(a.id, "claim", () => ((apps = apps.map((x) => (x.id === a.id ? { ...x, claimed: true } : x))), null));
         case "remove_app":
           return op(a.id, "remove", () => ((apps = apps.filter((x) => x.id !== a.id)), null));
         case "rename_app":
           return op(a.id, "rename", () => {
             if (a.name === "taken") return "name_taken_on_lan";
-            apps = apps.map((x) => (x.id === a.id ? info(x.id, a.name, x.status) : x));
+            apps = apps.map((x) => (x.id === a.id ? info(x.id, a.name, x.status, x.claimed) : x));
             return null;
           });
         case "plugin:opener|open_url":

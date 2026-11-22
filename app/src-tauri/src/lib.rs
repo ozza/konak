@@ -282,6 +282,13 @@ fn rename_app(app: AppHandle, id: String, name: String) -> Result<(), String> {
     spawn_op(app, id, "rename", move |p| apps::rename(p, &id2, &name))
 }
 
+/// The user has created the admin account on this PC: publish the app's `.local` name.
+#[tauri::command]
+fn claim_app(app: AppHandle, id: String) -> Result<(), String> {
+    let id2 = id.clone();
+    spawn_op(app, id, "claim", move |p| apps::claim(p, &id2))
+}
+
 #[tauri::command]
 fn restart_app(app: AppHandle, id: String) -> Result<(), String> {
     let id2 = id.clone();
@@ -440,6 +447,7 @@ pub fn run() {
             install_app,
             remove_app,
             rename_app,
+            claim_app,
             restart_app,
             app_logs,
             ca_info,

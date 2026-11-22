@@ -36,11 +36,13 @@ impl Route {
     }
 }
 
-/// Routes for the installed apps that are still in the catalog.
+/// Routes for the installed apps that are still in the catalog and claimed. An unclaimed app is
+/// reachable only from this PC (`http://127.0.0.1:<port>`) until its admin account exists.
 pub fn routes(state: &State) -> Vec<Route> {
     state
         .apps
         .iter()
+        .filter(|a| a.claimed)
         .filter_map(|a| catalog::get(&a.id).map(|m| Route { id: a.id.clone(), name: a.name.clone(), port: m.port, https: m.https }))
         .collect()
 }
@@ -291,6 +293,17 @@ mod tests {
         // Without the CA, HTTPS apps are dropped rather than served by some other CA.
         let no_ca = caddyfile("192.168.1.5", &routes, &CaddyFiles { storage: &storage, site: &site, ca: None });
         assert!(!no_ca.contains("pki") && !no_ca.contains("vault.local") && no_ca.contains("jellyfin.local"));
+    }
+
+    #[test]
+    fn unclaimed_apps_get_no_route() {
+        use crate::installer::InstalledApp;
+        let app = |id: &str, name: &str, claimed| InstalledApp { id: id.into(), name: name.into(), installed_unix: 0, claimed };
+        let mut s = State::default();
+        s.apps = vec![app("jellyfin", "movies", true), app("forgejo", "git", false)];
+        let r = routes(&s);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].name, "movies");
     }
 
     #[test]
