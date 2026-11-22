@@ -4,7 +4,9 @@
 # image re-applies them to app.ini on every start, so a rename only recreates the container.
 # INSTALL_LOCK skips the web installer, which would let anyone on the LAN pick database settings; as
 # the installer documents, the first registered user then becomes the administrator. Skipping the
-# installer also skips its SECRET_KEY generation, so Konak supplies a generated one.
+# installer also skips its SECRET_KEY generation, so Konak supplies a generated one. Registration is
+# open only while the app is unclaimed (reachable from this PC only): claiming re-renders .env with
+# FORGEJO_DISABLE_REGISTRATION=true, so nobody else can register once the admin account exists.
 networks:
   forgejo:
     external: false
@@ -21,6 +23,7 @@ services:
       - FORGEJO__server__DISABLE_SSH=true
       - FORGEJO__security__INSTALL_LOCK=true
       - FORGEJO__security__SECRET_KEY=${FORGEJO_SECRET_KEY}
+      - FORGEJO__service__DISABLE_REGISTRATION=${FORGEJO_DISABLE_REGISTRATION:-false}
     restart: always
     networks:
       - forgejo

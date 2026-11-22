@@ -40,6 +40,10 @@ pub struct Manifest {
     /// Env var name -> value; `${KONAK_HOST}` and `${KONAK_URL}` are filled in at install time.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Like `env`, but written only once the app is claimed (its admin account exists), e.g. to
+    /// close open registration. Compose files read these with a `${NAME:-default}` fallback.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub claimed_env: BTreeMap<String, String>,
     /// Bash run in the app directory (with `.env` loaded) after a rename has recreated the containers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_rename: Option<String>,
@@ -76,7 +80,7 @@ pub fn parse(id: &str, json: &str, compose: &'static str) -> Result<Manifest, St
         return err("health_path must be an absolute path");
     }
     // KONAK_* names are set by Konak itself.
-    let mut names: Vec<&String> = m.secrets.iter().chain(m.mounts.keys()).chain(m.env.keys()).collect();
+    let mut names: Vec<&String> = m.secrets.iter().chain(m.mounts.keys()).chain(m.env.keys()).chain(m.claimed_env.keys()).collect();
     if let Some(bad) = names.iter().find(|n| !valid_env_name(n) || n.starts_with("KONAK_")) {
         return err(&format!("bad env var name {bad}"));
     }
@@ -84,13 +88,13 @@ pub fn parse(id: &str, json: &str, compose: &'static str) -> Result<Manifest, St
     names.sort();
     names.dedup();
     if names.len() != total {
-        // Duplicates across secrets/mounts/env would silently override each other in .env.
+        // Duplicates across secrets/mounts/env/claimed_env would silently override each other in .env.
         return err("an env var name is used twice");
     }
     if let Some((_, kind)) = m.mounts.iter().find(|(_, k)| !MOUNT_KINDS.contains(&k.as_str())) {
         return err(&format!("unknown mount kind {kind}"));
     }
-    if m.env.values().any(|v| v.contains('\n') || v.contains('\r')) {
+    if m.env.values().chain(m.claimed_env.values()).any(|v| v.contains('\n') || v.contains('\r')) {
         return err("env values must be single-line");
     }
     for line in compose.lines().map(str::trim) {
@@ -130,6 +134,9 @@ mod tests {
         assert_eq!(m.port, 47150);
         assert!(!m.https);
         assert_eq!(m.mounts["MEDIA_DIR"], "media");
+        assert!(m.claimed_env.is_empty());
+        let closed = parse("demo", &GOOD.replace(r#""min_ram_mb""#, r#""claimed_env":{"CLOSED":"true"},"min_ram_mb""#), COMPOSE).unwrap();
+        assert_eq!(closed.claimed_env["CLOSED"], "true");
     }
 
     #[test]
@@ -143,6 +150,11 @@ mod tests {
         assert!(bad("DB_PASSWORD", "KONAK_HOST"), "reserved env name");
         assert!(bad("DB_PASSWORD", "MEDIA_DIR"), "duplicate env name");
         assert!(bad("\"min_ram_mb\"", "\"typo\":1,\"min_ram_mb\""), "unknown field");
+        let claimed = |entry: &str| bad(r#""min_ram_mb""#, &format!(r#""claimed_env":{{{entry}}},"min_ram_mb""#));
+        assert!(claimed(r#""URL":"x""#), "claimed_env name already in env");
+        assert!(claimed(r#""lower_case":"x""#), "claimed_env name not upper case");
+        assert!(claimed(r#""KONAK_X":"x""#), "claimed_env name reserved");
+        assert!(claimed(r#""CLOSED":"a\nb""#), "claimed_env value multi-line");
         assert!(parse("demo", GOOD, "image: x/y:latest\n").is_err(), "unpinned image");
         assert!(parse("demo", GOOD, "image: x@sha256:a\nports:\n  - ${KONAK_PORT}:80\n").is_err(), "port on all interfaces");
     }

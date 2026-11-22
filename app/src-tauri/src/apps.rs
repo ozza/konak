@@ -178,10 +178,12 @@ fn b64(s: &str) -> String {
 }
 
 /// Values written to the app's `.env` by Konak (secrets and mounts are added by the script).
-pub fn env_lines(m: &Manifest, name: &str) -> String {
+/// `claimed_env` is added only once the app is claimed.
+pub fn env_lines(m: &Manifest, name: &str, claimed: bool) -> String {
     let (host, url) = (format!("{name}.local"), url(m, name));
     let mut lines = vec![format!("KONAK_HOST={host}"), format!("KONAK_URL={url}"), format!("KONAK_PORT={}", m.port)];
-    for (k, v) in &m.env {
+    let claimed_env = m.claimed_env.iter().filter(|_| claimed);
+    for (k, v) in m.env.iter().chain(claimed_env) {
         lines.push(format!("{k}={}", v.replace("${KONAK_HOST}", &host).replace("${KONAK_URL}", &url)));
     }
     lines.join("\n")
@@ -192,7 +194,7 @@ fn redacted(paths: &Paths, text: &str) -> String {
 }
 
 /// Renders and starts the app under `name`; with `hook`, runs it after the app is healthy.
-fn run_install(paths: &Paths, m: &Manifest, name: &str, hook: Option<&str>) -> Result<(), String> {
+fn run_install(paths: &Paths, m: &Manifest, name: &str, claimed: bool, hook: Option<&str>) -> Result<(), String> {
     let mut mounts = String::new();
     for (var, kind) in &m.mounts {
         let dir = if kind == "photos" { &paths.photos } else { &paths.media };
@@ -201,7 +203,7 @@ fn run_install(paths: &Paths, m: &Manifest, name: &str, hook: Option<&str>) -> R
     }
     let port = m.port.to_string();
     let secrets = if m.secrets.is_empty() { "-".to_string() } else { m.secrets.join(" ") };
-    let args = [&m.id, port.as_str(), &m.health_path, &b64(m.compose), &b64(&env_lines(m, name)), &secrets, &b64(&mounts), &b64(hook.unwrap_or(""))];
+    let args = [&m.id, port.as_str(), &m.health_path, &b64(m.compose), &b64(&env_lines(m, name, claimed)), &secrets, &b64(&mounts), &b64(hook.unwrap_or(""))];
     let out = shell::distro_script(&paths.distro, INSTALL_SH, &args);
     crate::log(paths, &format!("install {} as {name}: {}", m.id, redacted(paths, &tail(&out.text, 2))));
     if !out.ok {
@@ -222,11 +224,11 @@ fn installed(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
 pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
     let m = manifest(id)?;
     let state = State::load(paths);
-    let name = match state.apps.iter().find(|a| a.id == id) {
-        Some(a) => a.name.clone(),
-        None => pick_name(paths, &state, id, &m.default_name)?,
+    let (name, claimed) = match state.apps.iter().find(|a| a.id == id) {
+        Some(a) => (a.name.clone(), a.claimed),
+        None => (pick_name(paths, &state, id, &m.default_name)?, false),
     };
-    run_install(paths, m, &name, None)?;
+    run_install(paths, m, &name, claimed, None)?;
     let mut result = None;
     update_state(paths, |s| {
         s.rerender.retain(|r| r != id);
@@ -273,8 +275,8 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
     if !name_free_on_lan(paths, new_name)? {
         return Err("name_taken_on_lan".into());
     }
-    if let Err(e) = run_install(paths, m, new_name, m.post_rename.as_deref()) {
-        let _ = run_install(paths, m, &app.name, m.post_rename.as_deref());
+    if let Err(e) = run_install(paths, m, new_name, app.claimed, m.post_rename.as_deref()) {
+        let _ = run_install(paths, m, &app.name, app.claimed, m.post_rename.as_deref());
         return Err(e);
     }
     update_state(paths, |s| {
@@ -286,9 +288,13 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
 }
 
 /// Marks an app as claimed (its admin account exists), which gives it its `.local` name and Caddy
-/// route at the supervisor's next tick.
+/// route at the supervisor's next tick. The app is first re-rendered with its `claimed_env` (e.g.
+/// registration closed) and is marked claimed only when that succeeds, so it never reaches the LAN
+/// with its pre-claim settings.
 pub fn claim(paths: &Paths, id: &str) -> Result<(), String> {
-    installed(paths, id)?;
+    let m = manifest(id)?;
+    let app = installed(paths, id)?;
+    run_install(paths, m, &app.name, true, None)?;
     update_state(paths, |s| {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.claimed = true;
@@ -347,18 +353,20 @@ mod tests {
     }
 
     #[test]
-    fn claim_marks_the_app_and_unknown_apps_fail() {
+    fn claim_is_not_recorded_when_the_rerender_fails() {
         let home = std::env::temp_dir().join(format!("konak-claim-test-{}", std::process::id()));
         let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
         let mut s = State::default();
         s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: false });
         s.save(&paths);
         let not_installed = claim(&paths, "immich").unwrap_err();
-        claim(&paths, "forgejo").unwrap();
+        // The distro does not exist, so the re-render with claimed_env fails.
+        let failed = claim(&paths, "forgejo");
         let after = State::load(&paths);
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!(not_installed, "not_installed");
-        assert!(after.apps[0].claimed);
+        assert!(failed.is_err());
+        assert!(!after.apps[0].claimed, "claimed only after a successful re-render");
     }
 
     #[test]
@@ -387,9 +395,19 @@ mod tests {
         let mut m = catalog::get("jellyfin").unwrap().clone();
         m.env.insert("PUBLIC_URL".into(), "${KONAK_URL}/x".into());
         m.env.insert("HOST".into(), "${KONAK_HOST}".into());
-        let env = env_lines(&m, "movies");
+        let env = env_lines(&m, "movies", true);
         assert!(env.contains("KONAK_HOST=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=47101"));
         assert!(env.contains("PUBLIC_URL=http://movies.local/x"));
         assert!(env.contains("HOST=movies.local"));
+    }
+
+    #[test]
+    fn claimed_env_only_after_claim() {
+        let m = catalog::get("forgejo").unwrap();
+        assert_eq!(m.claimed_env["FORGEJO_DISABLE_REGISTRATION"], "true");
+        assert!(!env_lines(m, "git", false).contains("FORGEJO_DISABLE_REGISTRATION"));
+        assert!(env_lines(m, "git", true).lines().any(|l| l == "FORGEJO_DISABLE_REGISTRATION=true"));
+        // The compose file falls back to open registration while the app is unclaimed.
+        assert!(m.compose.contains("FORGEJO__service__DISABLE_REGISTRATION=${FORGEJO_DISABLE_REGISTRATION:-false}"));
     }
 }
