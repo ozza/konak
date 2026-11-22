@@ -3,9 +3,9 @@
     "tagline": "Your PC as a home server"
   },
   "install": {
-    "title": "Install Jellyfin",
-    "intro": "Konak sets up everything Jellyfin needs on this PC and makes it reachable from your phone and other devices at home.",
-    "button": "Install Jellyfin",
+    "title": "Set up Konak",
+    "intro": "Konak prepares this PC to run home server apps and makes them reachable from your phone and other devices at home. You pick the apps afterwards.",
+    "button": "Set up Konak",
     "retry": "Try again",
     "running": "Installing… you can keep using your PC.",
     "admin_note": "Windows will ask once for administrator permission."
@@ -22,8 +22,7 @@
     "distro": "Create Konak's Linux environment",
     "systemd": "Configure the environment",
     "engine": "Install the container engine",
-    "app": "Download and start Jellyfin",
-    "network": "Make it reachable on your network"
+    "network": "Make konak.local reachable on your network"
   },
   "state": {
     "pending": "Waiting",
@@ -38,10 +37,6 @@
     "button": "Restart now"
   },
   "done": {
-    "title": "Jellyfin is ready",
-    "body": "Open this address from any device on your home network:",
-    "open": "Open Jellyfin",
-    "media": "Put your videos in the Konak\\Media folder in your user folder.",
     "tray": "Konak keeps running in the system tray when you close this window."
   },
   "summary": {
@@ -57,10 +52,167 @@
     "title": "Something went wrong",
     "uac_declined": "Administrator permission was declined. Konak needs it once to set up WSL and the firewall.",
     "virtualization_off": "Virtualization is turned off in this PC's firmware (BIOS/UEFI). Turn it on, then try again.",
-    "details": "Details"
+    "details": "Details",
+    "invalid_name": "Use 1 to 63 lower-case letters, digits or hyphens, not starting or ending with a hyphen.",
+    "name_reserved": "This name is reserved for Konak's home page.",
+    "name_in_use": "Another app already uses this name.",
+    "name_taken_on_lan": "Another device on your network already uses this name.",
+    "no_lan_ip": "This PC is not connected to a network.",
+    "busy": "This app is busy with another operation. Try again when it finishes.",
+    "unknown_app": "This app is not in the catalog.",
+    "not_installed": "This app is not installed.",
+    "state_unreadable": "Konak's settings file (state.json in the Konak folder) is damaged, so Konak changed nothing. Restore it from a backup, or remove it and run the setup again."
   },
   "tray": {
     "open": "Open Konak",
     "quit": "Quit Konak"
+  },
+  "home": {
+    "apps": "Apps",
+    "no_apps": "No apps installed yet. Install them from the Konak window on the PC.",
+    "cert_title": "Secure connections",
+    "cert_body": "Some apps use HTTPS with Konak's own certificate. Install this certificate once on each device to trust them.",
+    "cert_link": "Download Konak's certificate",
+    "cert_check": "Before you trust it, compare its SHA-256 fingerprint with the one shown in the Konak window on the PC. If you cannot see that window, do not install the certificate."
+  },
+  "panel": {
+    "repair": {
+      "title": "Other devices may not reach Konak",
+      "body": "Konak's firewall rules are missing, for example after Konak was reinstalled. Without them, Windows blocks your apps for other devices or asks for permission. Repairing needs administrator permission once.",
+      "button": "Repair network access",
+      "running": "Repairing network access…",
+      "failed": "Repair did not finish."
+    },
+    "home_link": "konak.local",
+    "home_link_label": "Open Konak's home page, konak.local",
+    "installed_title": "Your apps",
+    "loading": "Loading…",
+    "empty": "No apps installed yet. Pick one below to install it.",
+    "status": {
+      "running": "Running",
+      "starting": "Starting",
+      "unhealthy": "Not responding",
+      "stopped": "Stopped",
+      "missing": "Containers missing",
+      "unknown": "Status unknown"
+    },
+    "busy": {
+      "install": "Installing…",
+      "remove": "Removing…",
+      "rename": "Renaming…",
+      "restart": "Restarting…",
+      "claim": "Making it available…"
+    },
+    "failed": {
+      "install": "Install failed. Konak stopped the app and kept its data, so you can try again.",
+      "remove": "Removing failed.",
+      "rename": "Renaming failed.",
+      "restart": "Restart failed.",
+      "claim": "Could not make it available on your network."
+    },
+    "dismiss": "Dismiss",
+    "actions": {
+      "open": "Open",
+      "restart": "Restart",
+      "logs": "Logs",
+      "rename": "Rename",
+      "remove": "Remove",
+      "group": "Actions for {name}"
+    },
+    "claim": {
+      "notice": "Finish setup on this PC first: create your admin account, then make it available on your network.",
+      "local_only": "For now only this PC can open it, at {url}. Other devices cannot reach it yet.",
+      "open_setup": "Open setup",
+      "done": "Done, make it available",
+      "future_name": "Name on your network after setup: {name}"
+    },
+    "rename": {
+      "label": "Name on your network",
+      "hint": "Lower-case letters, digits and hyphens. The app moves to the new address.",
+      "save": "Save",
+      "cancel": "Cancel"
+    },
+    "logs": {
+      "title": "Logs: {name}",
+      "refresh": "Refresh",
+      "close": "Close",
+      "loading": "Loading logs…",
+      "empty": "No log lines yet.",
+      "note": "Last {n} lines. Passwords and keys are hidden."
+    },
+    "remove": {
+      "title": "Remove {name}?",
+      "body": "The app stops and disappears from your network.",
+      "keep_note": "Its settings and data are kept, so installing it again brings them back.",
+      "delete_label": "Also delete the app's data",
+      "delete_warning": "This permanently deletes the app's settings, accounts and database. It cannot be undone. Files in your Media and Photos folders are not touched.",
+      "confirm": "Remove",
+      "confirm_delete": "Remove and delete data",
+      "cancel": "Cancel"
+    },
+    "catalog": {
+      "title": "Add apps",
+      "empty": "Every app in the catalog is installed.",
+      "ram": "Needs at least {amount} of memory",
+      "https": "Uses a secure connection (HTTPS). Each device needs Konak's certificate once, see below.",
+      "install": "Install",
+      "install_label": "Install {name}"
+    },
+    "cert": {
+      "title": "Secure connections (HTTPS)",
+      "what": "Some apps, like password managers, only work over a secure connection. Konak signs those connections with its own certificate, which exists only on this PC. A device trusts these apps after you install the certificate on it once.",
+      "download": "On the device, open this address or scan the code:",
+      "qr_label": "QR code for {url}",
+      "fingerprint": "Certificate fingerprint (SHA-256)",
+      "fingerprint_check": "The certificate is downloaded over a plain connection, so check it: before you trust it, make sure the fingerprint your device shows is exactly the one in this window. If it differs, do not install it.",
+      "loading": "Preparing the certificate…",
+      "steps_title": "Install the certificate",
+      "ios": "iPhone and iPad",
+      "android": "Android",
+      "windows": "Another Windows PC",
+      "macos": "Mac",
+      "this_pc_title": "This PC",
+      "this_pc_body": "Browsers on this PC need the certificate too. Windows asks you to confirm.",
+      "trust": "Trust on this PC",
+      "trusting": "Waiting for Windows…",
+      "trusted": "The certificate is trusted on this PC.",
+      "trust_failed": "The certificate was not added.",
+      "ios_1": "Open the address in Safari and allow the download.",
+      "ios_2": "Open Settings, tap Profile Downloaded, then Install. Under More Details, compare the fingerprint with the one in the Konak window on the PC. If it differs, do not install it.",
+      "ios_3": "Go to Settings > General > About > Certificate Trust Settings and turn on full trust for Konak.",
+      "android_1": "Open the address and download the file.",
+      "android_2": "Open Settings > Security > Encryption & credentials > Install a certificate > CA certificate, then pick the file. Menu names vary by phone maker.",
+      "android_3": "Under Trusted credentials > User > Konak, compare the fingerprint with the one in the Konak window on the PC. If it differs, remove the certificate.",
+      "windows_1": "Download the file and run certutil -dump on it in a terminal. Compare the Cert Hash(sha256) line with the fingerprint in the Konak window on the PC. If it differs, do not install it.",
+      "windows_2": "Open the file, choose Install Certificate > Current User, and place it in Trusted Root Certification Authorities.",
+      "macos_1": "Download the file and open it. Keychain Access adds it to the login keychain.",
+      "macos_2": "Open the certificate in Keychain Access and compare the SHA-256 fingerprint with the one in the Konak window on the PC. If it differs, delete it.",
+      "macos_3": "Expand Trust and set When using this certificate to Always Trust."
+    },
+    "network": {
+      "public": "This network is set to Public, so other devices at home cannot reach your apps. Switch it to Private in Windows network settings if this is your home network."
+    }
+  },
+  "apps": {
+    "jellyfin": {
+      "name": "Jellyfin",
+      "description": "Watch your movies, shows and music on any device."
+    },
+    "immich": {
+      "name": "Immich",
+      "description": "Back up the photos and videos from your phone and browse them in one place."
+    },
+    "nextcloud": {
+      "name": "Nextcloud",
+      "description": "Your own cloud for files, calendars and contacts, synced across your devices."
+    },
+    "vaultwarden": {
+      "name": "Vaultwarden",
+      "description": "A password manager that works with the Bitwarden apps and browser extensions."
+    },
+    "forgejo": {
+      "name": "Forgejo",
+      "description": "Host your own Git repositories, with issues and pull requests."
+    }
   }
 }

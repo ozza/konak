@@ -1,0 +1,56 @@
+# Nextcloud 35.0.3 (apache) with PostgreSQL 18.7 and Redis 8.10.3: nextcloud/docker's
+# .examples/docker-compose/insecure/postgres/apache/compose.yaml. Changes: images pinned by digest
+# (postgres 18 instead of the example's floating `alpine` tag, which is now 19 and not yet supported
+# by Nextcloud), the port bound to 127.0.0.1:${KONAK_PORT}, and `env_file: db.env` read from Konak's
+# single `.env` (which also carries the trusted-domain and overwrite settings). Data stays in named
+# volumes on the distro's ext4 disk.
+---
+services:
+  # Note: PostgreSQL is an external service. You can find more information about the configuration here:
+  # https://hub.docker.com/_/postgres
+  db:
+    # Note: Check the recommend version here: https://docs.nextcloud.com/server/latest/admin_manual/installation/system_requirements.html#server
+    image: docker.io/library/postgres:18.7-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
+    restart: always
+    volumes:
+      - db:/var/lib/postgresql:Z
+    env_file:
+      - .env
+
+  # Note: Redis is an external service. You can find more information about the configuration here:
+  # https://hub.docker.com/_/redis
+  redis:
+    image: docker.io/library/redis:8.10.3-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3
+    restart: always
+
+  app:
+    image: docker.io/library/nextcloud:35.0.3-apache@sha256:f22d1dd63844bd15bbf6c2019149653c3d1c775ba48b173b56c3c6ad5f386196
+    restart: always
+    ports:
+      - 127.0.0.1:${KONAK_PORT}:80
+    volumes:
+      - nextcloud:/var/www/html:z
+      # NOTE: The `volumes` config of the `cron` and `app` containers must match
+    environment:
+      - POSTGRES_HOST=db
+      - REDIS_HOST=redis
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - redis
+
+  cron:
+    image: docker.io/library/nextcloud:35.0.3-apache@sha256:f22d1dd63844bd15bbf6c2019149653c3d1c775ba48b173b56c3c6ad5f386196
+    restart: always
+    volumes:
+      - nextcloud:/var/www/html:z
+      # NOTE: The `volumes` config of the `cron` and `app` containers must match
+    entrypoint: /cron.sh
+    depends_on:
+      - db
+      - redis
+
+volumes:
+  db:
+  nextcloud:

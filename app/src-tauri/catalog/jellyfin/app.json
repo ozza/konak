@@ -1,0 +1,11 @@
+{
+  "id": "jellyfin",
+  "default_name": "jellyfin",
+  "port": 47101,
+  "https": false,
+  "health_path": "/health",
+  "secrets": [],
+  "mounts": { "MEDIA_DIR": "media" },
+  "min_ram_mb": 2048,
+  "env": {}
+}

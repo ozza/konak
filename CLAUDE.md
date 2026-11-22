@@ -14,6 +14,9 @@ Native Windows 11 desktop app that turns the user's PC into a self-hosted servic
   No sub-path hosting (`konak.local/app`), because many apps break under it.
 - LAN exposure: the installer adds Private-profile allow rules and Public-profile block rules for Konak's programs, so the Windows "allow access" popup never appears. Konak detects a Public home network and offers a one-click switch to Private.
 - App runtime: containers only, decided 2026-11-12. A hybrid with native Windows builds for media servers was considered and dropped to keep a single runtime model. Known container limits (no real-time detection of files added from Windows, GPU transcoding NVIDIA-only) are accepted for now. See `.audit/research.md`.
+- UI: Svelte + Tailwind CSS, confirmed 2026-11-22.
+- First app catalog, decided 2026-11-22: Jellyfin, Immich, Nextcloud, Vaultwarden, and Forgejo (LTS) as the git server. Plan: `.audit/plan-catalog-panel-mcp.md`.
+- HTTPS, decided 2026-11-22: apps that need it (Vaultwarden) use Konak's own local certificate authority, name-constrained to `.local`. Each device installs the root certificate once. Other apps stay on HTTP.
 - Kept from idea.md, unchallenged: Tauri shell, Caddy and the mDNS responder as native Windows processes, compose-format app definitions, remote access through a guided Tailscale install.
 
 ## Planned features
@@ -28,8 +31,7 @@ Native Windows 11 desktop app that turns the user's PC into a self-hosted servic
     - LAN adapter choice.
   - **Write tools:** install, remove, restart, change settings, back up and restore. Each one needs explicit user confirmation in the Konak UI for destructive or outward-facing actions. Secrets are redacted from every tool output.
 
-## Proposed, not final (confirm with the user before UI work starts)
-- UI: Svelte + Tailwind CSS.
+## Proposed, not final
 - Tray agent: Rust, sharing code with the Tauri core.
 
 ## Localization

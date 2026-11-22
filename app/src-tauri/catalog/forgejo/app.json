@@ -1,0 +1,12 @@
+{
+  "id": "forgejo",
+  "default_name": "forgejo",
+  "port": 47105,
+  "https": false,
+  "health_path": "/api/healthz",
+  "secrets": ["FORGEJO_SECRET_KEY"],
+  "mounts": {},
+  "min_ram_mb": 512,
+  "env": {},
+  "claimed_env": { "FORGEJO_DISABLE_REGISTRATION": "true" }
+}

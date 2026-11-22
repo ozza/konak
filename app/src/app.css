@@ -16,6 +16,7 @@
   --color-error-bg: #fbeaea;
   --color-error-border: #d98c8c;
   --color-error: #9b2c2c;
+  --color-on-error: #ffffff;
   --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 }
 
@@ -35,7 +36,19 @@
     --color-error-bg: #3a2222;
     --color-error-border: #8a4444;
     --color-error: #f0a3a3;
+    --color-on-error: #2a1010;
   }
+}
+
+/* Buttons used by the panel. */
+@utility btn {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-md border border-border bg-panel px-3 py-1.5 text-sm font-medium hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50;
+}
+@utility btn-primary {
+  @apply btn border-transparent bg-accent text-on-accent hover:bg-accent-strong;
+}
+@utility btn-danger {
+  @apply btn border-transparent bg-error text-on-error hover:bg-error/85;
 }
 
 html,

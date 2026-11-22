@@ -1,0 +1,11 @@
+{
+  "id": "vaultwarden",
+  "default_name": "vaultwarden",
+  "port": 47104,
+  "https": true,
+  "health_path": "/alive",
+  "secrets": [],
+  "mounts": {},
+  "min_ram_mb": 256,
+  "env": {}
+}

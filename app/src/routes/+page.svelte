@@ -1,10 +1,10 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import { t, has } from "$lib/i18n";
   import StepList from "$lib/StepList.svelte";
+  import Panel from "$lib/panel/Panel.svelte";
 
   type Step = { id: string; state: "pending" | "running" | "done" | "skipped" | "failed" };
   type Status = {
@@ -15,6 +15,9 @@
     done: boolean;
     url: string | null;
     network_category: string | null;
+    firewall_missing: boolean;
+    repairing: boolean;
+    repair_error: string | null;
     summary: { minutes: number; uac_prompts: number; reboots: number; download_mb: number } | null;
   };
 
@@ -36,6 +39,32 @@
   }
 </script>
 
+{#if status?.done}
+  <Panel
+    networkCategory={status.network_category}
+    firewallMissing={status.firewall_missing}
+    repairing={status.repairing}
+    repairError={status.repair_error}
+  />
+  <footer class="mx-auto flex max-w-4xl flex-col gap-4 px-4 pb-6 sm:px-6">
+    <p class="text-sm text-muted">{t("done.tray")}</p>
+    {#if status.summary}
+      <section class="rounded-md border border-border bg-panel p-4" aria-labelledby="summary-title">
+        <h2 id="summary-title" class="font-semibold">{t("summary.title")}</h2>
+        <dl class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+          <dt class="text-muted">{t("summary.time")}</dt>
+          <dd>{t("summary.minutes", { n: status.summary.minutes.toFixed(1) })}</dd>
+          <dt class="text-muted">{t("summary.uac")}</dt>
+          <dd>{status.summary.uac_prompts}</dd>
+          <dt class="text-muted">{t("summary.reboots")}</dt>
+          <dd>{status.summary.reboots}</dd>
+          <dt class="text-muted">{t("summary.download")}</dt>
+          <dd>{t("summary.mb", { n: Math.round(status.summary.download_mb) })}</dd>
+        </dl>
+      </section>
+    {/if}
+  </footer>
+{:else}
 <main class="mx-auto flex max-w-xl flex-col gap-5 px-6 py-6">
   <header>
     <h1 class="text-2xl font-semibold">Konak</h1>
@@ -43,19 +72,7 @@
   </header>
 
   {#if status}
-    {#if status.done && status.url}
-      <section class="rounded-md border border-border bg-panel p-4" aria-labelledby="done-title">
-        <h2 id="done-title" class="text-lg font-semibold text-ok">✓ {t("done.title")}</h2>
-        <p class="mt-2 text-sm">{t("done.body")}</p>
-        <p class="mt-1 font-mono text-base select-all">{status.url}</p>
-        <button
-          class="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent hover:bg-accent-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-          onclick={() => openUrl(status!.url!)}>{t("done.open")}</button
-        >
-        <p class="mt-3 text-sm text-muted">{t("done.media")}</p>
-        <p class="mt-1 text-sm text-muted">{t("done.tray")}</p>
-      </section>
-    {:else if status.reboot_needed}
+    {#if status.reboot_needed}
       <section class="rounded-md border border-warn-border bg-warn-bg p-4" aria-labelledby="reboot-title">
         <h2 id="reboot-title" class="font-semibold">{t("reboot.title")}</h2>
         <p class="mt-1 text-sm">{t("reboot.body")}</p>
@@ -106,24 +123,9 @@
       </section>
     {/if}
 
-    {#if started || status.done}
+    {#if started}
       <StepList steps={status.steps} />
-    {/if}
-
-    {#if status.summary}
-      <section class="rounded-md border border-border bg-panel p-4" aria-labelledby="summary-title">
-        <h2 id="summary-title" class="font-semibold">{t("summary.title")}</h2>
-        <dl class="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-          <dt class="text-muted">{t("summary.time")}</dt>
-          <dd>{t("summary.minutes", { n: status.summary.minutes.toFixed(1) })}</dd>
-          <dt class="text-muted">{t("summary.uac")}</dt>
-          <dd>{status.summary.uac_prompts}</dd>
-          <dt class="text-muted">{t("summary.reboots")}</dt>
-          <dd>{status.summary.reboots}</dd>
-          <dt class="text-muted">{t("summary.download")}</dt>
-          <dd>{t("summary.mb", { n: Math.round(status.summary.download_mb) })}</dd>
-        </dl>
-      </section>
     {/if}
   {/if}
 </main>
+{/if}

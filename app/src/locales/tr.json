@@ -3,9 +3,9 @@
     "tagline": "Bilgisayarınız ev sunucunuz olsun"
   },
   "install": {
-    "title": "Jellyfin'i kur",
-    "intro": "Konak, Jellyfin'in ihtiyaç duyduğu her şeyi bu bilgisayara kurar ve evdeki telefonunuzdan ve diğer cihazlardan erişilebilir hale getirir.",
-    "button": "Jellyfin'i kur",
+    "title": "Konak'ı kur",
+    "intro": "Konak bu bilgisayarı ev sunucusu uygulamalarını çalıştırmaya hazırlar ve onları evdeki telefonunuzdan ve diğer cihazlardan erişilebilir hale getirir. Uygulamaları ardından siz seçersiniz.",
+    "button": "Konak'ı kur",
     "retry": "Tekrar dene",
     "running": "Kuruluyor… bilgisayarınızı kullanmaya devam edebilirsiniz.",
     "admin_note": "Windows bir kez yönetici izni isteyecek."
@@ -22,8 +22,7 @@
     "distro": "Konak'ın Linux ortamını oluştur",
     "systemd": "Ortamı yapılandır",
     "engine": "Konteyner motorunu kur",
-    "app": "Jellyfin'i indir ve başlat",
-    "network": "Ağda erişilebilir yap"
+    "network": "konak.local adresini ağda erişilebilir yap"
   },
   "state": {
     "pending": "Bekliyor",
@@ -38,10 +37,6 @@
     "button": "Şimdi yeniden başlat"
   },
   "done": {
-    "title": "Jellyfin hazır",
-    "body": "Ev ağınızdaki herhangi bir cihazdan bu adresi açın:",
-    "open": "Jellyfin'i aç",
-    "media": "Videolarınızı kullanıcı klasörünüzdeki Konak\\Media klasörüne koyun.",
     "tray": "Bu pencereyi kapattığınızda Konak sistem tepsisinde çalışmaya devam eder."
   },
   "summary": {
@@ -57,10 +52,167 @@
     "title": "Bir sorun oluştu",
     "uac_declined": "Yönetici izni reddedildi. Konak'ın WSL'i ve güvenlik duvarını kurmak için bu izne bir kez ihtiyacı var.",
     "virtualization_off": "Bu bilgisayarın donanım ayarlarında (BIOS/UEFI) sanallaştırma kapalı. Açıp tekrar deneyin.",
-    "details": "Ayrıntılar"
+    "details": "Ayrıntılar",
+    "invalid_name": "1 ile 63 arasında küçük harf, rakam veya tire kullanın; tire ile başlamasın ve bitmesin.",
+    "name_reserved": "Bu ad Konak ana sayfasına ayrılmıştır.",
+    "name_in_use": "Bu adı başka bir uygulama kullanıyor.",
+    "name_taken_on_lan": "Ağınızdaki başka bir cihaz bu adı kullanıyor.",
+    "no_lan_ip": "Bu bilgisayar bir ağa bağlı değil.",
+    "busy": "Bu uygulamada başka bir işlem sürüyor. Bittiğinde tekrar deneyin.",
+    "unknown_app": "Bu uygulama katalogda yok.",
+    "not_installed": "Bu uygulama kurulu değil.",
+    "state_unreadable": "Konak'ın ayar dosyası (Konak klasöründeki state.json) bozuk, bu yüzden Konak hiçbir şeyi değiştirmedi. Dosyayı bir yedekten geri yükleyin ya da silip kurulumu yeniden çalıştırın."
   },
   "tray": {
     "open": "Konak'ı aç",
     "quit": "Konak'tan çık"
+  },
+  "home": {
+    "apps": "Uygulamalar",
+    "no_apps": "Henüz kurulu uygulama yok. Bilgisayardaki Konak penceresinden kurabilirsiniz.",
+    "cert_title": "Güvenli bağlantılar",
+    "cert_body": "Bazı uygulamalar Konak'ın kendi sertifikasıyla HTTPS kullanır. Onlara güvenmek için bu sertifikayı her cihaza bir kez kurun.",
+    "cert_link": "Konak sertifikasını indir",
+    "cert_check": "Güvenmeden önce SHA-256 parmak izini bilgisayardaki Konak penceresinde gösterilenle karşılaştırın. O pencereyi göremiyorsanız sertifikayı kurmayın."
+  },
+  "panel": {
+    "repair": {
+      "title": "Diğer cihazlar Konak'a ulaşamayabilir",
+      "body": "Konak'ın güvenlik duvarı kuralları eksik; örneğin Konak yeniden kurulduğunda bu olur. Bu kurallar olmadan Windows uygulamalarınızı diğer cihazlara kapatır ya da izin ister. Onarmak için bir kez yönetici izni gerekir.",
+      "button": "Ağ erişimini onar",
+      "running": "Ağ erişimi onarılıyor…",
+      "failed": "Onarım tamamlanmadı."
+    },
+    "home_link": "konak.local",
+    "home_link_label": "Konak ana sayfasını aç, konak.local",
+    "installed_title": "Uygulamalarınız",
+    "loading": "Yükleniyor…",
+    "empty": "Henüz kurulu uygulama yok. Kurmak için aşağıdan birini seçin.",
+    "status": {
+      "running": "Çalışıyor",
+      "starting": "Başlıyor",
+      "unhealthy": "Yanıt vermiyor",
+      "stopped": "Durdu",
+      "missing": "Konteynerler eksik",
+      "unknown": "Durum bilinmiyor"
+    },
+    "busy": {
+      "install": "Kuruluyor…",
+      "remove": "Kaldırılıyor…",
+      "rename": "Adı değiştiriliyor…",
+      "restart": "Yeniden başlatılıyor…",
+      "claim": "Ağda erişime açılıyor…"
+    },
+    "failed": {
+      "install": "Kurulum başarısız oldu. Konak uygulamayı durdurdu ve verilerini sakladı, yeniden deneyebilirsiniz.",
+      "remove": "Kaldırma başarısız oldu.",
+      "rename": "Ad değiştirme başarısız oldu.",
+      "restart": "Yeniden başlatma başarısız oldu.",
+      "claim": "Ağda erişime açılamadı."
+    },
+    "dismiss": "Kapat",
+    "actions": {
+      "open": "Aç",
+      "restart": "Yeniden başlat",
+      "logs": "Kayıtlar",
+      "rename": "Adını değiştir",
+      "remove": "Kaldır",
+      "group": "{name} işlemleri"
+    },
+    "claim": {
+      "notice": "Önce kurulumu bu bilgisayarda tamamlayın: yönetici hesabınızı oluşturun, ardından uygulamayı ağınızda erişime açın.",
+      "local_only": "Şimdilik yalnızca bu bilgisayardan {url} adresinde açılabilir. Diğer cihazlar henüz erişemez.",
+      "open_setup": "Kurulumu aç",
+      "done": "Tamam, ağda erişime aç",
+      "future_name": "Kurulumdan sonra ağdaki adı: {name}"
+    },
+    "rename": {
+      "label": "Ağdaki adı",
+      "hint": "Küçük harf, rakam ve tire kullanın. Uygulama yeni adrese taşınır.",
+      "save": "Kaydet",
+      "cancel": "Vazgeç"
+    },
+    "logs": {
+      "title": "Kayıtlar: {name}",
+      "refresh": "Yenile",
+      "close": "Kapat",
+      "loading": "Kayıtlar yükleniyor…",
+      "empty": "Henüz kayıt satırı yok.",
+      "note": "Son {n} satır. Parolalar ve anahtarlar gizlenir."
+    },
+    "remove": {
+      "title": "{name} kaldırılsın mı?",
+      "body": "Uygulama durur ve ağınızdan kaybolur.",
+      "keep_note": "Ayarları ve verileri saklanır; uygulamayı yeniden kurduğunuzda geri gelir.",
+      "delete_label": "Uygulamanın verilerini de sil",
+      "delete_warning": "Bu işlem uygulamanın ayarlarını, hesaplarını ve veritabanını kalıcı olarak siler. Geri alınamaz. Medya ve Fotoğraflar klasörlerinizdeki dosyalara dokunulmaz.",
+      "confirm": "Kaldır",
+      "confirm_delete": "Kaldır ve verileri sil",
+      "cancel": "Vazgeç"
+    },
+    "catalog": {
+      "title": "Uygulama ekle",
+      "empty": "Katalogdaki tüm uygulamalar kurulu.",
+      "ram": "En az {amount} bellek gerekir",
+      "https": "Güvenli bağlantı (HTTPS) kullanır. Her cihaza Konak sertifikasının bir kez kurulması gerekir, aşağıya bakın.",
+      "install": "Kur",
+      "install_label": "{name} uygulamasını kur"
+    },
+    "cert": {
+      "title": "Güvenli bağlantılar (HTTPS)",
+      "what": "Parola yöneticisi gibi bazı uygulamalar yalnızca güvenli bağlantıyla çalışır. Konak bu bağlantıları yalnızca bu bilgisayarda bulunan kendi sertifikasıyla imzalar. Sertifikayı bir cihaza bir kez kurduğunuzda o cihaz bu uygulamalara güvenir.",
+      "download": "Cihazda bu adresi açın veya kodu okutun:",
+      "qr_label": "{url} için QR kodu",
+      "fingerprint": "Sertifika parmak izi (SHA-256)",
+      "fingerprint_check": "Sertifika şifresiz bir bağlantıyla indirilir, bu yüzden kontrol edin: güvenmeden önce cihazınızın gösterdiği parmak izinin bu penceredekiyle birebir aynı olduğundan emin olun. Farklıysa kurmayın.",
+      "loading": "Sertifika hazırlanıyor…",
+      "steps_title": "Sertifikayı kurun",
+      "ios": "iPhone ve iPad",
+      "android": "Android",
+      "windows": "Başka bir Windows bilgisayar",
+      "macos": "Mac",
+      "this_pc_title": "Bu bilgisayar",
+      "this_pc_body": "Bu bilgisayardaki tarayıcıların da sertifikaya ihtiyacı var. Windows onaylamanızı ister.",
+      "trust": "Bu bilgisayarda güven",
+      "trusting": "Windows bekleniyor…",
+      "trusted": "Sertifikaya bu bilgisayarda güveniliyor.",
+      "trust_failed": "Sertifika eklenmedi.",
+      "ios_1": "Adresi Safari'de açın ve indirmeye izin verin.",
+      "ios_2": "Ayarlar'ı açın, Profil İndirildi'ye ve ardından Yükle'ye dokunun. Diğer Ayrıntılar altındaki parmak izini bilgisayardaki Konak penceresindekiyle karşılaştırın. Farklıysa kurmayın.",
+      "ios_3": "Ayarlar > Genel > Hakkında > Sertifika Güven Ayarları'na gidin ve Konak için tam güveni açın.",
+      "android_1": "Adresi açın ve dosyayı indirin.",
+      "android_2": "Ayarlar > Güvenlik > Şifreleme ve kimlik bilgileri > Sertifika yükle > CA sertifikası'nı açın ve dosyayı seçin. Menü adları telefon markasına göre değişir.",
+      "android_3": "Güvenilen kimlik bilgileri > Kullanıcı > Konak altındaki parmak izini bilgisayardaki Konak penceresindekiyle karşılaştırın. Farklıysa sertifikayı kaldırın.",
+      "windows_1": "Dosyayı indirin ve bir terminalde üzerinde certutil -dump çalıştırın. Cert Hash(sha256) satırını bilgisayardaki Konak penceresindeki parmak iziyle karşılaştırın. Farklıysa kurmayın.",
+      "windows_2": "Dosyayı açın, Sertifika Yükle > Geçerli Kullanıcı'yı seçin ve Güvenilen Kök Sertifika Yetkilileri deposuna yerleştirin.",
+      "macos_1": "Dosyayı indirip açın. Anahtar Zinciri Erişimi onu oturum açma anahtar zincirine ekler.",
+      "macos_2": "Sertifikayı Anahtar Zinciri Erişimi'nde açın ve SHA-256 parmak izini bilgisayardaki Konak penceresindekiyle karşılaştırın. Farklıysa silin.",
+      "macos_3": "Güven bölümünü açın ve Bu sertifikayı kullanırken seçeneğini Her Zaman Güven yapın."
+    },
+    "network": {
+      "public": "Bu ağ Ortak olarak ayarlı, bu yüzden evdeki diğer cihazlar uygulamalarınıza ulaşamaz. Bu sizin ev ağınızsa Windows ağ ayarlarından Özel olarak değiştirin."
+    }
+  },
+  "apps": {
+    "jellyfin": {
+      "name": "Jellyfin",
+      "description": "Filmlerinizi, dizilerinizi ve müziğinizi her cihazda izleyin."
+    },
+    "immich": {
+      "name": "Immich",
+      "description": "Telefonunuzdaki fotoğraf ve videoları yedekleyin, hepsine tek yerden göz atın."
+    },
+    "nextcloud": {
+      "name": "Nextcloud",
+      "description": "Dosyalarınız, takviminiz ve kişileriniz için cihazlarınız arasında eşitlenen kendi bulutunuz."
+    },
+    "vaultwarden": {
+      "name": "Vaultwarden",
+      "description": "Bitwarden uygulamaları ve tarayıcı eklentileriyle çalışan bir parola yöneticisi."
+    },
+    "forgejo": {
+      "name": "Forgejo",
+      "description": "Kendi Git depolarınızı barındırın; konu takibi ve çekme istekleri dahil."
+    }
   }
 }
