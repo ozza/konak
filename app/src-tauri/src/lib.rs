@@ -356,7 +356,11 @@ pub fn ui_text(key: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Headless modes run before the Tauri builder, so the single-instance plugin cannot swallow them.
-    if let Some(opts) = uninstall::parse(&std::env::args().collect::<Vec<_>>()) {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(target) = uninstall::parse_stop(&args) {
+        std::process::exit(uninstall::run_stop(target));
+    }
+    if let Some(opts) = uninstall::parse(&args) {
         std::process::exit(uninstall::run(opts));
     }
     // Headless MCP server on stdio. Resources sit next to the exe, as Tauri's resource_dir has them on Windows.
@@ -390,7 +394,15 @@ pub fn run() {
                 resume = true;
             }
             if state.done {
-                sup.start();
+                let (paths, sup) = (paths.clone(), Arc::clone(&sup));
+                std::thread::spawn(move || {
+                    // A Caddy left from an earlier run would keep port 80 and serve its old config.
+                    match uninstall::stop_leftovers(&paths) {
+                        Ok(s) if s == "nothing running" => {}
+                        r => log(&paths, &format!("leftover processes: {r:?}")),
+                    }
+                    sup.start();
+                });
             }
             app.manage(Konak { paths: paths.clone(), sup, rt: Mutex::new(Runtime::default()), busy: Mutex::new(HashSet::new()) });
             // Apps from before the catalog layout are re-rendered once (new port, env), as ordinary

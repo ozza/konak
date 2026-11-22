@@ -296,6 +296,10 @@ impl Supervisor {
             return;
         }
         let mut p = self.procs.lock().unwrap();
+        // stop_all may have run while this tick waited for the lock.
+        if !*self.started.lock().unwrap() {
+            return;
+        }
         let log_dir = self.paths.log_dir();
 
         if !alive(&mut p.keepalive) {
@@ -349,7 +353,9 @@ impl Supervisor {
         let _ = std::fs::write(self.paths.supervisor_file(), serde_json::to_string_pretty(&beat).unwrap());
     }
 
+    /// Stops the children for good: later ticks (the loop, an op thread) do nothing.
     pub fn stop_all(&self) {
+        *self.started.lock().unwrap() = false;
         let mut p = self.procs.lock().unwrap();
         kill(&mut p.mdns);
         kill(&mut p.caddy);

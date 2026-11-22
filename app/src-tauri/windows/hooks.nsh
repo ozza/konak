@@ -1,6 +1,22 @@
 ﻿; Tauri NSIS installer hooks (bundle.windows.nsis.installerHooks). Saved as UTF-8 with BOM so
 ; makensis reads the Turkish text correctly.
 
+; Before the installer writes any file over an existing install: stop that install's Konak, caddy,
+; mdns-responder and keepalive (`--stop`, src/uninstall.rs, exact path and command-line matching).
+; Otherwise a running caddy.exe keeps its image locked and the file copy fails. It runs a copy of
+; the new konak.exe from the plugins folder, so an older installed exe never sees a flag it does not
+; know (it would start the app and ExecWait would never return).
+!macro NSIS_HOOK_PREINSTALL
+  ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+    InitPluginsDir
+    File "/oname=$PLUGINSDIR\konak-stop.exe" "${MAINBINARYSRCPATH}"
+    DetailPrint "Stopping the running Konak"
+    ExecWait '"$PLUGINSDIR\konak-stop.exe" --stop "$INSTDIR\${MAINBINARYNAME}.exe"' $R7
+    DetailPrint "Konak stop finished with exit code $R7"
+    Delete "$PLUGINSDIR\konak-stop.exe"
+  ${EndIf}
+!macroend
+
 ; Before the uninstaller removes any file: one question (delete all Konak data too? default No),
 ; then `konak.exe --uninstall [--purge]` (src/uninstall.rs) undoes what Konak set up outside its
 ; folder. Silent (/S) and passive (/P) runs take the default, No, without asking. Updates run the

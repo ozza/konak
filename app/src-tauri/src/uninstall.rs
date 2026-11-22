@@ -104,14 +104,18 @@ pub fn owned_processes(procs: &[Proc], me: u32, exe: &Path, paths: &Paths, wsl: 
     konak
 }
 
-fn stop_processes(paths: &Paths, exe: &Path) -> Result<String, String> {
+/// Stops the processes this install owns (see `owned_processes`). With `with_konak` false, only the
+/// children (caddy, mdns-responder, keepalive): a starting Konak clears leftovers of an earlier run
+/// that way, without touching `--mcp` servers started from the same exe.
+fn stop_processes_of(paths: &Paths, exe: &Path, with_konak: bool) -> Result<String, String> {
     let out = shell::run(
         "powershell.exe",
         &["-NoProfile", "-NonInteractive", "-Command", "@(Get-CimInstance Win32_Process | Select-Object ProcessId, ExecutablePath, CommandLine) | ConvertTo-Json -Compress"],
     );
     let procs: Vec<Proc> = serde_json::from_str(out.text.trim()).map_err(|e| format!("cannot list processes: {e}: {}", tail(&out.text, 2)))?;
     let wsl = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join(r"System32\wsl.exe");
-    let targets = owned_processes(&procs, std::process::id(), exe, paths, &wsl);
+    let mut targets = owned_processes(&procs, std::process::id(), exe, paths, &wsl);
+    targets.retain(|(_, what)| with_konak || *what != "konak");
     if targets.is_empty() {
         return Ok("nothing running".into());
     }
@@ -129,6 +133,39 @@ fn stop_processes(paths: &Paths, exe: &Path) -> Result<String, String> {
         Ok(format!("stopped {}", stopped.join(", ")))
     } else {
         Err(errors.join("; "))
+    }
+}
+
+fn stop_processes(paths: &Paths, exe: &Path) -> Result<String, String> {
+    stop_processes_of(paths, exe, true)
+}
+
+/// At startup, before the supervisor runs: children of an earlier Konak run of this install that
+/// are still alive (from a build without the job object, or a run killed before it existed).
+pub fn stop_leftovers(paths: &Paths) -> Result<String, String> {
+    stop_processes_of(paths, &std::env::current_exe().map_err(|e| e.to_string())?, false)
+}
+
+/// `konak.exe --stop [<installed konak.exe>]`: stops that install's running Konak and its children,
+/// and nothing else. Used by the NSIS installer before it overwrites the files of a running install;
+/// it runs a copy of the new exe, so the old one never has to understand this flag.
+pub fn parse_stop(args: &[String]) -> Option<Option<PathBuf>> {
+    let i = args.iter().skip(1).position(|a| a == "--stop")? + 1;
+    Some(args.get(i + 1).filter(|a| !a.starts_with("--")).map(PathBuf::from))
+}
+
+pub fn run_stop(target: Option<PathBuf>) -> i32 {
+    let exe = target.or_else(|| std::env::current_exe().ok()).unwrap_or_default();
+    let paths = Paths::for_uninstall(exe.parent().unwrap_or(Path::new(".")).to_path_buf());
+    match stop_processes(&paths, &exe) {
+        Ok(s) => {
+            println!("Konak stop: {s}");
+            0
+        }
+        Err(e) => {
+            println!("Konak stop: FAILED: {e}");
+            1
+        }
     }
 }
 
@@ -349,6 +386,15 @@ mod tests {
         // --purge alone does nothing; argv[0] is never a flag.
         assert_eq!(parse(&args(&["konak.exe", "--purge"])), None);
         assert_eq!(parse(&args(&["--uninstall"])), None);
+    }
+
+    #[test]
+    fn parses_stop_flag() {
+        assert_eq!(parse_stop(&args(&["konak.exe"])), None);
+        assert_eq!(parse_stop(&args(&["konak.exe", "--uninstall"])), None);
+        assert_eq!(parse_stop(&args(&["konak.exe", "--stop"])), Some(None));
+        assert_eq!(parse_stop(&args(&["konak-stop.exe", "--stop", r"C:\K\konak.exe"])), Some(Some(PathBuf::from(r"C:\K\konak.exe"))));
+        assert_eq!(parse_stop(&args(&["--stop"])), None);
     }
 
     #[test]

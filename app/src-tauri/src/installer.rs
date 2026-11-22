@@ -334,6 +334,7 @@ pub fn run_step(step: &str, paths: &Paths, state: &mut State, pre: &Preflight, s
         "network" => {
             let ip = lan_ip().ok_or("no LAN IP address")?;
             crate::ca::ensure(paths)?;
+            let _ = crate::uninstall::stop_leftovers(paths);
             sup.start();
             sup.tick();
             let host = format!("{HOME_NAME}.local");
