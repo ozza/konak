@@ -268,29 +268,31 @@ fn installed(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
 pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
     let m = manifest(id)?;
     let state = State::try_load(paths)?;
-    let (name, claimed, _reservation) = match state.apps.iter().find(|a| a.id == id) {
+    let (name, claimed, reservation) = match state.apps.iter().find(|a| a.id == id) {
         Some(a) => (a.name.clone(), a.claimed, None),
         None => {
             let (name, r) = pick_name(paths, &state, id, &m.default_name)?;
             (name, false, Some(r))
         }
     };
+    let repair = reservation.is_none();
     run_install(paths, m, &name, claimed, None)?;
     let mut result = None;
     update_state(paths, |s| {
         s.rerender.retain(|r| r != id);
-        let app = match s.apps.iter().find(|a| a.id == id) {
-            Some(a) => a.clone(),
+        result = match s.apps.iter().find(|a| a.id == id) {
+            Some(a) => Some(a.clone()),
+            // Removed while it was being repaired: a repair never brings an app back.
+            None if repair => None,
             None => {
                 // New apps stay off the LAN until the user has created the admin account (`claim`).
                 let a = InstalledApp { id: id.into(), name: name.clone(), installed_unix: now(), claimed: false };
                 s.apps.push(a.clone());
-                a
+                Some(a)
             }
         };
-        result = Some(app);
     })?;
-    Ok(result.unwrap())
+    result.ok_or_else(|| "not_installed".into())
 }
 
 /// Removes the app's containers; `delete_data` also deletes its data in the distro. Windows folders

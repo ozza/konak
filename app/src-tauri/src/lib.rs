@@ -391,20 +391,18 @@ pub fn run() {
             }
             if state.done {
                 sup.start();
-                // Apps from before the catalog layout are re-rendered once (new port, env).
-                if !state.rerender.is_empty() {
-                    let (paths, sup, ids) = (paths.clone(), Arc::clone(&sup), state.rerender.clone());
-                    std::thread::spawn(move || {
-                        for id in ids {
-                            if let Err(e) = apps::install(&paths, &id) {
-                                log(&paths, &format!("re-render of {id} failed: {e}"));
-                            }
-                        }
-                        sup.tick();
-                    });
-                }
             }
             app.manage(Konak { paths: paths.clone(), sup, rt: Mutex::new(Runtime::default()), busy: Mutex::new(HashSet::new()) });
+            // Apps from before the catalog layout are re-rendered once (new port, env), as ordinary
+            // operations: the panel sees them as busy and cannot start another one on the same app.
+            if state.done {
+                for id in state.rerender.clone() {
+                    let id2 = id.clone();
+                    if let Err(e) = spawn_op(app.handle().clone(), id.clone(), "install", move |p| apps::install(p, &id2).map(|_| ())) {
+                        log(&paths, &format!("re-render of {id} not started: {e}"));
+                    }
+                }
+            }
 
             let open = MenuItem::with_id(app, "open", ui_text("tray.open"), true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", ui_text("tray.quit"), true, None::<&str>)?;
