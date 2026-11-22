@@ -100,22 +100,76 @@ impl State {
             Err("no_reboot_pending".into())
         }
     }
+    /// For readers that can live with a fresh state when the file is unreadable. Writers use
+    /// `try_load`, so a damaged file is never overwritten with defaults.
     pub fn load(paths: &Paths) -> State {
-        std::fs::read_to_string(paths.state_file()).map(|s| State::from_json(&s)).unwrap_or_default()
+        State::try_load(paths).unwrap_or_default()
     }
-    pub fn from_json(text: &str) -> State {
-        let mut s: State = serde_json::from_str(text).unwrap_or_default();
+    /// A missing file is a fresh install. A file that cannot be read or parsed is an error
+    /// (`state_unreadable`, details in the log); it is retried briefly first, in case another
+    /// process holds it open for a moment.
+    pub fn try_load(paths: &Paths) -> Result<State, String> {
+        let mut last = String::new();
+        for attempt in 0..3 {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            match std::fs::read_to_string(paths.state_file()) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(State::default()),
+                Err(e) => last = e.to_string(),
+                Ok(text) => match State::from_json(&text) {
+                    Ok(s) => return Ok(s),
+                    Err(e) => last = e,
+                },
+            }
+        }
+        crate::log(paths, &format!("state.json unreadable, left as it is: {last}"));
+        Err("state_unreadable".into())
+    }
+    pub fn from_json(text: &str) -> Result<State, String> {
+        let mut s: State = serde_json::from_str(text).map_err(|e| e.to_string())?;
         if let Some(name) = s.app_name.take() {
             if !s.apps.iter().any(|a| a.id == "jellyfin") {
                 s.apps.push(InstalledApp { id: "jellyfin".into(), name, installed_unix: s.finished_unix, claimed: true });
                 s.rerender.push("jellyfin".into());
             }
         }
-        s
+        Ok(s)
     }
+    /// Writes a temporary file, flushes it and renames it over `state.json`, so a reader never sees
+    /// a half-written file and a power loss leaves either the old or the new state.
     pub fn save(&self, paths: &Paths) {
-        let _ = std::fs::create_dir_all(&paths.home);
-        let _ = std::fs::write(paths.state_file(), serde_json::to_string_pretty(self).unwrap());
+        if let Err(e) = self.try_save(paths) {
+            crate::log(paths, &format!("state.json not saved: {e}"));
+        }
+    }
+    pub fn try_save(&self, paths: &Paths) -> std::io::Result<()> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        std::fs::create_dir_all(&paths.home)?;
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = paths.home.join(format!("state.json.{}-{n}.tmp", std::process::id()));
+        let result = (|| {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(serde_json::to_string_pretty(self).unwrap().as_bytes())?;
+            f.sync_all()?;
+            drop(f);
+            // A reader in another process can hold the target open for a moment; retry briefly.
+            let mut tries = 0;
+            loop {
+                match std::fs::rename(&tmp, paths.state_file()) {
+                    Ok(()) => return Ok(()),
+                    Err(_) if tries < 5 => {
+                        tries += 1;
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
     pub fn finished(&self, step: &str) -> bool {
         self.completed.iter().any(|s| s == step) || self.skipped.iter().any(|s| s == step)
@@ -318,21 +372,21 @@ mod tests {
         let old = r#"{"completed":["preflight","app","network"],"skipped":[],"reboot_pending":false,"boot_time":1,
             "uac_prompts":1,"reboots":0,"started_unix":10,"finished_unix":20,"rx_total":5,"rx_baseline":null,
             "app_name":"jellyfin-2","done":true}"#;
-        let s = State::from_json(old);
+        let s = State::from_json(old).unwrap();
         assert!(s.done);
         assert_eq!(s.apps, vec![InstalledApp { id: "jellyfin".into(), name: "jellyfin-2".into(), installed_unix: 20, claimed: true }]);
         assert_eq!(s.rerender, vec!["jellyfin".to_string()]);
         let saved = serde_json::to_string(&s).unwrap();
         assert!(!saved.contains("app_name"));
         // Loading the saved form again does not migrate twice.
-        let again = State::from_json(&saved);
+        let again = State::from_json(&saved).unwrap();
         assert_eq!(again.apps.len(), 1);
         assert_eq!(again.rerender.len(), 1);
     }
 
     #[test]
     fn apps_saved_before_the_claim_step_load_as_claimed() {
-        let s = State::from_json(r#"{"apps":[{"id":"immich","name":"photos","installed_unix":5}]}"#);
+        let s = State::from_json(r#"{"apps":[{"id":"immich","name":"photos","installed_unix":5}]}"#).unwrap();
         assert!(s.apps[0].claimed);
         let unclaimed = InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 6, claimed: false };
         let back: InstalledApp = serde_json::from_str(&serde_json::to_string(&unclaimed).unwrap()).unwrap();
@@ -341,7 +395,41 @@ mod tests {
 
     #[test]
     fn fresh_state_has_no_apps() {
-        let s = State::from_json(r#"{"completed":["preflight"]}"#);
+        let s = State::from_json(r#"{"completed":["preflight"]}"#).unwrap();
         assert!(s.apps.is_empty() && s.rerender.is_empty() && !s.done);
+    }
+
+    fn temp_paths(tag: &str) -> Paths {
+        let home = std::env::temp_dir().join(format!("konak-state-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") }
+    }
+
+    #[test]
+    fn save_is_atomic_and_leaves_no_temp_files() {
+        let paths = temp_paths("save");
+        assert!(State::try_load(&paths).unwrap().apps.is_empty(), "missing file is a fresh state");
+        let mut s = State { done: true, apps: vec![InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: true }], ..State::default() };
+        s.save(&paths);
+        s.apps[0].name = "code".into();
+        s.save(&paths);
+        let back = State::try_load(&paths).unwrap();
+        let files: Vec<_> = std::fs::read_dir(&paths.home).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert!(back.done && back.apps[0].name == "code");
+        assert_eq!(files, vec!["state.json".to_string()], "no temporary files left behind");
+    }
+
+    #[test]
+    fn a_damaged_state_file_is_an_error_not_an_empty_state() {
+        let paths = temp_paths("damaged");
+        std::fs::create_dir_all(&paths.home).unwrap();
+        std::fs::write(paths.state_file(), r#"{"done":true,"apps":[{"id":"forg"#).unwrap();
+        let r = State::try_load(&paths);
+        let text = std::fs::read_to_string(paths.state_file()).unwrap();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(r.err().as_deref(), Some("state_unreadable"));
+        assert!(text.contains("forg"), "the damaged file is left as it is");
+        assert!(State::from_json("").is_err());
     }
 }

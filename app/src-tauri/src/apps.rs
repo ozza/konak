@@ -23,11 +23,12 @@ pub const MAX_LOG_LINES: u32 = 1000;
 /// Serializes read-modify-write of `state.json` between app operations in this process.
 static STATE_LOCK: Mutex<()> = Mutex::new(());
 
-fn update_state(paths: &Paths, f: impl FnOnce(&mut State)) {
-    let _guard = STATE_LOCK.lock().unwrap();
-    let mut s = State::load(paths);
+/// A `state.json` that cannot be read is never overwritten: the change fails with `state_unreadable`.
+fn update_state(paths: &Paths, f: impl FnOnce(&mut State)) -> Result<(), String> {
+    let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = State::try_load(paths)?;
     f(&mut s);
-    s.save(paths);
+    s.try_save(paths).map_err(|e| format!("cannot save state.json: {e}"))
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -225,13 +226,13 @@ fn manifest(id: &str) -> Result<&'static Manifest, String> {
 }
 
 fn installed(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
-    State::load(paths).apps.into_iter().find(|a| a.id == id).ok_or_else(|| "not_installed".into())
+    State::try_load(paths)?.apps.into_iter().find(|a| a.id == id).ok_or_else(|| "not_installed".into())
 }
 
 /// Installs an app, or re-renders and restarts an installed one under its current name (repair).
 pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
     let m = manifest(id)?;
-    let state = State::load(paths);
+    let state = State::try_load(paths)?;
     let (name, claimed) = match state.apps.iter().find(|a| a.id == id) {
         Some(a) => (a.name.clone(), a.claimed),
         None => (pick_name(paths, &state, id, &m.default_name)?, false),
@@ -250,7 +251,7 @@ pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
             }
         };
         result = Some(app);
-    });
+    })?;
     Ok(result.unwrap())
 }
 
@@ -267,7 +268,7 @@ pub fn remove(paths: &Paths, id: &str, delete_data: bool) -> Result<(), String> 
     update_state(paths, |s| {
         s.apps.retain(|a| a.id != id);
         s.rerender.retain(|r| r != id);
-    });
+    })?;
     Ok(())
 }
 
@@ -276,7 +277,7 @@ pub fn remove(paths: &Paths, id: &str, delete_data: bool) -> Result<(), String> 
 pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
     let m = manifest(id)?;
     let app = installed(paths, id)?;
-    validate_name(&State::load(paths), id, new_name)?;
+    validate_name(&State::try_load(paths)?, id, new_name)?;
     if app.name == new_name {
         return Ok(());
     }
@@ -291,7 +292,7 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.name = new_name.to_string();
         }
-    });
+    })?;
     Ok(())
 }
 
@@ -307,7 +308,7 @@ pub fn claim(paths: &Paths, id: &str) -> Result<(), String> {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.claimed = true;
         }
-    });
+    })?;
     Ok(())
 }
 

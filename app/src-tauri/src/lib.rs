@@ -75,7 +75,10 @@ struct Status {
 }
 
 fn build_status(k: &Konak) -> Status {
-    let s = State::load(&k.paths);
+    let (s, load_error) = match State::try_load(&k.paths) {
+        Ok(s) => (s, None),
+        Err(e) => (State::default(), Some(e)),
+    };
     let rt = k.rt.lock().unwrap();
     let steps = STEPS
         .iter()
@@ -97,7 +100,7 @@ fn build_status(k: &Konak) -> Status {
     Status {
         steps,
         running: rt.running,
-        error: rt.error.clone(),
+        error: rt.error.clone().or(load_error),
         reboot_needed: s.reboot_pending && !rt.running,
         done: s.done,
         url: s.done.then(|| format!("http://{}.local", services::HOME_NAME)),
@@ -129,7 +132,17 @@ fn run_all(app: AppHandle, set_private: bool) {
     }
     emit(&app);
     let paths = k.paths.clone();
-    let mut state = State::load(&paths);
+    let mut state = match State::try_load(&paths) {
+        Ok(s) => s,
+        Err(e) => {
+            let mut rt = k.rt.lock().unwrap();
+            rt.running = false;
+            rt.error = Some(e);
+            drop(rt);
+            emit(&app);
+            return;
+        }
+    };
     if state.started_unix == 0 {
         state.started_unix = installer::now();
         log(&paths, "install started");
@@ -363,7 +376,8 @@ pub fn run() {
         .setup(move |app| {
             let paths = Paths::new(app.path().resource_dir()?);
             let sup = Supervisor::new(paths.clone());
-            let mut state = State::load(&paths);
+            // A damaged state.json is left alone: nothing starts, and the window shows the error.
+            let mut state = State::try_load(&paths).unwrap_or_default();
 
             // Back from the reboot that WSL needed: count it and continue the install on our own.
             let mut resume = false;

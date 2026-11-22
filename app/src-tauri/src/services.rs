@@ -230,7 +230,14 @@ impl Supervisor {
             crate::log(&self.paths, "supervisor: keepalive (re)started");
         }
 
-        let routes = routes(&State::load(&self.paths));
+        // A state.json that cannot be read keeps the running config rather than dropping every app.
+        let routes = match State::try_load(&self.paths) {
+            Ok(s) => routes(&s),
+            Err(_) => match &p.config {
+                Some((_, r)) => r.clone(),
+                None => vec![],
+            },
+        };
         let mut names = vec![HOME_NAME.to_string()];
         names.extend(routes.iter().map(|r| r.name.clone()));
         let ip = lan_ip();

@@ -60,7 +60,8 @@
     "no_lan_ip": "This PC is not connected to a network.",
     "busy": "This app is busy with another operation. Try again when it finishes.",
     "unknown_app": "This app is not in the catalog.",
-    "not_installed": "This app is not installed."
+    "not_installed": "This app is not installed.",
+    "state_unreadable": "Konak's settings file (state.json in the Konak folder) is damaged, so Konak changed nothing. Restore it from a backup, or remove it and run the setup again."
   },
   "tray": {
     "open": "Open Konak",

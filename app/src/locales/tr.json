@@ -60,7 +60,8 @@
     "no_lan_ip": "Bu bilgisayar bir ağa bağlı değil.",
     "busy": "Bu uygulamada başka bir işlem sürüyor. Bittiğinde tekrar deneyin.",
     "unknown_app": "Bu uygulama katalogda yok.",
-    "not_installed": "Bu uygulama kurulu değil."
+    "not_installed": "Bu uygulama kurulu değil.",
+    "state_unreadable": "Konak'ın ayar dosyası (Konak klasöründeki state.json) bozuk, bu yüzden Konak hiçbir şeyi değiştirmedi. Dosyayı bir yedekten geri yükleyin ya da silip kurulumu yeniden çalıştırın."
   },
   "tray": {
     "open": "Konak'ı aç",
