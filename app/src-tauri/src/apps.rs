@@ -177,14 +177,22 @@ fn b64(s: &str) -> String {
     }
 }
 
+/// Where Caddy's requests come from, as the apps see them: Caddy connects to 127.0.0.1:<port> on
+/// Windows, WSL relays that to the distro's loopback, and Podman's port forward then masquerades it
+/// to the gateway of the app's compose network. Compose networks get /24s from Podman's first default
+/// subnet pool, and the WSL VM's network namespace is shared with other distros, so the exact /24
+/// varies (10.89.4.1 was measured); the pool is the narrowest stable choice. Apps trust
+/// X-Forwarded-For only from here, and Caddy overwrites that header with the real client address.
+pub const PROXY_NET: &str = "10.89.0.0/16";
+
 /// Values written to the app's `.env` by Konak (secrets and mounts are added by the script).
 /// `claimed_env` is added only once the app is claimed.
 pub fn env_lines(m: &Manifest, name: &str, claimed: bool) -> String {
     let (host, url) = (format!("{name}.local"), url(m, name));
-    let mut lines = vec![format!("KONAK_HOST={host}"), format!("KONAK_URL={url}"), format!("KONAK_PORT={}", m.port)];
+    let mut lines = vec![format!("KONAK_HOST={host}"), format!("KONAK_URL={url}"), format!("KONAK_PORT={}", m.port), format!("KONAK_PROXY_NET={PROXY_NET}")];
     let claimed_env = m.claimed_env.iter().filter(|_| claimed);
     for (k, v) in m.env.iter().chain(claimed_env) {
-        lines.push(format!("{k}={}", v.replace("${KONAK_HOST}", &host).replace("${KONAK_URL}", &url)));
+        lines.push(format!("{k}={}", v.replace("${KONAK_HOST}", &host).replace("${KONAK_URL}", &url).replace("${KONAK_PROXY_NET}", PROXY_NET)));
     }
     lines.join("\n")
 }
@@ -396,9 +404,24 @@ mod tests {
         m.env.insert("PUBLIC_URL".into(), "${KONAK_URL}/x".into());
         m.env.insert("HOST".into(), "${KONAK_HOST}".into());
         let env = env_lines(&m, "movies", true);
-        assert!(env.contains("KONAK_HOST=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=47101"));
+        assert!(env.contains("KONAK_HOST=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=47101\nKONAK_PROXY_NET=10.89.0.0/16"));
         assert!(env.contains("PUBLIC_URL=http://movies.local/x"));
         assert!(env.contains("HOST=movies.local"));
+    }
+
+    #[test]
+    fn apps_trust_only_the_proxy_net() {
+        let env = |id: &str| env_lines(catalog::get(id).unwrap(), id, true);
+        assert!(env("nextcloud").lines().any(|l| l == "TRUSTED_PROXIES=10.89.0.0/16"));
+        assert!(env("nextcloud").lines().any(|l| l == "FORWARDED_FOR_HEADERS=HTTP_X_FORWARDED_FOR"));
+        assert!(env("immich").lines().any(|l| l == "IMMICH_TRUSTED_PROXIES=10.89.0.0/16"));
+        let compose = |id: &str| catalog::get(id).unwrap().compose;
+        assert!(compose("forgejo").contains("FORGEJO__security__REVERSE_PROXY_TRUSTED_PROXIES=${KONAK_PROXY_NET}"));
+        assert!(compose("forgejo").contains("FORGEJO__security__REVERSE_PROXY_LIMIT=1"));
+        assert!(compose("vaultwarden").contains("IP_HEADER: X-Forwarded-For"));
+        for m in catalog::all() {
+            assert!(!m.compose.contains("0.0.0.0/0") && !m.env.values().any(|v| v.contains("0.0.0.0/0")), "{}", m.id);
+        }
     }
 
     #[test]

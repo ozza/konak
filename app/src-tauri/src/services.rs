@@ -70,12 +70,15 @@ pub fn caddyfile(ip: &str, routes: &[Route], f: &CaddyFiles) -> String {
     }
     s += "}\n";
     s += &format!("http://{HOME_NAME}.local:80 {{\n\tbind {ip}\n\troot * {}\n\tfile_server\n}}\n", q(f.site));
+    // Caddy already replaces X-Forwarded-For with the client address; X-Real-IP it would pass through
+    // as the client sent it, and some apps (Nextcloud's Apache, Vaultwarden's default) trust it.
+    let proxy = |port: u16| format!("reverse_proxy 127.0.0.1:{port} {{\n\t\theader_up X-Real-IP {{remote_host}}\n\t}}");
     for r in routes {
         let host = format!("{}.local", r.name);
         if !r.https {
-            s += &format!("http://{host}:80 {{\n\tbind {ip}\n\treverse_proxy 127.0.0.1:{}\n}}\n", r.port);
+            s += &format!("http://{host}:80 {{\n\tbind {ip}\n\t{}\n}}\n", proxy(r.port));
         } else if f.ca.is_some() {
-            s += &format!("https://{host}:443 {{\n\tbind {ip}\n\ttls internal\n\treverse_proxy 127.0.0.1:{}\n}}\n", r.port);
+            s += &format!("https://{host}:443 {{\n\tbind {ip}\n\ttls internal\n\t{}\n}}\n", proxy(r.port));
             s += &format!("http://{host}:80 {{\n\tbind {ip}\n\tredir https://{host}{{uri}} permanent\n}}\n");
         }
     }
@@ -289,8 +292,9 @@ mod tests {
         assert!(c.contains("storage file_system \"C:/K/caddy\""));
         assert!(c.contains("\t\t\troot {\n\t\t\t\tcert \"C:/K/ca/root.crt\"\n\t\t\t\tkey \"C:/K/ca/root.key\"\n"));
         assert!(c.contains("http://konak.local:80 {\n\tbind 192.168.1.5\n\troot * \"C:/K/site\"\n\tfile_server\n}"));
-        assert!(c.contains("http://jellyfin.local:80 {\n\tbind 192.168.1.5\n\treverse_proxy 127.0.0.1:47101\n}"));
-        assert!(c.contains("https://vault.local:443 {\n\tbind 192.168.1.5\n\ttls internal\n\treverse_proxy 127.0.0.1:47103\n}"));
+        let proxy = |port: u16| format!("\treverse_proxy 127.0.0.1:{port} {{\n\t\theader_up X-Real-IP {{remote_host}}\n\t}}\n}}");
+        assert!(c.contains(&format!("http://jellyfin.local:80 {{\n\tbind 192.168.1.5\n{}", proxy(47101))));
+        assert!(c.contains(&format!("https://vault.local:443 {{\n\tbind 192.168.1.5\n\ttls internal\n{}", proxy(47103))));
         assert!(c.contains("http://vault.local:80 {\n\tbind 192.168.1.5\n\tredir https://vault.local{uri} permanent\n}"));
         assert_eq!(c.matches('{').count(), c.matches('}').count());
 

@@ -24,6 +24,8 @@ services:
       - FORGEJO__security__INSTALL_LOCK=true
       - FORGEJO__security__SECRET_KEY=${FORGEJO_SECRET_KEY}
       - FORGEJO__service__DISABLE_REGISTRATION=${FORGEJO_DISABLE_REGISTRATION:-false}
+      - FORGEJO__security__REVERSE_PROXY_TRUSTED_PROXIES=${KONAK_PROXY_NET}
+      - FORGEJO__security__REVERSE_PROXY_LIMIT=1
     restart: always
     networks:
       - forgejo

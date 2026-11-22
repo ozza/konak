@@ -2,6 +2,8 @@
 # the image pinned by digest, the port bound to 127.0.0.1:${KONAK_PORT} and DOMAIN filled in by Konak
 # (Caddy terminates HTTPS with Konak's local CA). Signups stay open as upstream ships it, so the user
 # can create the first account; Vaultwarden has no admin page unless ADMIN_TOKEN is set.
+# IP_HEADER: Caddy overwrites X-Forwarded-For with the real client address, so the client IP is read
+# from there. Only Caddy reaches the port (it binds 127.0.0.1), so the header cannot be forged.
 services:
   vaultwarden:
     image: docker.io/vaultwarden/server:1.37.5@sha256:4fe17f415f90087377d37c755e0ea3cf189dcc6794e49cdd2a9adbb4937d9e1f
@@ -9,6 +11,7 @@ services:
     restart: always
     environment:
       DOMAIN: ${KONAK_URL}
+      IP_HEADER: X-Forwarded-For
       SIGNUPS_ALLOWED: "true" # Deactivate this with "false" after you have created your account so that no strangers can register
     volumes:
       - ./vw-data:/data # the path before the : can be changed
