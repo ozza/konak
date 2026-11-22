@@ -16,7 +16,7 @@ use std::net::UdpSocket;
 use std::path::Path;
 use std::process::Child;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_secs(10);
 pub const HOME_NAME: &str = "konak";
@@ -153,7 +153,10 @@ struct Heartbeat<'a> {
     lan_ip: Option<&'a str>,
     names: Vec<String>,
     pids: Pids,
+    /// Whether the running config serves the HTTPS sites (the CA was ready when it was written).
     https_available: bool,
+    /// Caddy exits in a row without surviving a tick (port 80 taken, bad config); 0 when it runs.
+    caddy_failures: u32,
 }
 
 #[derive(Default)]
@@ -161,8 +164,20 @@ struct Procs {
     keepalive: Option<Child>,
     caddy: Option<Child>,
     mdns: Option<Child>,
-    /// LAN IP and routes the running Caddy/mDNS were started with.
-    config: Option<(String, Vec<Route>)>,
+    /// LAN IP, routes and HTTPS availability the running Caddy/mDNS were started with.
+    config: Option<(String, Vec<Route>, bool)>,
+    /// Whether the CA was ready at the last check, and when to retry setting it up when it was not.
+    ca_ready: bool,
+    ca_retry_at: Option<Instant>,
+    caddy_failures: u32,
+    caddy_retry_at: Option<Instant>,
+}
+
+const CA_RETRY: Duration = Duration::from_secs(60);
+
+/// Wait before restarting a Caddy that exited `failures` times in a row: 10 s doubling to ~10 min.
+pub fn caddy_backoff(failures: u32) -> Duration {
+    TICK * 2u32.pow(failures.clamp(1, 7) - 1)
 }
 
 pub struct Supervisor {
@@ -209,15 +224,27 @@ impl Supervisor {
         });
     }
 
+    /// Whether HTTPS sites can be served. Once ready, only the CA files are checked (cheap); while
+    /// not, setting the CA up is retried once a minute, and the config is rewritten when it works.
+    fn ca_ready(&self, p: &mut Procs) -> bool {
+        let paths = &self.paths;
+        if p.ca_ready {
+            p.ca_ready = paths.ca_cert().exists() && paths.ca_key().exists();
+        } else if p.ca_retry_at.is_none_or(|t| Instant::now() >= t) {
+            // Caddy keeps its intermediate CA key in its storage folder, so HTTPS also needs that
+            // folder locked down to the current user.
+            p.ca_ready = crate::ca::ensure(paths)
+                .and_then(|_| crate::ca::prepare_caddy_storage(paths))
+                .map_err(|e| crate::log(paths, &format!("supervisor: CA unavailable, HTTPS sites off, retry in {} s: {e}", CA_RETRY.as_secs())))
+                .is_ok();
+            p.ca_retry_at = (!p.ca_ready).then(|| Instant::now() + CA_RETRY);
+        }
+        p.ca_ready
+    }
+
     /// Writes the home page, the downloadable root certificate and the Caddyfile.
-    fn write_config(&self, ip: &str, routes: &[Route]) -> bool {
+    fn write_config(&self, ip: &str, routes: &[Route], https: bool) {
         let p = &self.paths;
-        // Caddy keeps its intermediate CA key in its storage folder, so HTTPS also needs that
-        // folder locked down to the current user.
-        let https = crate::ca::ensure(p)
-            .and_then(|_| crate::ca::prepare_caddy_storage(p))
-            .map_err(|e| crate::log(p, &format!("supervisor: CA unavailable, HTTPS sites off: {e}")))
-            .is_ok();
         let site = p.site_dir();
         let _ = std::fs::create_dir_all(&site);
         let _ = std::fs::create_dir_all(p.caddy_storage());
@@ -228,7 +255,40 @@ impl Supervisor {
         let (cert, key) = (p.ca_cert(), p.ca_key());
         let files = CaddyFiles { storage: &p.caddy_storage(), site: &site, ca: https.then_some((cert.as_path(), key.as_path())) };
         let _ = std::fs::write(p.caddyfile(), caddyfile(ip, routes, &files));
-        https
+    }
+
+    /// Starts Caddy unless it runs or is backing off. A Caddy that exited on its own (port 80
+    /// taken, for example) is restarted with a growing delay, so it does not restart and log every
+    /// tick forever.
+    fn keep_caddy(&self, p: &mut Procs) {
+        if alive(&mut p.caddy) {
+            p.caddy_failures = 0;
+            p.caddy_retry_at = None;
+            return;
+        }
+        if let Some(mut old) = p.caddy.take() {
+            let code = old.try_wait().ok().flatten().and_then(|s| s.code());
+            p.caddy_failures += 1;
+            let wait = caddy_backoff(p.caddy_failures);
+            p.caddy_retry_at = Some(Instant::now() + wait);
+            crate::log(&self.paths, &format!("supervisor: caddy exited ({code:?}), {} in a row, next start in {} s (see caddy.log)", p.caddy_failures, wait.as_secs()));
+        }
+        if p.caddy_retry_at.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        let cf = self.paths.caddyfile();
+        let log = self.paths.log_dir().join("caddy.log");
+        match shell::spawn_hidden(&self.paths.caddy().to_string_lossy(), &["run", "--config", &cf.to_string_lossy(), "--adapter", "caddyfile"], Some(&log)) {
+            Ok(c) => {
+                p.caddy = Some(c);
+                crate::log(&self.paths, "supervisor: caddy started");
+            }
+            Err(e) => {
+                p.caddy_failures += 1;
+                p.caddy_retry_at = Some(Instant::now() + caddy_backoff(p.caddy_failures));
+                crate::log(&self.paths, &format!("supervisor: caddy did not start: {e}"));
+            }
+        }
     }
 
     pub fn tick(&self) {
@@ -247,36 +307,30 @@ impl Supervisor {
         let (routes, skipped) = match State::try_load(&self.paths) {
             Ok(s) => routes_checked(&s),
             Err(_) => match &p.config {
-                Some((_, r)) => (r.clone(), vec![]),
+                Some((_, r, _)) => (r.clone(), vec![]),
                 None => (vec![], vec![]),
             },
         };
         let mut names = vec![HOME_NAME.to_string()];
         names.extend(routes.iter().map(|r| r.name.clone()));
         let ip = lan_ip();
-        let mut https = self.paths.ca_key().exists();
         if let Some(ip) = &ip {
-            let config = Some((ip.clone(), routes.clone()));
+            let https = self.ca_ready(&mut p);
+            let config = Some((ip.clone(), routes.clone(), https));
             if p.config != config {
                 kill(&mut p.caddy);
                 kill(&mut p.mdns);
-                https = self.write_config(ip, &routes);
+                // A new config gets an immediate start, whatever the old one's failures were.
+                p.caddy_failures = 0;
+                p.caddy_retry_at = None;
+                self.write_config(ip, &routes, https);
                 crate::log(&self.paths, &format!("supervisor: LAN IP {ip}, names {}", names.join(",")));
                 if !skipped.is_empty() {
                     crate::log(&self.paths, &format!("supervisor: no route for {}: name already in use", skipped.join(",")));
                 }
                 p.config = config;
             }
-            if !alive(&mut p.caddy) {
-                let cf = self.paths.caddyfile();
-                p.caddy = shell::spawn_hidden(
-                    &self.paths.caddy().to_string_lossy(),
-                    &["run", "--config", &cf.to_string_lossy(), "--adapter", "caddyfile"],
-                    Some(&log_dir.join("caddy.log")),
-                )
-                .ok();
-                crate::log(&self.paths, "supervisor: caddy (re)started");
-            }
+            self.keep_caddy(&mut p);
             if !alive(&mut p.mdns) {
                 p.mdns = shell::spawn_hidden(&self.paths.mdns().to_string_lossy(), &[ip, "86400", &names.join(",")], Some(&log_dir.join("mdns.log"))).ok();
                 crate::log(&self.paths, "supervisor: mdns (re)started");
@@ -289,7 +343,8 @@ impl Supervisor {
             lan_ip: ip.as_deref(),
             names,
             pids: Pids { keepalive: pid(&p.keepalive), caddy: pid(&p.caddy), mdns: pid(&p.mdns) },
-            https_available: https,
+            https_available: p.config.as_ref().is_some_and(|c| c.2),
+            caddy_failures: p.caddy_failures,
         };
         let _ = std::fs::write(self.paths.supervisor_file(), serde_json::to_string_pretty(&beat).unwrap());
     }
@@ -310,6 +365,13 @@ mod tests {
 
     fn route(name: &str, port: u16, https: bool) -> Route {
         Route { id: name.into(), name: name.into(), port, https }
+    }
+
+    #[test]
+    fn caddy_restarts_back_off() {
+        let secs: Vec<u64> = (1..=9).map(|n| caddy_backoff(n).as_secs()).collect();
+        assert_eq!(secs, [10, 20, 40, 80, 160, 320, 640, 640, 640]);
+        assert_eq!(caddy_backoff(0).as_secs(), 10);
     }
 
     #[test]

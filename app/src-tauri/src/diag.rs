@@ -96,6 +96,8 @@ pub struct Heartbeat {
     pub pids: Pids,
     #[serde(default)]
     pub https_available: bool,
+    #[serde(default)]
+    pub caddy_failures: u32,
 }
 
 impl Heartbeat {
@@ -389,7 +391,11 @@ pub fn port80(f: &Facts) -> Check {
     }
     match relevant.first() {
         Some(l) => check("port80_owner", "ok", format!("Konak's caddy (pid {}) listens on {}:80", l.pid, l.address), ""),
-        None => check("port80_owner", "warn", format!("nothing listens on {ip}:80"), "Start Konak from the tray; its supervisor starts Caddy."),
+        None => {
+            let failures = f.heartbeat.as_ref().map_or(0, |h| h.caddy_failures);
+            let why = if failures > 0 { format!("; Konak's caddy exited {failures} times in a row (see logs\\caddy.log)") } else { String::new() };
+            check("port80_owner", "warn", format!("nothing listens on {ip}:80{why}"), "Start Konak from the tray; its supervisor starts Caddy.")
+        }
     }
 }
 
@@ -448,7 +454,7 @@ mod tests {
         Facts {
             now: 1000,
             distro: Distro { name: "konak".into(), exists: true, running: true, state: Some("Running".into()), version: Some(2) },
-            heartbeat: Some(Heartbeat { last_tick_unix: 995, lan_ip: Some("192.168.1.5".into()), names: vec!["konak".into()], pids: Pids { keepalive: Some(11), caddy: Some(22), mdns: Some(33) }, https_available: true }),
+            heartbeat: Some(Heartbeat { last_tick_unix: 995, lan_ip: Some("192.168.1.5".into()), names: vec!["konak".into()], pids: Pids { keepalive: Some(11), caddy: Some(22), mdns: Some(33) }, https_available: true, caddy_failures: 0 }),
             lan_ip: Some("192.168.1.5".into()),
             net: Ok(NetFacts {
                 adapter: Some(Adapter { alias: "Ethernet".into(), description: "Intel(R) Ethernet I225-V".into(), index: 7, category: "Private".into() }),
@@ -510,6 +516,12 @@ mod tests {
         f.lan_ip = Some("10.0.0.9".into());
         f.net.as_mut().unwrap().port80.clear();
         assert_eq!(statuses(&f), ["ok", "ok", "warn", "warn", "ok"]);
+
+        // Caddy keeps exiting: the port check says so.
+        let mut f = facts();
+        f.net.as_mut().unwrap().port80.clear();
+        f.heartbeat.as_mut().unwrap().caddy_failures = 4;
+        assert!(port80(&f).evidence.contains("exited 4 times in a row"));
 
         // A fresh heartbeat on another IP: the supervisor has not followed yet.
         let mut f = facts();
