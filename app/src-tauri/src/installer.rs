@@ -92,6 +92,14 @@ pub fn boot_time() -> u64 {
 }
 
 impl State {
+    /// The UI may restart the PC only while the install waits for the reboot WSL needs.
+    pub fn may_restart_pc(&self) -> Result<(), String> {
+        if self.reboot_pending {
+            Ok(())
+        } else {
+            Err("no_reboot_pending".into())
+        }
+    }
     pub fn load(paths: &Paths) -> State {
         std::fs::read_to_string(paths.state_file()).map(|s| State::from_json(&s)).unwrap_or_default()
     }
@@ -296,6 +304,14 @@ pub fn run_step(step: &str, paths: &Paths, state: &mut State, pre: &Preflight, s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_only_while_a_reboot_is_pending() {
+        let mut s = State::default();
+        assert_eq!(s.may_restart_pc().unwrap_err(), "no_reboot_pending");
+        s.reboot_pending = true;
+        assert!(s.may_restart_pc().is_ok());
+    }
 
     #[test]
     fn migrates_the_old_app_name() {

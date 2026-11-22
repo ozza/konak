@@ -205,9 +205,13 @@ fn start_install(app: AppHandle, set_private: bool) {
     std::thread::spawn(move || run_all(app, set_private));
 }
 
+/// Refused unless the install is waiting for the reboot WSL needs, so nothing else that can invoke
+/// commands in the webview can restart the PC.
 #[tauri::command]
-fn restart_pc() {
+fn restart_pc(k: tauri::State<Konak>) -> Result<(), String> {
+    State::load(&k.paths).may_restart_pc()?;
     shell::run("shutdown.exe", &["/r", "/t", "0"]);
+    Ok(())
 }
 
 /// Progress of a long app operation, emitted as `app-progress`: `state` is running, done or failed.
