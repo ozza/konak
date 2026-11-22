@@ -27,8 +27,13 @@ printf '%s\n' "$compose" > compose.yml
       if [ -n "$var" ]; then linux=$(wslpath -u "$win"); printf '%s=%s\n' "$var" "$linux"; fi
     done <<< "$mounts"
     for s in $secrets; do
-      old=$(grep -m1 "^$s=" .env 2>/dev/null | cut -d= -f2- || true)
-      printf '%s=%s\n' "$s" "${old:-$(openssl rand -hex 32)}"
+      val=$(grep -m1 "^$s=" .env 2>/dev/null | cut -d= -f2- || true)
+      if [ -z "$val" ]; then
+        # Plain assignments, so a failing openssl stops the script instead of writing an empty secret.
+        val=$(openssl rand -hex 32)
+        [[ "$val" =~ ^[0-9a-f]{64}$ ]] || { echo "could not generate $s" >&2; exit 1; }
+      fi
+      printf '%s=%s\n' "$s" "$val"
     done
   } > .env.new
   chmod 600 .env.new
