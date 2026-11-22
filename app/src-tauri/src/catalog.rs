@@ -13,7 +13,7 @@ macro_rules! entry {
 }
 
 /// Adding an app: create `catalog/<id>/` and add one line here.
-const ENTRIES: &[(&str, &str, &str)] = &[entry!("jellyfin")];
+const ENTRIES: &[(&str, &str, &str)] = &[entry!("jellyfin"), entry!("immich"), entry!("nextcloud"), entry!("vaultwarden"), entry!("forgejo")];
 
 /// Host ports for apps come from this block: below the Windows dynamic range (49152+) and away from
 /// ports that other software on the PC commonly holds (3000, 8080, 8096, ...).
