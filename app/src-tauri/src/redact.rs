@@ -1,7 +1,8 @@
 //! The one redactor. Everything Konak returns to the UI or to MCP clients (logs, error text) passes
 //! through it. It masks the secret values generated for installed apps (read from their `.env`
-//! files inside the distro) and anything that looks like `password=...`, `token: ...` or
-//! `scheme://user:password@host`.
+//! files inside the distro) and anything that looks like `password=...`, `token: ...`,
+//! `scheme://user:password@host`, `Authorization: <scheme> <credentials>`, `?key=...` or a
+//! Nextcloud share link `/s/<token>`.
 
 use crate::paths::Paths;
 use crate::{catalog, shell};
@@ -15,14 +16,22 @@ pub struct Redactor {
     secrets: Vec<String>,
 }
 
-fn patterns() -> &'static [Regex; 2] {
-    static P: OnceLock<[Regex; 2]> = OnceLock::new();
+/// Each pattern captures (1) the text kept before the secret, (2) the secret, and optionally (3) the
+/// text kept after it.
+fn patterns() -> &'static [Regex; 5] {
+    static P: OnceLock<[Regex; 5]> = OnceLock::new();
     P.get_or_init(|| {
         [
             // key=value / key: value / "key": "value", where the key mentions a secret-ish word.
             Regex::new(r#"(?i)(\b[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[\w.-]*["']?\s*[:=]\s*["']?)([^\s"'&,;]+)"#).unwrap(),
             // Credentials inside URLs.
             Regex::new(r"(?i)(\b[a-z][a-z0-9+.-]*://[^\s/:@]+:)([^\s/@]+)(@)").unwrap(),
+            // HTTP Authorization headers, `Authorization: <scheme> <credentials>`; the scheme stays.
+            Regex::new(r#"(?i)(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(?:[a-z][\w-]*\s+)?)([^\s"',;]+)"#).unwrap(),
+            // A bare `key` query parameter (API keys in URLs).
+            Regex::new(r#"(?i)([?&]key=)([^\s&#"']+)"#).unwrap(),
+            // Nextcloud public share links, `/s/<token>`.
+            Regex::new(r"(/s/)([A-Za-z0-9]{10,})").unwrap(),
         ]
     })
 }
@@ -61,9 +70,10 @@ impl Redactor {
         for secret in &self.secrets {
             s = s.replace(secret.as_str(), MASK);
         }
-        let [kv, url] = patterns();
-        let s = kv.replace_all(&s, |c: &regex::Captures| format!("{}{MASK}", &c[1]));
-        url.replace_all(&s, |c: &regex::Captures| format!("{}{MASK}{}", &c[1], &c[3])).into_owned()
+        for p in patterns() {
+            s = p.replace_all(&s, |c: &regex::Captures| format!("{}{MASK}{}", &c[1], c.get(3).map_or("", |m| m.as_str()))).into_owned();
+        }
+        s
     }
 }
 
@@ -86,6 +96,20 @@ mod tests {
             ("postgres://immich:pw123@db:5432/immich", "postgres://immich:[redacted]@db:5432/immich"),
             ("Secret = value", "Secret = [redacted]"),
             ("nothing to see here", "nothing to see here"),
+            // Authorization headers keep the scheme, lose the credentials.
+            ("Authorization: Bearer eyJhbGciOi.abc-def_1", "Authorization: Bearer [redacted]"),
+            ("authorization: Basic dXNlcjpwYXNz==", "authorization: Basic [redacted]"),
+            (r#"{"Authorization": "token abc123"}"#, r#"{"Authorization": "token [redacted]"}"#),
+            ("Proxy-Authorization: Negotiate YIIG", "Proxy-Authorization: Negotiate [redacted]"),
+            ("Authorization: opaque123", "Authorization: [redacted]"),
+            // A bare key query parameter, not other parameters that end in "key".
+            ("GET /api?key=AIzaSyA1b2&format=json", "GET /api?key=[redacted]&format=json"),
+            ("/x?a=1&key=abc#frag", "/x?a=1&key=[redacted]#frag"),
+            ("?monkey=banana", "?monkey=banana"),
+            // Nextcloud share links; short paths stay.
+            ("GET /s/Ab3dE6fG9hJ2kLm HTTP/1.1", "GET /s/[redacted] HTTP/1.1"),
+            ("https://cloud.local/index.php/s/qwertyuiopASDFG/download", "https://cloud.local/index.php/s/[redacted]/download"),
+            ("/s/short", "/s/short"),
         ];
         for (input, want) in cases {
             assert_eq!(Redactor::new(vec![]).apply(input), want, "{input}");
