@@ -503,4 +503,17 @@ mod tests {
         // The compose file falls back to open registration while the app is unclaimed.
         assert!(m.compose.contains("FORGEJO__service__DISABLE_REGISTRATION=${FORGEJO_DISABLE_REGISTRATION:-false}"));
     }
+
+    #[test]
+    fn nextcloud_points_at_its_local_name_only_once_claimed() {
+        // Before the claim, the web installer on 127.0.0.1 must not redirect to the .local name,
+        // which nothing announces yet. The image applies OVERWRITEHOST per request, and Nextcloud
+        // trusts every host once overwritehost is set, so the claimed .local name is trusted.
+        let m = catalog::get("nextcloud").unwrap();
+        let before = env_lines(m, "cloud", false);
+        assert!(!before.contains("OVERWRITEHOST") && !before.contains("OVERWRITECLIURL"));
+        let after = env_lines(m, "cloud", true);
+        assert!(after.lines().any(|l| l == "OVERWRITEHOST=cloud.local"));
+        assert!(after.lines().any(|l| l == "OVERWRITECLIURL=http://cloud.local"));
+    }
 }
