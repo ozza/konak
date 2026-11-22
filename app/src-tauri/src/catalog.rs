@@ -76,8 +76,10 @@ pub fn parse(id: &str, json: &str, compose: &'static str) -> Result<Manifest, St
     if !PORT_RANGE.contains(&m.port) {
         return err("port must be inside 47100-47199");
     }
-    if !m.health_path.starts_with('/') || m.health_path.contains(char::is_whitespace) {
-        return err("health_path must be an absolute path");
+    // It ends up in a curl URL inside the distro: no query strings, quotes or shell characters.
+    let path_char = |c: char| c.is_ascii_alphanumeric() || "/._-".contains(c);
+    if !m.health_path.starts_with('/') || !m.health_path.chars().all(path_char) {
+        return err("health_path must be an absolute path of A-Z a-z 0-9 / . _ -");
     }
     // KONAK_* names are set by Konak itself.
     let mut names: Vec<&String> = m.secrets.iter().chain(m.mounts.keys()).chain(m.env.keys()).chain(m.claimed_env.keys()).collect();
@@ -146,6 +148,10 @@ mod tests {
         assert!(bad("47150", "8096"), "port outside block");
         assert!(bad(r#""default_name":"demo""#, r#""default_name":"konak""#));
         assert!(bad(r#""health_path":"/""#, r#""health_path":"health""#));
+        for path in ["/a b", "/x?y=1", "/x&y", "/$(id)", "/a;b", "/a'b", "/a\\\"b", "/ü"] {
+            assert!(bad(r#""health_path":"/""#, &format!(r#""health_path":"{path}""#)), "{path}");
+        }
+        assert!(!bad(r#""health_path":"/""#, r#""health_path":"/api/v1.0/health_check-x""#));
         assert!(bad("\"media\"", "\"desktop\""), "unknown mount kind");
         assert!(bad("DB_PASSWORD", "KONAK_HOST"), "reserved env name");
         assert!(bad("DB_PASSWORD", "MEDIA_DIR"), "duplicate env name");

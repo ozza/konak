@@ -35,9 +35,10 @@ pub fn run(program: &str, args: &[&str]) -> Out {
     }
 }
 
-/// Runs a bash script as root inside the distro, fed through stdin.
+/// Runs a bash script as root inside the distro, fed through stdin. `--exec` starts bash directly:
+/// with `--`, wsl.exe joins the arguments into one line for the login shell, which re-parses them.
 pub fn distro_script(distro: &str, script: &str, args: &[&str]) -> Out {
-    let mut full = vec!["-d", distro, "-u", "root", "--", "bash", "-s", "--"];
+    let mut full = vec!["-d", distro, "-u", "root", "--exec", "bash", "-s", "--"];
     full.extend_from_slice(args);
     let child = hidden("wsl.exe")
         .args(&full)
@@ -83,4 +84,20 @@ pub fn spawn_hidden(program: &str, args: &[&str], log: Option<&std::path::Path>)
 pub fn tail(text: &str, lines: usize) -> String {
     let v: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     v[v.len().saturating_sub(lines)..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    /// Needs a throwaway distro: `KONAK_TEST_DISTRO=konak-<name> cargo test distro_script -- --ignored`.
+    #[test]
+    #[ignore]
+    fn distro_script_passes_arguments_verbatim() {
+        let distro = std::env::var("KONAK_TEST_DISTRO").expect("set KONAK_TEST_DISTRO");
+        assert!(distro.starts_with("konak-"), "only Konak's own distros");
+        let args = ["a b", "$(echo INJECTED)", "x;echo SEMI", "/p?q=1&r", "'\"", "-"];
+        let out = super::distro_script(&distro, "for a in \"$@\"; do printf '[%s]\\n' \"$a\"; done\n", &args);
+        let want: String = args.iter().map(|a| format!("[{a}]\n")).collect();
+        assert!(out.ok, "{}", out.text);
+        assert_eq!(out.text, want);
+    }
 }
