@@ -71,9 +71,9 @@ pub fn caddyfile(ip: &str, routes: &[Route], f: &CaddyFiles) -> String {
     for r in routes {
         let host = format!("{}.local", r.name);
         if !r.https {
-            s += &format!("http://{host}:80 {{\n\tbind {ip}\n\treverse_proxy localhost:{}\n}}\n", r.port);
+            s += &format!("http://{host}:80 {{\n\tbind {ip}\n\treverse_proxy 127.0.0.1:{}\n}}\n", r.port);
         } else if f.ca.is_some() {
-            s += &format!("https://{host}:443 {{\n\tbind {ip}\n\ttls internal\n\treverse_proxy localhost:{}\n}}\n", r.port);
+            s += &format!("https://{host}:443 {{\n\tbind {ip}\n\ttls internal\n\treverse_proxy 127.0.0.1:{}\n}}\n", r.port);
             s += &format!("http://{host}:80 {{\n\tbind {ip}\n\tredir https://{host}{{uri}} permanent\n}}\n");
         }
     }
@@ -283,8 +283,8 @@ mod tests {
         assert!(c.contains("storage file_system \"C:/K/caddy\""));
         assert!(c.contains("\t\t\troot {\n\t\t\t\tcert \"C:/K/ca/root.crt\"\n\t\t\t\tkey \"C:/K/ca/root.key\"\n"));
         assert!(c.contains("http://konak.local:80 {\n\tbind 192.168.1.5\n\troot * \"C:/K/site\"\n\tfile_server\n}"));
-        assert!(c.contains("http://jellyfin.local:80 {\n\tbind 192.168.1.5\n\treverse_proxy localhost:47101\n}"));
-        assert!(c.contains("https://vault.local:443 {\n\tbind 192.168.1.5\n\ttls internal\n\treverse_proxy localhost:47103\n}"));
+        assert!(c.contains("http://jellyfin.local:80 {\n\tbind 192.168.1.5\n\treverse_proxy 127.0.0.1:47101\n}"));
+        assert!(c.contains("https://vault.local:443 {\n\tbind 192.168.1.5\n\ttls internal\n\treverse_proxy 127.0.0.1:47103\n}"));
         assert!(c.contains("http://vault.local:80 {\n\tbind 192.168.1.5\n\tredir https://vault.local{uri} permanent\n}"));
         assert_eq!(c.matches('{').count(), c.matches('}').count());
 
