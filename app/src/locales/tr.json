@@ -74,7 +74,8 @@
     "no_apps": "Henüz kurulu uygulama yok. Bilgisayardaki Konak penceresinden kurabilirsiniz.",
     "cert_title": "Güvenli bağlantılar",
     "cert_body": "Bazı uygulamalar Konak'ın kendi sertifikasıyla HTTPS kullanır. Onlara güvenmek için bu sertifikayı her cihaza bir kez kurun.",
-    "cert_link": "Konak sertifikasını indir"
+    "cert_link": "Konak sertifikasını indir",
+    "cert_fingerprint": "SHA-256 parmak izi. Sertifikaya güvenmeden önce cihazınızın aynı değeri gösterdiğini kontrol edin:"
   },
   "apps": {
     "jellyfin": {

@@ -74,7 +74,8 @@
     "no_apps": "No apps installed yet. Install them from the Konak window on the PC.",
     "cert_title": "Secure connections",
     "cert_body": "Some apps use HTTPS with Konak's own certificate. Install this certificate once on each device to trust them.",
-    "cert_link": "Download Konak's certificate"
+    "cert_link": "Download Konak's certificate",
+    "cert_fingerprint": "SHA-256 fingerprint. Check that your device shows the same value before you trust the certificate:"
   },
   "apps": {
     "jellyfin": {
