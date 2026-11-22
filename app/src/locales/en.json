@@ -37,9 +37,6 @@
     "button": "Restart now"
   },
   "done": {
-    "title": "Konak is ready",
-    "body": "Konak's home page, reachable from any device on your home network:",
-    "open": "Open the home page",
     "tray": "Konak keeps running in the system tray when you close this window."
   },
   "summary": {
@@ -74,7 +71,110 @@
     "no_apps": "No apps installed yet. Install them from the Konak window on the PC.",
     "cert_title": "Secure connections",
     "cert_body": "Some apps use HTTPS with Konak's own certificate. Install this certificate once on each device to trust them.",
-    "cert_link": "Download Konak's certificate"
+    "cert_link": "Download Konak's certificate",
+    "cert_fingerprint": "SHA-256 fingerprint. Check that your device shows the same value before you trust the certificate:"
+  },
+  "panel": {
+    "home_link": "konak.local",
+    "home_link_label": "Open Konak's home page, konak.local",
+    "installed_title": "Your apps",
+    "loading": "Loading…",
+    "empty": "No apps installed yet. Pick one below to install it.",
+    "status": {
+      "running": "Running",
+      "starting": "Starting",
+      "unhealthy": "Not responding",
+      "stopped": "Stopped",
+      "missing": "Containers missing",
+      "unknown": "Status unknown"
+    },
+    "busy": {
+      "install": "Installing…",
+      "remove": "Removing…",
+      "rename": "Renaming…",
+      "restart": "Restarting…"
+    },
+    "failed": {
+      "install": "Install failed.",
+      "remove": "Removing failed.",
+      "rename": "Renaming failed.",
+      "restart": "Restart failed."
+    },
+    "dismiss": "Dismiss",
+    "actions": {
+      "open": "Open",
+      "restart": "Restart",
+      "logs": "Logs",
+      "rename": "Rename",
+      "remove": "Remove",
+      "group": "Actions for {name}"
+    },
+    "rename": {
+      "label": "Name on your network",
+      "hint": "Lower-case letters, digits and hyphens. The app moves to the new address.",
+      "save": "Save",
+      "cancel": "Cancel"
+    },
+    "logs": {
+      "title": "Logs: {name}",
+      "refresh": "Refresh",
+      "close": "Close",
+      "loading": "Loading logs…",
+      "empty": "No log lines yet.",
+      "note": "Last {n} lines. Passwords and keys are hidden."
+    },
+    "remove": {
+      "title": "Remove {name}?",
+      "body": "The app stops and disappears from your network.",
+      "keep_note": "Its settings and data are kept, so installing it again brings them back.",
+      "delete_label": "Also delete the app's data",
+      "delete_warning": "This permanently deletes the app's settings, accounts and database. It cannot be undone. Files in your Media and Photos folders are not touched.",
+      "confirm": "Remove",
+      "confirm_delete": "Remove and delete data",
+      "cancel": "Cancel"
+    },
+    "catalog": {
+      "title": "Add apps",
+      "empty": "Every app in the catalog is installed.",
+      "ram": "Needs at least {amount} of memory",
+      "https": "Uses a secure connection (HTTPS). Each device needs Konak's certificate once, see below.",
+      "install": "Install",
+      "install_label": "Install {name}"
+    },
+    "cert": {
+      "title": "Secure connections (HTTPS)",
+      "what": "Some apps, like password managers, only work over a secure connection. Konak signs those connections with its own certificate, which exists only on this PC. A device trusts these apps after you install the certificate on it once.",
+      "download": "On the device, open this address or scan the code:",
+      "qr_label": "QR code for {url}",
+      "fingerprint": "Certificate fingerprint (SHA-256)",
+      "fingerprint_check": "The certificate is downloaded over a plain connection, so check it: before you trust it, make sure the fingerprint your device shows is exactly the one in this window. If it differs, do not install it.",
+      "loading": "Preparing the certificate…",
+      "steps_title": "Install the certificate",
+      "ios": "iPhone and iPad",
+      "android": "Android",
+      "windows": "Another Windows PC",
+      "macos": "Mac",
+      "this_pc_title": "This PC",
+      "this_pc_body": "Browsers on this PC need the certificate too. Windows asks you to confirm.",
+      "trust": "Trust on this PC",
+      "trusting": "Waiting for Windows…",
+      "trusted": "The certificate is trusted on this PC.",
+      "trust_failed": "The certificate was not added.",
+      "ios_1": "Open the address in Safari and allow the download.",
+      "ios_2": "Open Settings, tap Profile Downloaded, then Install. Compare the fingerprint under More Details.",
+      "ios_3": "Go to Settings > General > About > Certificate Trust Settings and turn on full trust for Konak.",
+      "android_1": "Open the address and download the file.",
+      "android_2": "Open Settings > Security > Encryption & credentials > Install a certificate > CA certificate, then pick the file. Menu names vary by phone maker.",
+      "android_3": "Compare the fingerprint under Trusted credentials > User > Konak.",
+      "windows_1": "Download the file and run certutil -dump on it in a terminal. Compare the Cert Hash(sha256) line.",
+      "windows_2": "Open the file, choose Install Certificate > Current User, and place it in Trusted Root Certification Authorities.",
+      "macos_1": "Download the file and open it. Keychain Access adds it to the login keychain.",
+      "macos_2": "Open the certificate in Keychain Access and compare the SHA-256 fingerprint.",
+      "macos_3": "Expand Trust and set When using this certificate to Always Trust."
+    },
+    "network": {
+      "public": "This network is set to Public, so other devices at home cannot reach your apps. Switch it to Private in Windows network settings if this is your home network."
+    }
   },
   "apps": {
     "jellyfin": {
