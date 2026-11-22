@@ -3,7 +3,7 @@
 //! `logs/install.log` so the run can be measured (UAC prompts, reboots, time, download size).
 
 use crate::paths::{skip_elevation, Paths};
-use crate::services::{lan_ip, Supervisor, APP_PORT};
+use crate::services::{lan_ip, Supervisor, HOME_NAME};
 use crate::shell::{self, tail};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -11,16 +11,27 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const STEPS: [&str; 8] = ["preflight", "admin", "reboot", "distro", "systemd", "engine", "app", "network"];
+/// The first run installs the platform only; apps are installed from the panel (`apps.rs`).
+pub const STEPS: [&str; 7] = ["preflight", "admin", "reboot", "distro", "systemd", "engine", "network"];
 
 const PREFLIGHT_PS1: &str = include_str!("../scripts/preflight.ps1");
 const ELEVATED_PS1: &str = include_str!("../scripts/elevated.ps1");
 const BASE_SH: &str = include_str!("../scripts/base.sh");
 const ENGINE_SH: &str = include_str!("../scripts/engine.sh");
-const APP_SH: &str = include_str!("../scripts/app-jellyfin.sh");
 
-/// Persisted install progress and measurements.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct InstalledApp {
+    /// Catalog id.
+    pub id: String,
+    /// `.local` name without the suffix, chosen by the user.
+    pub name: String,
+    pub installed_unix: u64,
+}
+
+/// Persisted install progress, measurements and the installed apps. Missing fields default, so
+/// older state files keep loading.
 #[derive(Serialize, Deserialize, Default, Clone)]
+#[serde(default)]
 pub struct State {
     pub completed: Vec<String>,
     pub skipped: Vec<String>,
@@ -32,7 +43,14 @@ pub struct State {
     pub finished_unix: u64,
     pub rx_total: i64,
     pub rx_baseline: Option<i64>,
-    pub app_name: Option<String>,
+    /// Before the catalog, Konak installed only Jellyfin and stored its name here. Read once and
+    /// migrated into `apps`.
+    #[serde(skip_serializing)]
+    app_name: Option<String>,
+    pub apps: Vec<InstalledApp>,
+    /// Apps whose containers must be re-rendered by the install script at the next start (the
+    /// migrated Jellyfin still listens on its old port 8096).
+    pub rerender: Vec<String>,
     pub done: bool,
 }
 
@@ -66,7 +84,17 @@ pub fn boot_time() -> u64 {
 
 impl State {
     pub fn load(paths: &Paths) -> State {
-        std::fs::read_to_string(paths.state_file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        std::fs::read_to_string(paths.state_file()).map(|s| State::from_json(&s)).unwrap_or_default()
+    }
+    pub fn from_json(text: &str) -> State {
+        let mut s: State = serde_json::from_str(text).unwrap_or_default();
+        if let Some(name) = s.app_name.take() {
+            if !s.apps.iter().any(|a| a.id == "jellyfin") {
+                s.apps.push(InstalledApp { id: "jellyfin".into(), name, installed_unix: s.finished_unix });
+                s.rerender.push("jellyfin".into());
+            }
+        }
+        s
     }
     pub fn save(&self, paths: &Paths) {
         let _ = std::fs::create_dir_all(&paths.home);
@@ -164,19 +192,6 @@ fn http_status(ip: &str, host: &str) -> Option<u16> {
     String::from_utf8_lossy(&buf[..n]).split_whitespace().nth(1)?.parse().ok()
 }
 
-/// First free `.local` name from `base`, `base-2`, ... (asks the LAN through the mDNS responder).
-fn pick_name(paths: &Paths, ip: &str, base: &str) -> Result<String, String> {
-    for i in 1..=5 {
-        let name = if i == 1 { base.to_string() } else { format!("{base}-{i}") };
-        let out = shell::run(&paths.mdns().to_string_lossy(), &[ip, "1", &name, "--check-only"]);
-        crate::log(paths, &format!("name check {name}: {}", tail(&out.text, 1)));
-        if out.ok {
-            return Ok(name);
-        }
-    }
-    Err(format!("names {base} to {base}-5 are all taken on this network"))
-}
-
 /// Runs one step. `set_private` is the user's choice on the Public-network notice.
 pub fn run_step(step: &str, paths: &Paths, state: &mut State, pre: &Preflight, set_private: bool, sup: &Arc<Supervisor>) -> Result<Flow, String> {
     let distro = paths.distro.as_str();
@@ -245,40 +260,54 @@ pub fn run_step(step: &str, paths: &Paths, state: &mut State, pre: &Preflight, s
                 return Err(format!("container engine install failed: {}", tail(&out.text, 6)));
             }
         }
-        "app" => {
-            std::fs::create_dir_all(&paths.media).map_err(|e| format!("cannot create media folder: {e}"))?;
-            let out = shell::distro_script(distro, APP_SH, &[&paths.media.to_string_lossy()]);
-            if !out.ok {
-                return Err(format!("app start failed: {}", tail(&out.text, 6)));
-            }
-        }
         "network" => {
             let ip = lan_ip().ok_or("no LAN IP address")?;
-            sup.stop_mdns();
-            let name = match state.app_name.clone() {
-                Some(n) => n,
-                None => pick_name(paths, &ip, "jellyfin")?,
-            };
-            state.app_name = Some(name.clone());
-            state.save(paths);
-            sup.set_name(&name);
+            crate::ca::ensure(paths)?;
             sup.start();
             sup.tick();
-            let host = format!("{name}.local");
+            let host = format!("{HOME_NAME}.local");
             let deadline = Instant::now() + Duration::from_secs(60);
             loop {
                 match http_status(&ip, &host) {
-                    Some(200) | Some(302) => break,
+                    Some(200) => break,
                     other if Instant::now() > deadline => {
                         return Err(format!("http://{host} did not answer through Caddy (last status {other:?})"));
                     }
                     _ => std::thread::sleep(Duration::from_secs(2)),
                 }
             }
-            crate::log(paths, &format!("reachable: http://{host} via {ip}:80 (app port {APP_PORT})"));
+            crate::log(paths, &format!("reachable: http://{host} via {ip}:80"));
         }
         _ => return Err(format!("unknown step {step}")),
     }
     state.completed.push(step.into());
     Ok(Flow::Next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrates_the_old_app_name() {
+        let old = r#"{"completed":["preflight","app","network"],"skipped":[],"reboot_pending":false,"boot_time":1,
+            "uac_prompts":1,"reboots":0,"started_unix":10,"finished_unix":20,"rx_total":5,"rx_baseline":null,
+            "app_name":"jellyfin-2","done":true}"#;
+        let s = State::from_json(old);
+        assert!(s.done);
+        assert_eq!(s.apps, vec![InstalledApp { id: "jellyfin".into(), name: "jellyfin-2".into(), installed_unix: 20 }]);
+        assert_eq!(s.rerender, vec!["jellyfin".to_string()]);
+        let saved = serde_json::to_string(&s).unwrap();
+        assert!(!saved.contains("app_name"));
+        // Loading the saved form again does not migrate twice.
+        let again = State::from_json(&saved);
+        assert_eq!(again.apps.len(), 1);
+        assert_eq!(again.rerender.len(), 1);
+    }
+
+    #[test]
+    fn fresh_state_has_no_apps() {
+        let s = State::from_json(r#"{"completed":["preflight"]}"#);
+        assert!(s.apps.is_empty() && s.rerender.is_empty() && !s.done);
+    }
 }

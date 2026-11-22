@@ -12,6 +12,8 @@ pub struct Paths {
     pub bin: PathBuf,
     /// Visible media folder the apps can read, under the user's profile.
     pub media: PathBuf,
+    /// Visible photo library folder (Immich uploads), under the user's profile.
+    pub photos: PathBuf,
 }
 
 impl Paths {
@@ -21,13 +23,23 @@ impl Paths {
         let home = std::env::var("KONAK_HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(&local).join("Konak"));
         let distro = std::env::var("KONAK_DISTRO").unwrap_or_else(|_| "konak".into());
         let media = std::env::var("KONAK_MEDIA").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(&profile).join("Konak").join("Media"));
-        Paths { home, distro, bin: resource_dir.join("bin"), media }
+        let photos = std::env::var("KONAK_PHOTOS").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(&profile).join("Konak").join("Photos"));
+        Paths { home, distro, bin: resource_dir.join("bin"), media, photos }
     }
     pub fn state_file(&self) -> PathBuf { self.home.join("state.json") }
     pub fn log_dir(&self) -> PathBuf { self.home.join("logs") }
     pub fn install_log(&self) -> PathBuf { self.log_dir().join("install.log") }
     pub fn distro_dir(&self) -> PathBuf { self.home.join("wsl") }
     pub fn caddyfile(&self) -> PathBuf { self.home.join("Caddyfile") }
+    /// Caddy's data (certificates it issued, its intermediate) stays under the Konak home.
+    pub fn caddy_storage(&self) -> PathBuf { self.home.join("caddy") }
+    /// Static files Caddy serves on konak.local: the home page and the root certificate.
+    pub fn site_dir(&self) -> PathBuf { self.home.join("site") }
+    pub fn ca_dir(&self) -> PathBuf { self.home.join("ca") }
+    pub fn ca_cert(&self) -> PathBuf { self.ca_dir().join("root.crt") }
+    pub fn ca_key(&self) -> PathBuf { self.ca_dir().join("root.key") }
+    /// Supervisor heartbeat, read by the MCP diagnose tool.
+    pub fn supervisor_file(&self) -> PathBuf { self.home.join("supervisor.json") }
     pub fn caddy(&self) -> PathBuf { self.bin.join("caddy.exe") }
     pub fn mdns(&self) -> PathBuf { self.bin.join("mdns-responder.exe") }
 }
