@@ -52,8 +52,7 @@
           class="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent hover:bg-accent-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           onclick={() => openUrl(status!.url!)}>{t("done.open")}</button
         >
-        <p class="mt-3 text-sm text-muted">{t("done.media")}</p>
-        <p class="mt-1 text-sm text-muted">{t("done.tray")}</p>
+        <p class="mt-3 text-sm text-muted">{t("done.tray")}</p>
       </section>
     {:else if status.reboot_needed}
       <section class="rounded-md border border-warn-border bg-warn-bg p-4" aria-labelledby="reboot-title">

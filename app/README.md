@@ -3,13 +3,13 @@
 Tauri 2 + SvelteKit (SPA) + Tailwind CSS. It started as the spike step 5 installer and may become the product skeleton.
 
 What it does today:
-- **Installs Jellyfin from scratch:**
+- **Installs the platform from scratch:**
   - one UAC prompt (WSL when missing, firewall rules, an optional switch to the Private network profile);
   - a reboot when WSL needs one, after which it resumes on its own;
   - its own Debian WSL distro with systemd, Podman, pinned docker-compose and Konak's boot unit;
-  - Jellyfin, pinned by digest;
-  - Caddy and the mDNS responder on the LAN IP.
-- **Then stays in the tray** and supervises the distro keepalive, Caddy and mDNS every 10 s, including when the LAN IP changes.
+  - Caddy and the mDNS responder on the LAN IP, serving Konak's home page at `http://konak.local`.
+- **Installs apps from the embedded catalog** (`src-tauri/catalog/<id>/`: `app.json` + upstream `compose.yml`, images pinned by digest). Each app gets a fixed host port in 47100–47199 bound to 127.0.0.1 in the distro and a `.local` name proxied by Caddy. Apps with `"https": true` are served with `tls internal` from Konak's own root CA, which is name-constrained to `.local`.
+- **Then stays in the tray** and supervises the distro keepalive, Caddy and mDNS every 10 s, including when the LAN IP or the app list changes.
 
 ## Build
 1. `npm install`
@@ -23,9 +23,12 @@ What it does today:
 - `%LOCALAPPDATA%\Konak`:
   - state (`state.json`);
   - logs (`logs/install.log`, `caddy.log`, `mdns.log`);
-  - the generated `Caddyfile`;
+  - the generated `Caddyfile`, Caddy's storage (`caddy\`) and the `konak.local` page (`site\`);
+  - the root CA (`ca\root.crt`, `ca\root.key`; the folder is readable by the current user only);
+  - the supervisor heartbeat (`supervisor.json`);
   - the distro disk (`wsl\`).
-- Media goes in `%USERPROFILE%\Konak\Media`.
+- App data lives in the distro under `/var/lib/konak/apps/<id>/` (generated secrets in `.env`, mode 600).
+- Media goes in `%USERPROFILE%\Konak\Media`, photos in `%USERPROFILE%\Konak\Photos`.
 - Distro name: `konak`.
 - Autostart: `HKCU\...\Run\Konak` = `"<exe>" --autostart`.
 
@@ -37,10 +40,17 @@ These environment variables keep a dev run away from a real install:
 | `KONAK_HOME` | Data folder instead of `%LOCALAPPDATA%\Konak` |
 | `KONAK_DISTRO` | Distro name instead of `konak` |
 | `KONAK_MEDIA` | Media folder |
+| `KONAK_PHOTOS` | Photos folder |
 | `KONAK_SKIP_ELEVATION=1` | Skips the UAC step and autostart registration. WSL must already be installed, and no firewall rules are added, so other LAN devices cannot reach the app. |
 | `KONAK_DEV_AUTO_INSTALL=1` | Starts the install at launch, without a click |
 
-Port 80 on the LAN IP and port 8096 must be free. Stop the spike's Caddy and its `konak-podman` distro first.
+Port 80 and 443 on the LAN IP must be free. Stop the spike's Caddy and its `konak-podman` distro first.
+
+### Checking the local CA against Caddy
+`cargo test write_root_and_caddyfile -- --ignored` with `KONAK_CA_CHECK_DIR` set writes a root and a
+Caddyfile on 127.0.0.1:18080/18443 into that folder. Run `resources/bin/caddy.exe run --config <dir>/Caddyfile`,
+then `openssl s_client -connect 127.0.0.1:18443 -servername test.local -CAfile <dir>/ca/root.crt -verify_hostname test.local`
+must verify, and the same for `outside.example` must fail with "permitted subtree violation".
 
 ## Uninstall (manual for now)
 1. Quit from the tray.

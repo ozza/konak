@@ -3,9 +3,9 @@
     "tagline": "Your PC as a home server"
   },
   "install": {
-    "title": "Install Jellyfin",
-    "intro": "Konak sets up everything Jellyfin needs on this PC and makes it reachable from your phone and other devices at home.",
-    "button": "Install Jellyfin",
+    "title": "Set up Konak",
+    "intro": "Konak prepares this PC to run home server apps and makes them reachable from your phone and other devices at home. You pick the apps afterwards.",
+    "button": "Set up Konak",
     "retry": "Try again",
     "running": "Installing… you can keep using your PC.",
     "admin_note": "Windows will ask once for administrator permission."
@@ -22,8 +22,7 @@
     "distro": "Create Konak's Linux environment",
     "systemd": "Configure the environment",
     "engine": "Install the container engine",
-    "app": "Download and start Jellyfin",
-    "network": "Make it reachable on your network"
+    "network": "Make konak.local reachable on your network"
   },
   "state": {
     "pending": "Waiting",
@@ -38,10 +37,9 @@
     "button": "Restart now"
   },
   "done": {
-    "title": "Jellyfin is ready",
-    "body": "Open this address from any device on your home network:",
-    "open": "Open Jellyfin",
-    "media": "Put your videos in the Konak\\Media folder in your user folder.",
+    "title": "Konak is ready",
+    "body": "Konak's home page, reachable from any device on your home network:",
+    "open": "Open the home page",
     "tray": "Konak keeps running in the system tray when you close this window."
   },
   "summary": {
@@ -57,10 +55,31 @@
     "title": "Something went wrong",
     "uac_declined": "Administrator permission was declined. Konak needs it once to set up WSL and the firewall.",
     "virtualization_off": "Virtualization is turned off in this PC's firmware (BIOS/UEFI). Turn it on, then try again.",
-    "details": "Details"
+    "details": "Details",
+    "invalid_name": "Use 1 to 63 lower-case letters, digits or hyphens, not starting or ending with a hyphen.",
+    "name_reserved": "This name is reserved for Konak's home page.",
+    "name_in_use": "Another app already uses this name.",
+    "name_taken_on_lan": "Another device on your network already uses this name.",
+    "no_lan_ip": "This PC is not connected to a network.",
+    "busy": "This app is busy with another operation. Try again when it finishes.",
+    "unknown_app": "This app is not in the catalog.",
+    "not_installed": "This app is not installed."
   },
   "tray": {
     "open": "Open Konak",
     "quit": "Quit Konak"
+  },
+  "home": {
+    "apps": "Apps",
+    "no_apps": "No apps installed yet. Install them from the Konak window on the PC.",
+    "cert_title": "Secure connections",
+    "cert_body": "Some apps use HTTPS with Konak's own certificate. Install this certificate once on each device to trust them.",
+    "cert_link": "Download Konak's certificate"
+  },
+  "apps": {
+    "jellyfin": {
+      "name": "Jellyfin",
+      "description": "Watch your movies, shows and music on any device."
+    }
   }
 }

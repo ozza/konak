@@ -3,9 +3,9 @@
     "tagline": "Bilgisayarınız ev sunucunuz olsun"
   },
   "install": {
-    "title": "Jellyfin'i kur",
-    "intro": "Konak, Jellyfin'in ihtiyaç duyduğu her şeyi bu bilgisayara kurar ve evdeki telefonunuzdan ve diğer cihazlardan erişilebilir hale getirir.",
-    "button": "Jellyfin'i kur",
+    "title": "Konak'ı kur",
+    "intro": "Konak bu bilgisayarı ev sunucusu uygulamalarını çalıştırmaya hazırlar ve onları evdeki telefonunuzdan ve diğer cihazlardan erişilebilir hale getirir. Uygulamaları ardından siz seçersiniz.",
+    "button": "Konak'ı kur",
     "retry": "Tekrar dene",
     "running": "Kuruluyor… bilgisayarınızı kullanmaya devam edebilirsiniz.",
     "admin_note": "Windows bir kez yönetici izni isteyecek."
@@ -22,8 +22,7 @@
     "distro": "Konak'ın Linux ortamını oluştur",
     "systemd": "Ortamı yapılandır",
     "engine": "Konteyner motorunu kur",
-    "app": "Jellyfin'i indir ve başlat",
-    "network": "Ağda erişilebilir yap"
+    "network": "konak.local adresini ağda erişilebilir yap"
   },
   "state": {
     "pending": "Bekliyor",
@@ -38,10 +37,9 @@
     "button": "Şimdi yeniden başlat"
   },
   "done": {
-    "title": "Jellyfin hazır",
-    "body": "Ev ağınızdaki herhangi bir cihazdan bu adresi açın:",
-    "open": "Jellyfin'i aç",
-    "media": "Videolarınızı kullanıcı klasörünüzdeki Konak\\Media klasörüne koyun.",
+    "title": "Konak hazır",
+    "body": "Ev ağınızdaki herhangi bir cihazdan erişebileceğiniz Konak ana sayfası:",
+    "open": "Ana sayfayı aç",
     "tray": "Bu pencereyi kapattığınızda Konak sistem tepsisinde çalışmaya devam eder."
   },
   "summary": {
@@ -57,10 +55,31 @@
     "title": "Bir sorun oluştu",
     "uac_declined": "Yönetici izni reddedildi. Konak'ın WSL'i ve güvenlik duvarını kurmak için bu izne bir kez ihtiyacı var.",
     "virtualization_off": "Bu bilgisayarın donanım ayarlarında (BIOS/UEFI) sanallaştırma kapalı. Açıp tekrar deneyin.",
-    "details": "Ayrıntılar"
+    "details": "Ayrıntılar",
+    "invalid_name": "1 ile 63 arasında küçük harf, rakam veya tire kullanın; tire ile başlamasın ve bitmesin.",
+    "name_reserved": "Bu ad Konak ana sayfasına ayrılmıştır.",
+    "name_in_use": "Bu adı başka bir uygulama kullanıyor.",
+    "name_taken_on_lan": "Ağınızdaki başka bir cihaz bu adı kullanıyor.",
+    "no_lan_ip": "Bu bilgisayar bir ağa bağlı değil.",
+    "busy": "Bu uygulamada başka bir işlem sürüyor. Bittiğinde tekrar deneyin.",
+    "unknown_app": "Bu uygulama katalogda yok.",
+    "not_installed": "Bu uygulama kurulu değil."
   },
   "tray": {
     "open": "Konak'ı aç",
     "quit": "Konak'tan çık"
+  },
+  "home": {
+    "apps": "Uygulamalar",
+    "no_apps": "Henüz kurulu uygulama yok. Bilgisayardaki Konak penceresinden kurabilirsiniz.",
+    "cert_title": "Güvenli bağlantılar",
+    "cert_body": "Bazı uygulamalar Konak'ın kendi sertifikasıyla HTTPS kullanır. Onlara güvenmek için bu sertifikayı her cihaza bir kez kurun.",
+    "cert_link": "Konak sertifikasını indir"
+  },
+  "apps": {
+    "jellyfin": {
+      "name": "Jellyfin",
+      "description": "Filmlerinizi, dizilerinizi ve müziğinizi her cihazda izleyin."
+    }
   }
 }
