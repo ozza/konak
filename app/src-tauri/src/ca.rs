@@ -61,6 +61,14 @@ fn restrict_to_user(path: &Path, dir: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Creates Caddy's storage folder, which holds the intermediate CA key Caddy derives from the root,
+/// with the same current-user-only ACL as the root's folder.
+pub fn prepare_caddy_storage(paths: &Paths) -> Result<(), String> {
+    let dir = paths.caddy_storage();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    restrict_to_user(&dir, true)
+}
+
 /// Serializes `ensure` between the callers in this process (the supervisor and UI commands), so two
 /// of them never generate two roots and leave a key next to the other one's certificate.
 static ENSURE_LOCK: Mutex<()> = Mutex::new(());
@@ -190,6 +198,20 @@ mod tests {
         // The certificate carries the public half of the key on disk.
         assert!(der.windows(key.public_key_raw().len()).any(|w| w == key.public_key_raw()));
         assert_eq!(leftovers.len(), 2, "no temp files left: {leftovers:?}");
+    }
+
+    #[test]
+    fn caddy_storage_is_user_only() {
+        let home = std::env::temp_dir().join(format!("konak-caddy-acl-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: String::new(), bin: home.clone(), media: home.clone(), photos: home.clone() };
+        prepare_caddy_storage(&paths).unwrap();
+        let acl = shell::run("icacls.exe", &[&paths.caddy_storage().to_string_lossy()]).text;
+        let sid = user_sid().unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        // One explicit entry (the current user, shown by name), nothing inherited.
+        assert!(!acl.contains("(I)"), "{acl}");
+        let entries = acl.lines().filter(|l| l.contains(":(")).count();
+        assert_eq!(entries, 1, "{sid}: {acl}");
     }
 
     /// Manual check against the real Caddy (README "Checking the local CA"): writes a root (with the

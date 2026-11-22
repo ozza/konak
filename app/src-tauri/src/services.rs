@@ -188,7 +188,12 @@ impl Supervisor {
     /// Writes the home page, the downloadable root certificate and the Caddyfile.
     fn write_config(&self, ip: &str, routes: &[Route]) -> bool {
         let p = &self.paths;
-        let https = crate::ca::ensure(p).map_err(|e| crate::log(p, &format!("supervisor: CA unavailable, HTTPS sites off: {e}"))).is_ok();
+        // Caddy keeps its intermediate CA key in its storage folder, so HTTPS also needs that
+        // folder locked down to the current user.
+        let https = crate::ca::ensure(p)
+            .and_then(|_| crate::ca::prepare_caddy_storage(p))
+            .map_err(|e| crate::log(p, &format!("supervisor: CA unavailable, HTTPS sites off: {e}")))
+            .is_ok();
         let site = p.site_dir();
         let _ = std::fs::create_dir_all(&site);
         let _ = std::fs::create_dir_all(p.caddy_storage());
