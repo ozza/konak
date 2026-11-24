@@ -1,12 +1,13 @@
 // Dev-only stand-in for the Tauri backend, so the UI can be viewed in a plain browser with `npm run dev`.
 // Loaded from +layout.ts only when import.meta.env.DEV is true and the page is not inside Tauri; the
 // production build drops it. URL flags: ?setup (first-run flow), ?public (Public network notice),
-// ?empty (no apps installed), ?firewall (missing firewall rules), ?stale (a failing diagnostic). Forgejo starts unclaimed; newly installed apps are unclaimed too. Rename to "taken" to see the LAN conflict error.
+// ?empty (no apps installed), ?port80 (port 80 taken, fallback port), ?firewall (missing firewall rules), ?stale (a failing diagnostic). Forgejo starts unclaimed; newly installed apps are unclaimed too. Rename to "taken" to see the LAN conflict error.
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type { AppInfo, Manifest, Op } from "$lib/panel/api";
 
 const q = new URLSearchParams(location.search);
+const port = q.has("port80") ? ":47080" : "";
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const catalog: Manifest[] = [
@@ -53,7 +54,7 @@ const checks = () => [
 
 function info(id: string, name: string, status: AppInfo["status"], claimed = true): AppInfo {
   const m = catalog.find((c) => c.id === id)!;
-  const url = `${m.https ? "https" : "http"}://${name}.local`;
+  const url = m.https ? `https://${name}.local${port && ":47443"}` : `http://${name}.local${port}`;
   const local_url = `http://127.0.0.1:${m.port}`;
   return { id, name, url, local_url, https: m.https, port: m.port, installed_unix: 1763800000, claimed, stopped: status === "stopped", status, containers: status === "stopped" ? [] : (containers[id] ?? []) };
 }
@@ -80,7 +81,8 @@ const status = () => ({
   error: null,
   reboot_needed: false,
   done: !q.has("setup"),
-  url: "http://konak.local",
+  url: `http://konak.local${port}`,
+  web_ports: port ? { http: 47080, https: 47443, port80_owner: "httpd.exe (pid 4120)" } : { http: 80, https: 443, port80_owner: null },
   network_category: q.has("public") ? "Public" : "Private",
   firewall_missing: firewallMissing,
   repairing,

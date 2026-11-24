@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { t } from "$lib/i18n";
-  import { errorText } from "./api";
+  import { errorText, type WebPorts } from "./api";
   import Icon from "./Icon.svelte";
 
   let {
@@ -9,9 +9,24 @@
     firewallMissing,
     repairing,
     repairError,
-  }: { networkCategory: string | null; firewallMissing: boolean; repairing: boolean; repairError: string | null } = $props();
+    webPorts,
+  }: { networkCategory: string | null; firewallMissing: boolean; repairing: boolean; repairError: string | null; webPorts: WebPorts | null } =
+    $props();
   let repairFailure = $derived(repairError ? errorText(repairError) : null);
 </script>
+
+{#if webPorts && webPorts.http !== 80}
+  <section class="flex items-start gap-4 rounded-xl border border-warn-border bg-warn-bg px-[18px] py-4" aria-labelledby="port-title">
+    <span class="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-warn-icon text-warn-title"><Icon name="warn" size={18} /></span>
+    <div class="flex min-w-0 flex-col gap-1.5">
+      <h2 id="port-title" class="font-semibold text-warn-title">{t("panel.port80.title")}</h2>
+      <p class="text-[13px] text-warn-text">
+        {webPorts.port80_owner ? t("panel.port80.owner", { owner: webPorts.port80_owner }) : t("panel.port80.owner_unknown")}
+        {t("panel.port80.body", { port: webPorts.http })}
+      </p>
+    </div>
+  </section>
+{/if}
 
 {#if firewallMissing}
   <section class="flex flex-wrap items-start gap-4 rounded-xl border border-warn-border bg-warn-bg px-[18px] py-4" aria-labelledby="repair-title">

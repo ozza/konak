@@ -2,10 +2,16 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { t } from "$lib/i18n";
   import { applyTheme, loadTheme, THEMES, type Theme } from "$lib/theme";
-  import { HOME_URL } from "./api";
+  import { hostOf } from "./api";
   import Icon from "./Icon.svelte";
 
-  let { engineRunning, networkCategory, onadd }: { engineRunning: boolean | null; networkCategory: string | null; onadd: () => void } = $props();
+  let {
+    engineRunning,
+    networkCategory,
+    homeUrl,
+    onadd,
+  }: { engineRunning: boolean | null; networkCategory: string | null; homeUrl: string; onadd: () => void } = $props();
+  let homeHost = $derived(hostOf(homeUrl));
 
   let theme = $state<Theme>(loadTheme());
   let menuOpen = $state(false);
@@ -34,8 +40,8 @@
     </span>
   {/if}
   <div class="flex-1"></div>
-  <button type="button" class="btn" aria-label={t("panel.home_link_label")} onclick={() => openUrl(HOME_URL)}>
-    <span class="font-mono">{t("panel.home_link")}</span><Icon name="external" size={14} />
+  <button type="button" class="btn" aria-label={t("panel.home_link_label", { host: homeHost })} onclick={() => openUrl(homeUrl)}>
+    <span class="font-mono">{homeHost}</span><Icon name="external" size={14} />
   </button>
   <button type="button" class="btn-primary" onclick={onadd}><Icon name="plus" />{t("panel.header.add")}</button>
   <div class="relative" bind:this={menu}>

@@ -14,6 +14,7 @@
     appCount,
     showCert,
     summary,
+    homeUrl,
     ondiagnose,
   }: {
     host: HostInfo | null;
@@ -23,6 +24,7 @@
     appCount: number;
     showCert: boolean;
     summary: Summary | null;
+    homeUrl: string;
     ondiagnose: () => void;
   } = $props();
 
@@ -115,7 +117,7 @@
     {/if}
   </div>
 
-  {#if showCert}<CertHelp />{/if}
+  {#if showCert}<CertHelp {homeUrl} />{/if}
 
   {#if summary}
     <div class="card">

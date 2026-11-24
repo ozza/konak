@@ -3,7 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import { t } from "$lib/i18n";
-  import { appName, errorText, type AppInfo, type AppProgress, type AppStats, type Check, type Failure, type HostInfo, type Manifest, type Op } from "./api";
+  import { appName, errorText, portSuffix, type AppInfo, type AppProgress, type AppStats, type Check, type Failure, type HostInfo, type Manifest, type Op, type WebPorts } from "./api";
   import AddApp from "./AddApp.svelte";
   import AppDetail from "./AppDetail.svelte";
   import Header from "./Header.svelte";
@@ -22,7 +22,17 @@
     repairing,
     repairError,
     summary,
-  }: { networkCategory: string | null; firewallMissing: boolean; repairing: boolean; repairError: string | null; summary: Summary | null } = $props();
+    homeUrl,
+    webPorts,
+  }: {
+    networkCategory: string | null;
+    firewallMissing: boolean;
+    repairing: boolean;
+    repairError: string | null;
+    summary: Summary | null;
+    homeUrl: string;
+    webPorts: WebPorts | null;
+  } = $props();
 
   let apps = $state<AppInfo[] | null>(null);
   let catalog = $state<Manifest[]>([]);
@@ -123,13 +133,13 @@
 </script>
 
 <div class="flex min-h-dvh flex-col">
-  <Header engineRunning={host ? host.distro.running : null} {networkCategory} onadd={() => select("add")} />
+  <Header engineRunning={host ? host.distro.running : null} {networkCategory} {homeUrl} onadd={() => select("add")} />
 
   <div class="flex flex-1 flex-wrap items-stretch">
     <Sidebar {apps} selected={shown ?? ""} {host} {busy} onselect={select} />
 
     <main class="flex min-w-0 flex-[999_1_560px] flex-col gap-5 px-4 pt-6 pb-8 sm:px-7">
-      <Notices {networkCategory} {firewallMissing} {repairing} {repairError} />
+      <Notices {networkCategory} {firewallMissing} {repairing} {repairError} {webPorts} />
 
       {#if shown === "add"}
         <AddApp
@@ -139,12 +149,13 @@
           {failed}
           {host}
           {networkCategory}
+          portSuffix={portSuffix(webPorts)}
           oninstall={(id) => run(id, "install")}
           onopen={select}
           ondismiss={(id) => (failed = patch(failed, id, null))}
         />
       {:else if shown === "host"}
-        <HostDetail {host} {checks} {diagnosing} {diagError} appCount={apps?.length ?? 0} {showCert} {summary} ondiagnose={diagnose} />
+        <HostDetail {host} {checks} {diagnosing} {diagError} appCount={apps?.length ?? 0} {showCert} {summary} {homeUrl} ondiagnose={diagnose} />
       {:else if current && apps}
         <AppDetail
           app={current}

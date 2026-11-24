@@ -37,8 +37,14 @@ export type AppProgress = { id: string; op: Op; state: "running" | "done" | "fai
 export type ErrorText = { message: string | null; details: string | null };
 export type Failure = ErrorText & { op: Op };
 
-export const HOME_URL = "http://konak.local";
-export const CERT_URL = `${HOME_URL}/konak-root.crt`;
+/** Ports Caddy serves on. `http` is not 80 while another program holds port 80 (`port80_owner`). */
+export type WebPorts = { http: number; https: number; port80_owner: string | null };
+/** Used until the backend reports the home page URL, which carries the port on the fallback. */
+export const DEFAULT_HOME_URL = "http://konak.local";
+export const certUrl = (home: string) => `${home}/konak-root.crt`;
+export const hostOf = (url: string) => url.replace(/^https?:\/\//, "");
+/** ":47080" while Caddy is on its fallback port, "" on port 80. */
+export const portSuffix = (ports: WebPorts | null) => (ports && ports.http !== 80 ? `:${ports.http}` : "");
 
 /** Display name from the locale files, falling back to the id for apps without strings yet. */
 export function appName(id: string): string {

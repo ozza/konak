@@ -12,6 +12,7 @@
     failed,
     host,
     networkCategory,
+    portSuffix,
     oninstall,
     onopen,
     ondismiss,
@@ -22,6 +23,7 @@
     failed: Record<string, Failure>;
     host: HostInfo | null;
     networkCategory: string | null;
+    portSuffix: string;
     oninstall: (id: string) => void;
     onopen: (id: string) => void;
     ondismiss: (id: string) => void;
@@ -139,7 +141,7 @@
         {:else}
           <dl class="flex flex-col gap-1">
             <dt class="text-[13px] font-medium">{t("panel.rename.label")}</dt>
-            <dd class="font-mono text-[13px]">{pick.default_name}.local</dd>
+            <dd class="font-mono text-[13px]">{pick.default_name}.local{portSuffix}</dd>
             <dd class="text-xs text-muted">{t("panel.add.name_later")}</dd>
           </dl>
           <div class="flex flex-col">

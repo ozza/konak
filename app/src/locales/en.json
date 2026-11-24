@@ -83,8 +83,7 @@
       "running": "Repairing network access…",
       "failed": "Repair did not finish."
     },
-    "home_link": "konak.local",
-    "home_link_label": "Open Konak's home page, konak.local",
+    "home_link_label": "Open Konak's home page, {host}",
     "loading": "Loading…",
     "empty": "No apps installed yet. Use Add app to install one.",
     "status": {
@@ -308,6 +307,12 @@
       "files": "Files",
       "passwords": "Passwords",
       "developer": "Developer"
+    },
+    "port80": {
+      "title": "Port 80 is used by another program",
+      "owner": "{owner} is using port 80 on this PC.",
+      "owner_unknown": "Another program is using port 80 on this PC.",
+      "body": "Until it is free, Konak serves your apps on port {port}, so their addresses include it (for example http://konak.local:{port}). When port 80 is free again, Konak moves back by itself and the addresses lose the port."
     }
   },
   "apps": {

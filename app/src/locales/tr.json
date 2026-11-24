@@ -83,8 +83,7 @@
       "running": "Ağ erişimi onarılıyor…",
       "failed": "Onarım tamamlanmadı."
     },
-    "home_link": "konak.local",
-    "home_link_label": "Konak ana sayfasını aç, konak.local",
+    "home_link_label": "Konak ana sayfasını aç, {host}",
     "loading": "Yükleniyor…",
     "empty": "Henüz kurulu uygulama yok. Kurmak için Uygulama ekle'yi kullanın.",
     "status": {
@@ -308,6 +307,12 @@
       "files": "Dosyalar",
       "passwords": "Parolalar",
       "developer": "Geliştirici"
+    },
+    "port80": {
+      "title": "80 numaralı port başka bir programda",
+      "owner": "Bu bilgisayarda 80 numaralı portu {owner} kullanıyor.",
+      "owner_unknown": "Bu bilgisayarda 80 numaralı portu başka bir program kullanıyor.",
+      "body": "Port boşalana kadar Konak uygulamalarınızı {port} numaralı porttan sunar, bu yüzden adreslerde port numarası da yer alır (örneğin http://konak.local:{port}). Port 80 boşalınca Konak kendiliğinden geri döner ve adreslerdeki port kalkar."
     }
   },
   "apps": {

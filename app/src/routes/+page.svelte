@@ -5,6 +5,7 @@
   import { t, has } from "$lib/i18n";
   import StepList from "$lib/StepList.svelte";
   import Panel from "$lib/panel/Panel.svelte";
+  import { DEFAULT_HOME_URL, type WebPorts } from "$lib/panel/api";
 
   type Step = { id: string; state: "pending" | "running" | "done" | "skipped" | "failed" };
   type Status = {
@@ -18,6 +19,7 @@
     firewall_missing: boolean;
     repairing: boolean;
     repair_error: string | null;
+    web_ports: WebPorts | null;
     summary: { minutes: number; uac_prompts: number; reboots: number; download_mb: number } | null;
   };
 
@@ -46,6 +48,8 @@
     repairing={status.repairing}
     repairError={status.repair_error}
     summary={status.summary}
+    homeUrl={status.url ?? DEFAULT_HOME_URL}
+    webPorts={status.web_ports}
   />
 {:else}
 <main class="mx-auto flex max-w-xl flex-col gap-5 px-6 py-6">

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { t } from "$lib/i18n";
-  import { appName, formatBytes, type AppInfo, type HostInfo, type Op } from "./api";
+  import { appName, formatBytes, hostOf, type AppInfo, type HostInfo, type Op } from "./api";
   import AppTile from "./AppTile.svelte";
   import Icon from "./Icon.svelte";
   import Meter from "./Meter.svelte";
@@ -68,7 +68,7 @@
           <span class="flex min-w-0 flex-1 flex-col">
             <span class="text-sm font-semibold">{appName(app.id)}</span>
             <span class="truncate font-mono text-xs text-muted">
-              {#if busy[app.id]}{t(`panel.busy.${busy[app.id]}`)}{:else if app.claimed}{app.name}.local{:else}{t("panel.sidebar.setup_needed")}{/if}
+              {#if busy[app.id]}{t(`panel.busy.${busy[app.id]}`)}{:else if app.claimed}{hostOf(app.url)}{:else}{t("panel.sidebar.setup_needed")}{/if}
             </span>
           </span>
           <span class="w-3.5 text-center text-xs font-bold {app.claimed ? tone[app.status] : 'text-warn'}">

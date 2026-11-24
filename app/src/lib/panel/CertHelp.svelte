@@ -2,8 +2,11 @@
   import { invoke } from "@tauri-apps/api/core";
   import { encode } from "uqr";
   import { t } from "$lib/i18n";
-  import { CERT_URL, errorText, type CaInfo, type ErrorText } from "./api";
+  import { certUrl, errorText, type CaInfo, type ErrorText } from "./api";
   import Icon from "./Icon.svelte";
+
+  let { homeUrl }: { homeUrl: string } = $props();
+  let certLink = $derived(certUrl(homeUrl));
 
   let ca = $state<CaInfo | null>(null);
   let caError = $state<ErrorText | null>(null);
@@ -18,8 +21,8 @@
   });
 
   // One SVG path of dark modules; dark on white in both themes so every phone camera reads it.
-  const qr = encode(CERT_URL, { ecc: "M", border: 2 });
-  const qrPath = qr.data.flatMap((row, y) => row.map((dark, x) => (dark ? `M${x} ${y}h1v1h-1z` : ""))).join("");
+  let qr = $derived(encode(certLink, { ecc: "M", border: 2 }));
+  let qrPath = $derived(qr.data.flatMap((row, y) => row.map((dark, x) => (dark ? `M${x} ${y}h1v1h-1z` : ""))).join(""));
 
   const oses = { ios: 3, android: 3, windows: 2, macos: 3 };
 
@@ -44,7 +47,7 @@
     <svg
       viewBox="0 0 {qr.size} {qr.size}"
       role="img"
-      aria-label={t("panel.cert.qr_label", { url: CERT_URL })}
+      aria-label={t("panel.cert.qr_label", { url: certLink })}
       class="h-36 w-36 shrink-0 rounded-sm"
       shape-rendering="crispEdges"
     >
@@ -54,7 +57,7 @@
     <div class="flex min-w-0 flex-col gap-3">
       <div>
         <p class="text-sm">{t("panel.cert.download")}</p>
-        <p class="mt-1 font-mono text-sm break-all select-all">{CERT_URL}</p>
+        <p class="mt-1 font-mono text-sm break-all select-all">{certLink}</p>
       </div>
       <div class="rounded-md border-2 border-warn-border bg-warn-bg p-3">
         <p class="text-sm font-semibold">{t("panel.cert.fingerprint")}</p>
