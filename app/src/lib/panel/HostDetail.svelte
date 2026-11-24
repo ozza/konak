@@ -32,6 +32,9 @@
   const checkTone = { ok: "bg-ok-bg text-ok", warn: "bg-warn/15 text-warn", fail: "bg-error/15 text-error" };
   const checkText = { ok: "text-ok", warn: "text-warn", fail: "text-error" };
   const checkIcon ={ ok: "check", warn: "warn", fail: "x" } as const;
+  // Localized text for a check's code; the technical English text when the code has none.
+  const message = (c: Check) => (has(`panel.diag_msg.${c.code}`) ? t(`panel.diag_msg.${c.code}`, c.args) : c.evidence);
+  const advice = (c: Check) => (has(`panel.diag_fix.${c.code}`) ? t(`panel.diag_fix.${c.code}`, c.args) : c.fix);
   const checkName = (id: string) => (has(`panel.diag.${id}`) ? t(`panel.diag.${id}`) : id);
   const dash = "—";
 </script>
@@ -107,8 +110,15 @@
             <span class="inline-flex size-[22px] shrink-0 items-center justify-center rounded-full {checkTone[c.status]}"><Icon name={checkIcon[c.status]} size={13} stroke={3} /></span>
             <span class="min-w-0 flex-[1_1_220px] font-medium">{checkName(c.check)}</span>
             <span class="min-w-0 flex-[2_1_260px] text-[13px] break-words text-muted">
-              {c.evidence}
-              {#if c.status !== "ok" && c.fix}<span class="mt-1 block text-text-2">{c.fix}</span>{/if}
+              {message(c)}
+              {#if c.status !== "ok" && advice(c)}<span class="mt-1 block text-text-2">{advice(c)}</span>{/if}
+              {#if c.status !== "ok" && has(`panel.diag_msg.${c.code}`)}
+                <details class="mt-1">
+                  <summary class="cursor-pointer text-xs">{t("panel.host.technical")}</summary>
+                  <p class="mt-1 font-mono text-xs break-words">{c.evidence}</p>
+                  {#if c.fix}<p class="mt-1 font-mono text-xs break-words">{c.fix}</p>{/if}
+                </details>
+              {/if}
             </span>
             <span class="text-xs font-semibold {checkText[c.status]}">{t(`panel.host.check_${c.status}`)}</span>
           </li>

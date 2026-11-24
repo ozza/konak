@@ -459,7 +459,12 @@ async fn diagnose(app: AppHandle) -> Result<Vec<diag::Check>, String> {
         let facts = diag::gather(p);
         // Secret values are read only from a running distro, as the MCP server does.
         let r = if facts.distro.running { redact::Redactor::load(p) } else { redact::Redactor::new(vec![]) };
-        diag::diagnose(&facts).into_iter().map(|c| diag::Check { evidence: r.apply(&c.evidence), fix: r.apply(&c.fix), ..c }).collect()
+        diag::diagnose(&facts).into_iter().map(|c| diag::Check {
+                evidence: r.apply(&c.evidence),
+                fix: r.apply(&c.fix),
+                args: c.args.iter().map(|(k, v)| (*k, r.apply(v))).collect(),
+                ..c
+            }).collect()
     })
     .await
 }

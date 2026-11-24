@@ -245,7 +245,8 @@
       "check_ok": "Geçti",
       "check_warn": "Uyarı",
       "check_fail": "Başarısız",
-      "problems_one": "1 kontrol ilgi bekliyor"
+      "problems_one": "1 kontrol ilgi bekliyor",
+      "technical": "Teknik ayrıntılar"
     },
     "diag": {
       "forward_policy": "Paylaşılan ağ politikası değişmemiş",
@@ -314,7 +315,70 @@
       "title": "80 numaralı port başka bir programda",
       "owner": "Bu bilgisayarda 80 numaralı portu {owner} kullanıyor.",
       "owner_unknown": "Bu bilgisayarda 80 numaralı portu başka bir program kullanıyor.",
-      "body": "Port boşalana kadar Konak uygulamalarınızı {port} numaralı porttan sunar, bu yüzden adreslerde port numarası da yer alır (örneğin http://konak.local:{port}). Port 80 boşalınca Konak kendiliğinden geri döner ve adreslerdeki port kalkar."
+      "body": "Port boşalana kadar Konak uygulamalarınızı {port} numaralı porttan sunar, bu yüzden adreslerde port numarası da yer alır (örneğin http://konak.local:{port}). Port 80 boşalınca Konak kendiliğinden geri döner ve adreslerdeki port kalkar.",
+      "restart_note": "Her geçişte uygulamalarınız yeniden başlar, bu yüzden birkaç saniye erişilemezler."
+    },
+    "diag_msg": {
+      "distro_down": "Konak'ın Linux ortamı çalışmıyor.",
+      "no_network": "Bu bilgisayar bir ağa bağlı değil.",
+      "forward_policy": {
+        "no_tool": "Bu kontrol için gereken ağ araçları eksik.",
+        "ok": "Konteyner trafiği paylaşılan WSL ağından geçebiliyor.",
+        "drop": "Başka bir WSL dağıtımı paylaşılan ağda konteyner trafiğini engelliyor."
+      },
+      "stale_netavark": {
+        "table_missing": "{containers} konteyner çalışıyor ama ağ kuralları eksik.",
+        "foreign": "Silinmiş bir ortamdan kalan kurallar hâlâ {ports} numaralı portu tutuyor.",
+        "closed": "Bu uygulama portları henüz yanıt vermiyor: {ports}. Bir uygulama hâlâ başlıyor olabilir.",
+        "ok": "{containers} konteyner çalışıyor, {open} uygulama portu yanıt veriyor."
+      },
+      "keepalive": {
+        "no_heartbeat": "Konak'ın arka plan hizmeti henüz çalışmadı.",
+        "stale": "Konak'ın arka plan hizmeti en son {age} saniye önce bildirimde bulundu.",
+        "not_running": "Ortamı uyanık tutan işlem çalışmıyor.",
+        "ok": "Ortam uyanık tutuluyor."
+      },
+      "port80_owner": {
+        "net_error": "Ağ kontrolü okunamadı.",
+        "fallback": "80 numaralı portu {owner} tutuyor, bu yüzden Konak şimdilik {port} numaralı portu kullanıyor.",
+        "taken": "80 numaralı portu {owner} tutuyor, bu yüzden Konak'ın web sunucusu başlayamıyor.",
+        "returning": "80 numaralı port yeniden boş. Konak yaklaşık iki dakika içinde ona geri döner.",
+        "ok": "Konak'ın web sunucusu 80 numaralı portta yanıt veriyor.",
+        "nothing": "80 numaralı portta yanıt veren yok."
+      },
+      "lan_adapter": {
+        "virtual": "Kullanılan bağlantı sanal bir bağdaştırıcı ({adapter}), bu yüzden diğer cihazlar bu bilgisayara ulaşamayabilir.",
+        "ip_changed": "Bu bilgisayarın ağ adresi değişti. Konak yeni adrese geçiyor.",
+        "ok": "{adapter} üzerinde {ip} ağ adresi."
+      }
+    },
+    "diag_fix": {
+      "distro_down": "Konak'ı sistem tepsisindeki simgesinden başlatın, sonra tanılamayı yeniden çalıştırın.",
+      "no_network": "Bu bilgisayarı ev ağınıza bağlayın.",
+      "forward_policy": {
+        "no_tool": "Konteyner motorunu yeniden kurmak için Konak kurulumunu tekrar çalıştırın.",
+        "drop": "Bunu başka bir WSL dağıtımındaki Docker değiştirdi. O Docker'ı durdurup Konak'taki uygulamalarınızı yeniden başlatın."
+      },
+      "stale_netavark": {
+        "table_missing": "Bir dakika bekleyip tanılamayı yeniden çalıştırın. Sorun sürerse teknik ayrıntılar nasıl onarılacağını gösterir.",
+        "foreign": "Bir dakika bekleyip tanılamayı yeniden çalıştırın. Sorun sürerse teknik ayrıntılar nasıl onarılacağını gösterir.",
+        "closed": "Bir dakika bekleyip tanılamayı yeniden çalıştırın. Sorun sürerse teknik ayrıntılar nasıl onarılacağını gösterir."
+      },
+      "keepalive": {
+        "no_heartbeat": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın.",
+        "stale": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın.",
+        "not_running": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın."
+      },
+      "port80_owner": {
+        "net_error": "Tanılamayı yeniden çalıştırın.",
+        "fallback": "80 numaralı portu boşaltmak için o programı durdurun ya da ayarını değiştirin. Konak sonra kendiliğinden geri döner.",
+        "taken": "80 numaralı portu boşaltmak için o programı durdurun ya da ayarını değiştirin. Konak web sunucusunu birkaç saniye içinde başlatır.",
+        "nothing": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın."
+      },
+      "lan_adapter": {
+        "virtual": "Bağlantıyı tutan VPN'i ya da sanal ağı kapatın.",
+        "ip_changed": "Birkaç saniye bekleyin. Sürerse Konak'ı yeniden başlatın."
+      }
     }
   },
   "apps": {

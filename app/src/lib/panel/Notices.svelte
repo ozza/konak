@@ -24,6 +24,7 @@
         {webPorts.port80_owner ? t("panel.port80.owner", { owner: webPorts.port80_owner }) : t("panel.port80.owner_unknown")}
         {t("panel.port80.body", { port: webPorts.http })}
       </p>
+      <p class="text-[13px] text-warn-text">{t("panel.port80.restart_note")}</p>
     </div>
   </section>
 {/if}

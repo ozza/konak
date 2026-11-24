@@ -31,7 +31,8 @@ export type HostInfo = {
   data_drive: { free_bytes: number; total_bytes: number } | null;
   network: { lan_ip: string | null; adapter: string | null; category: string | null; firewall_ok: boolean; konak_owns_port80: boolean };
 };
-export type Check = { check: string; status: "ok" | "warn" | "fail"; evidence: string; fix: string };
+/** `code` and `args` pick the panel's text from the locale files; `evidence` and `fix` are technical English. */
+export type Check = { check: string; status: "ok" | "warn" | "fail"; evidence: string; fix: string; code: string; args?: Record<string, string> };
 export type AppProgress = { id: string; op: Op; state: "running" | "done" | "failed"; error: string | null };
 /** A backend error: `message` when it is a known error code, otherwise `details` holds technical text. */
 export type ErrorText = { message: string | null; details: string | null };

@@ -245,7 +245,8 @@
       "check_ok": "Pass",
       "check_warn": "Warning",
       "check_fail": "Fail",
-      "problems_one": "1 check needs attention"
+      "problems_one": "1 check needs attention",
+      "technical": "Technical details"
     },
     "diag": {
       "forward_policy": "Shared network policy unchanged",
@@ -314,7 +315,70 @@
       "title": "Port 80 is used by another program",
       "owner": "{owner} is using port 80 on this PC.",
       "owner_unknown": "Another program is using port 80 on this PC.",
-      "body": "Until it is free, Konak serves your apps on port {port}, so their addresses include it (for example http://konak.local:{port}). When port 80 is free again, Konak moves back by itself and the addresses lose the port."
+      "body": "Until it is free, Konak serves your apps on port {port}, so their addresses include it (for example http://konak.local:{port}). When port 80 is free again, Konak moves back by itself and the addresses lose the port.",
+      "restart_note": "Each switch restarts your apps, so they are unavailable for a few seconds."
+    },
+    "diag_msg": {
+      "distro_down": "Konak's Linux environment is not running.",
+      "no_network": "This PC is not connected to a network.",
+      "forward_policy": {
+        "no_tool": "The network tools this check needs are missing.",
+        "ok": "Container traffic can pass through the shared WSL network.",
+        "drop": "Another WSL distribution blocks container traffic in the shared network."
+      },
+      "stale_netavark": {
+        "table_missing": "{containers} containers are running, but their network rules are missing.",
+        "foreign": "Rules left by a removed environment still take port {ports}.",
+        "closed": "These app ports do not answer yet: {ports}. An app may still be starting.",
+        "ok": "{containers} containers running, {open} app ports answering."
+      },
+      "keepalive": {
+        "no_heartbeat": "Konak's background service has not run yet.",
+        "stale": "Konak's background service last reported {age} seconds ago.",
+        "not_running": "The process that keeps the environment awake is not running.",
+        "ok": "The environment is kept awake."
+      },
+      "port80_owner": {
+        "net_error": "The network check could not be read.",
+        "fallback": "{owner} holds port 80, so Konak uses port {port} for now.",
+        "taken": "{owner} holds port 80, so Konak's web server cannot start.",
+        "returning": "Port 80 is free again. Konak moves back to it within about two minutes.",
+        "ok": "Konak's web server answers on port 80.",
+        "nothing": "Nothing answers on port 80."
+      },
+      "lan_adapter": {
+        "virtual": "The connection in use is a virtual adapter ({adapter}), so other devices may not reach this PC.",
+        "ip_changed": "This PC's network address changed. Konak is switching to the new one.",
+        "ok": "Network address {ip} on {adapter}."
+      }
+    },
+    "diag_fix": {
+      "distro_down": "Start Konak from the tray icon, then run the diagnostics again.",
+      "no_network": "Connect this PC to your home network.",
+      "forward_policy": {
+        "no_tool": "Run Konak's setup again to reinstall the container engine.",
+        "drop": "Docker in another WSL distribution changed this. Stop that Docker, then restart your apps in Konak."
+      },
+      "stale_netavark": {
+        "table_missing": "Wait a minute and run the diagnostics again. If it stays, the technical details show how to repair it.",
+        "foreign": "Wait a minute and run the diagnostics again. If it stays, the technical details show how to repair it.",
+        "closed": "Wait a minute and run the diagnostics again. If it stays, the technical details show how to repair it."
+      },
+      "keepalive": {
+        "no_heartbeat": "Quit Konak from the tray icon and start it again.",
+        "stale": "Quit Konak from the tray icon and start it again.",
+        "not_running": "Quit Konak from the tray icon and start it again."
+      },
+      "port80_owner": {
+        "net_error": "Run the diagnostics again.",
+        "fallback": "Stop or reconfigure that program to free port 80. Konak then moves back by itself.",
+        "taken": "Stop or reconfigure that program to free port 80. Konak then starts its web server within seconds.",
+        "nothing": "Quit Konak from the tray icon and start it again."
+      },
+      "lan_adapter": {
+        "virtual": "Turn off the VPN or virtual network that holds the connection.",
+        "ip_changed": "Wait a few seconds. If it stays, restart Konak."
+      }
     }
   },
   "apps": {

@@ -45,11 +45,11 @@ const hostInfo = () => ({
   network: { lan_ip: "192.168.1.20", adapter: "Ethernet", category: q.has("public") ? "Public" : "Private", firewall_ok: !firewallMissing, konak_owns_port80: true },
 });
 const checks = () => [
-  { check: "forward_policy", status: "ok", evidence: "FORWARD policy is ACCEPT", fix: "" },
-  { check: "stale_netavark", status: q.has("stale") ? "fail" : "ok", evidence: q.has("stale") ? "DNAT jump for port 47104 points at a dead network" : "every netavark rule belongs to a live network", fix: "Remove the stale rule with a network reload." },
-  { check: "keepalive", status: "ok", evidence: "keepalive process running for konak-podman", fix: "" },
-  { check: "port80_owner", status: "ok", evidence: "caddy.exe listens on 192.168.1.20:80", fix: "" },
-  { check: "lan_adapter", status: "ok", evidence: "Ethernet, 192.168.1.20", fix: "" },
+  { check: "forward_policy", status: "ok", evidence: "no FORWARD chain with a DROP policy", fix: "", code: "forward_policy.ok" },
+  { check: "stale_netavark", status: q.has("stale") ? "fail" : "ok", evidence: q.has("stale") ? "DNAT jump for port 47104 points at a dead network" : "every netavark rule belongs to a live network", fix: "In Konak's distro as root, delete only that network's rules, then run `podman network reload --all`.", code: q.has("stale") ? "stale_netavark.foreign" : "stale_netavark.ok", args: q.has("stale") ? { ports: "47104" } : { containers: "6", open: "5" } },
+  { check: "keepalive", status: "ok", evidence: "keepalive pid 1234 alive, distro konak-podman running", fix: "", code: "keepalive.ok" },
+  { check: "port80_owner", status: "ok", evidence: "Konak's caddy (pid 4321) listens on 192.168.1.20:80", fix: "", code: "port80_owner.ok" },
+  { check: "lan_adapter", status: "ok", evidence: "LAN IP 192.168.1.20 on Ethernet (Intel Ethernet)", fix: "", code: "lan_adapter.ok", args: { ip: "192.168.1.20", adapter: "Ethernet" } },
 ];
 
 function info(id: string, name: string, status: AppInfo["status"], claimed = true): AppInfo {
