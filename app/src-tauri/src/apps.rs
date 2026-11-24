@@ -53,6 +53,8 @@ pub struct AppInfo {
     pub port: u16,
     pub installed_unix: u64,
     pub claimed: bool,
+    /// Stopped by the user; it stays stopped across distro restarts and reboots until started.
+    pub stopped: bool,
     /// running | starting | unhealthy | stopped | missing (no containers) | unknown (distro unreadable)
     pub status: &'static str,
     pub containers: Vec<Container>,
@@ -121,6 +123,12 @@ pub fn list(paths: &Paths) -> Vec<AppInfo> {
         .filter_map(|a| {
             let m = catalog::get(&a.id)?;
             let containers = ps.as_ref().map(|p| p.get(&a.id).cloned().unwrap_or_default());
+            // A user-stopped app has no containers (`stop`), which would otherwise read as missing.
+            let status = match containers.as_deref() {
+                Some(c) if a.stopped && !c.iter().any(|c| c.state == "running") => "stopped",
+                Some(c) => status_of(c),
+                None => "unknown",
+            };
             Some(AppInfo {
                 id: a.id.clone(),
                 name: a.name.clone(),
@@ -130,7 +138,8 @@ pub fn list(paths: &Paths) -> Vec<AppInfo> {
                 port: m.port,
                 installed_unix: a.installed_unix,
                 claimed: a.claimed,
-                status: containers.as_deref().map(status_of).unwrap_or("unknown"),
+                stopped: a.stopped,
+                status,
                 containers: containers.unwrap_or_default(),
             })
         })
@@ -289,13 +298,17 @@ pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
     let mut result = None;
     update_state(paths, |s| {
         s.rerender.retain(|r| r != id);
-        result = match s.apps.iter().find(|a| a.id == id) {
-            Some(a) => Some(a.clone()),
+        result = match s.apps.iter_mut().find(|a| a.id == id) {
+            // `up -d` has started it, so a repaired app is no longer stopped.
+            Some(a) => {
+                a.stopped = false;
+                Some(a.clone())
+            }
             // Removed while it was being repaired: a repair never brings an app back.
             None if repair => None,
             None => {
                 // New apps stay off the LAN until the user has created the admin account (`claim`).
-                let a = InstalledApp { id: id.into(), name: name.clone(), installed_unix: now(), claimed: false };
+                let a = InstalledApp { id: id.into(), name: name.clone(), installed_unix: now(), claimed: false, stopped: false };
                 s.apps.push(a.clone());
                 Some(a)
             }
@@ -350,6 +363,8 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
     update_state(paths, |s| {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.name = new_name.to_string();
+            // The re-render (`up -d`) has started it.
+            a.stopped = false;
         }
     })?;
     Ok(())
@@ -366,6 +381,8 @@ pub fn claim(paths: &Paths, id: &str) -> Result<(), String> {
     update_state(paths, |s| {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.claimed = true;
+            // The re-render (`up -d`) has started it.
+            a.stopped = false;
         }
     })?;
     Ok(())
@@ -377,8 +394,45 @@ fn compose(paths: &Paths, id: &str, args: &str) -> shell::Out {
     shell::distro_script(&paths.distro, &script, &[id])
 }
 
-pub fn restart(paths: &Paths, id: &str) -> Result<(), String> {
+fn set_stopped(paths: &Paths, id: &str, stopped: bool) -> Result<(), String> {
+    update_state(paths, |s| {
+        if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
+            a.stopped = stopped;
+        }
+    })
+}
+
+/// Stops an app so that it stays stopped. Its containers are removed (`down`; data, volumes and the
+/// rendered files are kept): konak-boot.service starts every container with a restart policy at each
+/// boot of the distro, and Podman does not remember a manual stop across boots, so a container that
+/// is merely stopped would come back after a distro restart or a reboot. With none left there is
+/// nothing to start, and this needs no change to the boot unit already written into existing distros.
+pub fn stop(paths: &Paths, id: &str) -> Result<(), String> {
     installed(paths, id)?;
+    let out = shell::distro_script(&paths.distro, REMOVE_SH, &[id, "keep"]);
+    crate::log(paths, &format!("stop {id}: {}", tail(&out.text, 2)));
+    if !out.ok {
+        return Err(redacted(paths, &format!("stop of {id} failed: {}", tail(&out.text, 6))));
+    }
+    set_stopped(paths, id, true)
+}
+
+/// Recreates a stopped app's containers from its rendered compose file and `.env`.
+pub fn start(paths: &Paths, id: &str) -> Result<(), String> {
+    installed(paths, id)?;
+    let out = compose(paths, id, "up -d --remove-orphans");
+    if !out.ok {
+        return Err(redacted(paths, &format!("start of {id} failed: {}", tail(&out.text, 6))));
+    }
+    set_stopped(paths, id, false)
+}
+
+/// A stopped app has no containers to restart, so restarting it starts it: the user asked for it to
+/// run, and a silent no-op would leave it stopped.
+pub fn restart(paths: &Paths, id: &str) -> Result<(), String> {
+    if installed(paths, id)?.stopped {
+        return start(paths, id);
+    }
     let out = compose(paths, id, "restart");
     if !out.ok {
         return Err(redacted(paths, &format!("restart of {id} failed: {}", tail(&out.text, 6))));
@@ -435,7 +489,7 @@ mod tests {
 
     fn state_with(apps: &[(&str, &str)]) -> State {
         let mut s = State::default();
-        s.apps = apps.iter().map(|(id, name)| InstalledApp { id: id.to_string(), name: name.to_string(), installed_unix: 0, claimed: true }).collect();
+        s.apps = apps.iter().map(|(id, name)| InstalledApp { id: id.to_string(), name: name.to_string(), installed_unix: 0, claimed: true, stopped: false }).collect();
         s
     }
 
@@ -456,7 +510,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("konak-claim-test-{}", std::process::id()));
         let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
         let mut s = State::default();
-        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: false });
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: false, stopped: false });
         s.save(&paths);
         let not_installed = claim(&paths, "immich").unwrap_err();
         // The distro does not exist, so the re-render with claimed_env fails.
@@ -469,11 +523,32 @@ mod tests {
     }
 
     #[test]
+    fn stop_and_start_change_the_flag_only_when_they_succeed() {
+        let home = std::env::temp_dir().join(format!("konak-stop-test-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let mut s = State::default();
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: true, stopped: false });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true, stopped: true });
+        s.save(&paths);
+        let not_installed = stop(&paths, "immich").unwrap_err();
+        // The distro does not exist, so `down` and `up -d` fail.
+        let stop_failed = stop(&paths, "forgejo").is_err();
+        let start_failed = start(&paths, "jellyfin").is_err();
+        let restart_failed = restart(&paths, "jellyfin").unwrap_err();
+        let after = State::load(&paths);
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(not_installed, "not_installed");
+        assert!(stop_failed && start_failed);
+        assert!(restart_failed.starts_with("start of jellyfin failed"), "restart of a stopped app starts it: {restart_failed}");
+        assert!(!after.apps[0].stopped && after.apps[1].stopped);
+    }
+
+    #[test]
     fn a_reserved_name_cannot_be_taken_by_another_app() {
         let home = std::env::temp_dir().join(format!("konak-reserve-test-{}", std::process::id()));
         let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
         let mut s = State::default();
-        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true, stopped: false });
         s.save(&paths);
         let r = reserve(&paths, "forgejo", "code").unwrap();
         let clash = reserve(&paths, "immich", "code").err();

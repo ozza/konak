@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(log_lines(Some(0)), 1);
         assert_eq!(log_lines(Some(5000)), 1000);
         let mut s = State::default();
-        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 0, claimed: true });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 0, claimed: true, stopped: false });
         assert_eq!(resolve_app(&s, "jellyfin").unwrap(), "jellyfin");
         assert_eq!(resolve_app(&s, "movies.local").unwrap(), "jellyfin");
         assert!(resolve_app(&State::default(), "jellyfin").unwrap_err().starts_with("not_installed"));
@@ -269,8 +269,8 @@ mod tests {
         let mut s = State::default();
         s.done = true;
         s.completed = vec!["preflight".into(), "network".into()];
-        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true });
-        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 2, claimed: false });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true, stopped: false });
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 2, claimed: false, stopped: false });
         s.save(&paths);
         let d = Distro { name: paths.distro.clone(), ..Default::default() };
         let v = status(&paths, &d);

@@ -376,6 +376,18 @@ fn restart_app(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn stop_app(app: AppHandle, id: String) -> Result<(), String> {
+    let id2 = id.clone();
+    spawn_op(app, id, "stop", move |p| apps::stop(p, &id2))
+}
+
+#[tauri::command]
+fn start_app(app: AppHandle, id: String) -> Result<(), String> {
+    let id2 = id.clone();
+    spawn_op(app, id, "start", move |p| apps::start(p, &id2))
+}
+
+#[tauri::command]
 async fn app_logs(app: AppHandle, id: String, lines: Option<u32>) -> Result<String, String> {
     blocking(app, move |p| apps::logs(p, &id, lines.unwrap_or(200))).await?
 }
@@ -544,6 +556,8 @@ pub fn run() {
             rename_app,
             claim_app,
             restart_app,
+            stop_app,
+            start_app,
             app_logs,
             ca_info,
             trust_ca_on_this_pc
