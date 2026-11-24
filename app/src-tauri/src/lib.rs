@@ -341,6 +341,12 @@ async fn list_apps(app: AppHandle) -> Result<Vec<apps::AppInfo>, String> {
     blocking(app, apps::list).await
 }
 
+/// CPU and memory per installed app; empty while the distro is not running (never starts it).
+#[tauri::command]
+async fn app_stats(app: AppHandle) -> Result<Vec<apps::AppStats>, String> {
+    blocking(app, apps::stats).await?
+}
+
 #[tauri::command]
 fn install_app(app: AppHandle, id: String) -> Result<(), String> {
     catalog::get(&id).ok_or("unknown_app")?;
@@ -551,6 +557,7 @@ pub fn run() {
             restart_pc,
             list_catalog,
             list_apps,
+            app_stats,
             install_app,
             remove_app,
             rename_app,

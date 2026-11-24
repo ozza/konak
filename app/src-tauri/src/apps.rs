@@ -77,13 +77,17 @@ struct PsEntry {
 /// Containers grouped by compose project (= app id), from `podman ps -a --format json` output.
 pub fn parse_ps(json: &str) -> Result<HashMap<String, Vec<Container>>, String> {
     let entries: Vec<PsEntry> = serde_json::from_str(json.trim()).map_err(|e| format!("podman ps output unreadable: {e}"))?;
+    Ok(group_ps(entries))
+}
+
+fn group_ps(entries: Vec<PsEntry>) -> HashMap<String, Vec<Container>> {
     let mut by_project: HashMap<String, Vec<Container>> = HashMap::new();
     for e in entries {
         let Some(project) = e.labels.as_ref().and_then(|l| l.get("com.docker.compose.project")) else { continue };
         let health = ["unhealthy", "healthy", "starting"].into_iter().find(|h| e.status.contains(&format!("({h})"))).map(String::from);
         by_project.entry(project.clone()).or_default().push(Container { name: e.names.join(","), state: e.state, health });
     }
-    Ok(by_project)
+    by_project
 }
 
 pub fn status_of(containers: &[Container]) -> &'static str {
@@ -99,6 +103,107 @@ pub fn status_of(containers: &[Container]) -> &'static str {
     } else {
         "running"
     }
+}
+
+/// CPU and memory of one app: its running containers summed.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AppStats {
+    pub id: String,
+    pub cpu_percent: f64,
+    pub mem_bytes: u64,
+}
+
+/// One row of `podman stats --format json`. Podman 5 prints strings ("0.17%", "4.76MB / 67.3GB");
+/// other versions print numbers (percent, bytes) under the Go field names.
+#[derive(Deserialize)]
+struct StatsEntry {
+    #[serde(default, alias = "Name")]
+    name: String,
+    #[serde(default, alias = "CPU")]
+    cpu_percent: serde_json::Value,
+    #[serde(default, alias = "MemUsage")]
+    mem_usage: serde_json::Value,
+}
+
+/// A size as podman or docker prints it: `4.76MB`, `512kB`, `1.5GiB`, `0B`.
+fn parse_size(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let n: f64 = s[..split].parse().ok()?;
+    let unit = match s[split..].trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "kb" | "k" => 1e3,
+        "mb" => 1e6,
+        "gb" => 1e9,
+        "tb" => 1e12,
+        "kib" => 1024.0,
+        "mib" => 1024.0 * 1024.0,
+        "gib" => 1024.0 * 1024.0 * 1024.0,
+        "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some(n * unit)
+}
+
+fn cpu_of(v: &serde_json::Value) -> f64 {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+        serde_json::Value::String(s) => s.trim().trim_end_matches('%').trim().parse().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+/// Used memory in bytes: a number, or the part before ` / ` of `"used / limit"`.
+fn mem_of(v: &serde_json::Value) -> u64 {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) as u64,
+        serde_json::Value::String(s) => parse_size(s.split('/').next().unwrap_or("")).unwrap_or(0.0).round() as u64,
+        _ => 0,
+    }
+}
+
+/// The first JSON value of `text`; anything after it (stderr warnings appended by `distro_script`)
+/// is ignored. Empty text is `None`.
+fn first_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<Option<T>, String> {
+    serde_json::Deserializer::from_str(text).into_iter::<T>().next().transpose().map_err(|e| e.to_string())
+}
+
+/// Sums `podman stats --format json` rows per compose project, using the container names of
+/// `parse_ps` output to find each row's project. Rows of containers outside any project are left
+/// out. Sorted by app id.
+pub fn aggregate_stats(stats_json: &str, ps: &HashMap<String, Vec<Container>>) -> Result<Vec<AppStats>, String> {
+    let rows: Vec<StatsEntry> = first_json(stats_json).map_err(|e| format!("podman stats output unreadable: {e}"))?.unwrap_or_default();
+    let project_of: HashMap<&str, &str> = ps.iter().flat_map(|(p, cs)| cs.iter().flat_map(|c| c.name.split(',')).map(move |n| (n, p.as_str()))).collect();
+    let mut sums: HashMap<&str, AppStats> = HashMap::new();
+    for r in &rows {
+        let Some(&project) = project_of.get(r.name.as_str()) else { continue };
+        let s = sums.entry(project).or_insert_with(|| AppStats { id: project.to_string(), cpu_percent: 0.0, mem_bytes: 0 });
+        s.cpu_percent += cpu_of(&r.cpu_percent);
+        s.mem_bytes += mem_of(&r.mem_usage);
+    }
+    let mut out: Vec<AppStats> = sums.into_values().collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// `podman stats` is skipped when nothing runs, so an empty engine is never an error.
+const STATS_SH: &str = "set -e\nif [ -n \"$(podman ps -q)\" ]; then podman stats --no-stream --format json; fi\necho '## ps'\npodman ps --format json\n";
+
+/// CPU and memory per installed app, from one `podman stats` call. Empty when the distro is not
+/// running: it is never started for this.
+pub fn stats(paths: &Paths) -> Result<Vec<AppStats>, String> {
+    if !crate::diag::distro(paths).running {
+        return Ok(vec![]);
+    }
+    let out = shell::distro_script(&paths.distro, STATS_SH, &[]);
+    if !out.ok {
+        return Err(format!("podman stats failed: {}", tail(&out.text, 3)));
+    }
+    let (stats, ps) = out.text.split_once("## ps").ok_or("podman stats output unreadable")?;
+    let entries: Vec<PsEntry> = first_json(ps).map_err(|e| format!("podman ps output unreadable: {e}"))?.unwrap_or_default();
+    let ps = group_ps(entries);
+    let installed = State::load(paths).apps;
+    Ok(aggregate_stats(stats, &ps)?.into_iter().filter(|s| installed.iter().any(|a| a.id == s.id)).collect())
 }
 
 fn podman_ps(paths: &Paths) -> Result<HashMap<String, Vec<Container>>, String> {
@@ -632,6 +737,44 @@ c");
         assert_eq!(status_of(&[]), "missing");
         assert_eq!(p["jellyfin"][0].health.as_deref(), Some("healthy"));
         assert!(parse_ps("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn stats_are_summed_per_app() {
+        let ps = parse_ps(
+            r#"[
+          {"Names":["immich_server"],"State":"running","Labels":{"com.docker.compose.project":"immich"}},
+          {"Names":["immich_postgres"],"State":"running","Labels":{"com.docker.compose.project":"immich"}},
+          {"Names":["jellyfin"],"State":"running","Labels":{"com.docker.compose.project":"jellyfin"}},
+          {"Names":["loose"],"State":"running","Labels":null}
+        ]"#,
+        )
+        .unwrap();
+        // Podman 5.4: strings with units, decimal sizes. Trailing stderr text is ignored.
+        let podman5 = r#"[
+         {"id": "3c816f05c85d", "name": "immich_server", "cpu_percent": "0.13%", "mem_usage": "715.9MB / 67.3GB", "pids": "81"},
+         {"id": "0fe1d646cde1", "name": "immich_postgres", "cpu_percent": "1.5%", "mem_usage": "6.009MB / 67.3GB"},
+         {"id": "5b8d97b9206d", "name": "jellyfin", "cpu_percent": "0.07%", "mem_usage": "512kB / 67.3GB"},
+         {"id": "aaaaaaaaaaaa", "name": "loose", "cpu_percent": "50%", "mem_usage": "1GB / 67.3GB"}
+        ]
+time="2026-11-24" level=warning msg="something""#;
+        let s = aggregate_stats(podman5, &ps).unwrap();
+        assert_eq!(s.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["immich", "jellyfin"]);
+        assert!((s[0].cpu_percent - 1.63).abs() < 1e-9, "{s:?}");
+        assert_eq!(s[0].mem_bytes, 715_900_000 + 6_009_000);
+        assert_eq!(s[1].mem_bytes, 512_000);
+
+        // Numbers (percent and bytes) under the Go field names, and binary units.
+        let numbers = r#"[{"Name": "jellyfin", "CPU": 2.25, "MemUsage": 1048576}, {"Name": "immich_server", "CPU": 0, "MemUsage": "1.5GiB / 16GiB"}]"#;
+        let s = aggregate_stats(numbers, &ps).unwrap();
+        assert_eq!(s, vec![AppStats { id: "immich".into(), cpu_percent: 0.0, mem_bytes: 1_610_612_736 }, AppStats { id: "jellyfin".into(), cpu_percent: 2.25, mem_bytes: 1_048_576 }]);
+
+        // Nothing running: no stats output at all.
+        assert!(aggregate_stats("", &ps).unwrap().is_empty());
+        assert!(aggregate_stats("[]", &ps).unwrap().is_empty());
+        assert!(aggregate_stats("not json", &ps).is_err());
+        assert_eq!(parse_size("0B"), Some(0.0));
+        assert_eq!(parse_size("12XB"), None);
     }
 
     #[test]
