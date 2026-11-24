@@ -244,7 +244,8 @@
       "not_run": "Henüz çalıştırılmadı.",
       "check_ok": "Geçti",
       "check_warn": "Uyarı",
-      "check_fail": "Başarısız"
+      "check_fail": "Başarısız",
+      "problems_one": "1 kontrol ilgi bekliyor"
     },
     "diag": {
       "forward_policy": "Paylaşılan ağ politikası değişmemiş",
@@ -276,7 +277,8 @@
       "col_name": "Ad",
       "col_state": "Durum",
       "col_health": "Sağlık",
-      "stopped_note": "Uygulama durduruldu. Ayarları ve verileri saklanıyor, Başlat ile geri gelir. Durduğu sürece diğer cihazlar ona erişemez."
+      "stopped_note": "Uygulama durduruldu. Ayarları ve verileri saklanıyor, Başlat ile geri gelir. Durduğu sürece diğer cihazlar ona erişemez.",
+      "reach_none": "Durduğu sürece hiç kimse"
     },
     "add": {
       "title": "Uygulama ekle",

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { t } from "$lib/i18n";
-  import { appName, formatBytes, hostOf, type AppInfo, type HostInfo, type Op } from "./api";
+  import { appName, formatBytes, hostOf, hostProblems, type AppInfo, type Check, type HostInfo, type Op } from "./api";
   import AppTile from "./AppTile.svelte";
   import Icon from "./Icon.svelte";
   import Meter from "./Meter.svelte";
@@ -10,13 +10,22 @@
     apps,
     selected,
     host,
+    checks,
     busy,
     onselect,
-  }: { apps: AppInfo[] | null; selected: string; host: HostInfo | null; busy: Record<string, Op>; onselect: (id: string) => void } = $props();
+  }: {
+    apps: AppInfo[] | null;
+    selected: string;
+    host: HostInfo | null;
+    checks: Check[] | null;
+    busy: Record<string, Op>;
+    onselect: (id: string) => void;
+  } = $props();
 
   let query = $state("");
   let shown = $derived((apps ?? []).filter((a) => `${appName(a.id)} ${a.name}`.toLowerCase().includes(query.trim().toLowerCase())));
-  let hostOk = $derived(host ? host.distro.running && host.network.firewall_ok && host.network.konak_owns_port80 : null);
+  let problems = $derived(hostProblems(host, checks));
+  let hostOk = $derived(problems === null ? null : problems === 0);
   const searchId = $props.id();
 
   const item = (on: boolean) =>

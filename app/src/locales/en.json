@@ -244,7 +244,8 @@
       "not_run": "Not run yet.",
       "check_ok": "Pass",
       "check_warn": "Warning",
-      "check_fail": "Fail"
+      "check_fail": "Fail",
+      "problems_one": "1 check needs attention"
     },
     "diag": {
       "forward_policy": "Shared network policy unchanged",
@@ -276,7 +277,8 @@
       "col_name": "Name",
       "col_state": "State",
       "col_health": "Health",
-      "stopped_note": "The app is stopped. Its settings and data are kept, and Start brings it back. Other devices cannot reach it while it is stopped."
+      "stopped_note": "The app is stopped. Its settings and data are kept, and Start brings it back. Other devices cannot reach it while it is stopped.",
+      "reach_none": "Nobody, while it is stopped"
     },
     "add": {
       "title": "Add an app",

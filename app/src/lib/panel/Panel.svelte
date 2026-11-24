@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { t } from "$lib/i18n";
   import { appName, errorText, portSuffix, type AppInfo, type AppProgress, type AppStats, type Check, type Failure, type HostInfo, type Manifest, type Op, type WebPorts } from "./api";
   import AddApp from "./AddApp.svelte";
@@ -95,14 +95,21 @@
     }
   }
 
-  function select(id: string) {
+  let mainEl = $state<HTMLElement>();
+
+  async function select(id: string) {
     view = id;
+    // In the stacked (narrow) layout the detail sits below the sidebar: bring it into view.
+    await tick();
+    if (mainEl && mainEl.getBoundingClientRect().top > window.innerHeight / 2) mainEl.scrollIntoView({ block: "start" });
   }
 
   onMount(() => {
     invoke<Manifest[]>("list_catalog").then((c) => (catalog = c));
     refresh();
     refreshHost();
+    // The sidebar shows This PC's health from the start, not only once its page is opened.
+    diagnose();
     // Network category and firewall rules can change while Konak is not running; both reads are cheap.
     invoke("refresh_network");
     // Poll only while the window is visible; the tray keeps Konak running when it is hidden.
@@ -136,9 +143,9 @@
   <Header engineRunning={host ? host.distro.running : null} {networkCategory} {homeUrl} onadd={() => select("add")} />
 
   <div class="flex flex-1 flex-wrap items-stretch">
-    <Sidebar {apps} selected={shown ?? ""} {host} {busy} onselect={select} />
+    <Sidebar {apps} selected={shown ?? ""} {host} {checks} {busy} onselect={select} />
 
-    <main class="flex min-w-0 flex-[999_1_560px] flex-col gap-5 px-4 pt-6 pb-8 sm:px-7">
+    <main bind:this={mainEl} class="flex min-w-0 flex-[999_1_480px] flex-col gap-5 px-4 pt-6 pb-8 sm:px-7">
       <Notices {networkCategory} {firewallMissing} {repairing} {repairError} {webPorts} />
 
       {#if shown === "add"}

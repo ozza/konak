@@ -77,7 +77,7 @@
     <div class="card"><RenameForm {app} {apps} ondone={renameDone} /></div>
   {:else}
     <div role="toolbar" aria-label={t("panel.actions.group", { name: label })} class="flex flex-wrap gap-2 rounded-[10px] border border-border bg-chrome p-2">
-      {#if app.claimed}
+      {#if app.claimed && !stopped}
         <button type="button" class="btn-primary" onclick={() => openUrl(app.url)}><Icon name="external" />{t("panel.actions.open")}</button>
       {/if}
       {#if stopped}
@@ -117,7 +117,7 @@
       <dl class="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-[18px] gap-y-2 text-[13px]">
         <dt class="text-muted">{t("panel.detail.address")}</dt><dd class="font-mono break-all">{host}</dd>
         <dt class="text-muted">{t("panel.detail.on_this_pc")}</dt><dd class="font-mono break-all">{app.local_url}</dd>
-        <dt class="text-muted">{t("panel.detail.reachable")}</dt><dd>{app.claimed ? t("panel.detail.reach_all") : t("panel.detail.reach_pc")}</dd>
+        <dt class="text-muted">{t("panel.detail.reachable")}</dt><dd>{stopped ? t("panel.detail.reach_none") : app.claimed ? t("panel.detail.reach_all") : t("panel.detail.reach_pc")}</dd>
         <dt class="text-muted">{t("panel.detail.connection")}</dt><dd>{app.https ? "HTTPS" : "HTTP"}</dd>
       </dl>
     </div>

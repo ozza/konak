@@ -86,6 +86,13 @@ export function formatBytes(bytes: number): string {
   return `${gb < 10 ? Math.round(gb * 10) / 10 : Math.round(gb)} GB`;
 }
 
+/** Problems for This PC: diagnostics that did not pass, plus missing firewall rules (no diagnostic covers
+ *  them). Null until either is known. */
+export function hostProblems(host: HostInfo | null, checks: Check[] | null): number | null {
+  if (!host && !checks) return null;
+  return (checks?.filter((c) => c.status !== "ok").length ?? 0) + (host && !host.network.firewall_ok ? 1 : 0);
+}
+
 export function errorText(error: unknown): ErrorText {
   const e = String(error);
   return has(`errors.${e}`) ? { message: t(`errors.${e}`), details: null } : { message: null, details: e };

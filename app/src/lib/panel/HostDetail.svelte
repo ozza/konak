@@ -1,6 +1,6 @@
 <script lang="ts">
   import { t, has } from "$lib/i18n";
-  import { formatBytes, type Check, type HostInfo } from "./api";
+  import { formatBytes, hostProblems, type Check, type HostInfo } from "./api";
   import CertHelp from "./CertHelp.svelte";
   import Icon from "./Icon.svelte";
   import Meter from "./Meter.svelte";
@@ -28,7 +28,7 @@
     ondiagnose: () => void;
   } = $props();
 
-  let problems = $derived(checks?.filter((c) => c.status !== "ok").length ?? null);
+  let problems = $derived(checks ? hostProblems(host, checks) : null);
   const checkTone = { ok: "bg-ok-bg text-ok", warn: "bg-warn/15 text-warn", fail: "bg-error/15 text-error" };
   const checkText = { ok: "text-ok", warn: "text-warn", fail: "text-error" };
   const checkIcon ={ ok: "check", warn: "warn", fail: "x" } as const;
@@ -44,7 +44,7 @@
         <h1 id="host-title" class="text-2xl font-bold tracking-tight">{t("panel.host.title")}</h1>
         {#if problems !== null}
           <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold {problems ? checkTone.warn : checkTone.ok}">
-            <span aria-hidden="true">{problems ? "!" : "●"}</span>{problems ? t("panel.host.problems", { n: problems }) : t("panel.host.all_ok")}
+            <span aria-hidden="true">{problems ? "!" : "●"}</span>{problems ? t(problems === 1 ? "panel.host.problems_one" : "panel.host.problems", { n: problems }) : t("panel.host.all_ok")}
           </span>
         {/if}
       </div>
