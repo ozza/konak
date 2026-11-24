@@ -16,7 +16,7 @@
     "FORWARDED_FOR_HEADERS": "HTTP_X_FORWARDED_FOR"
   },
   "claimed_env": {
-    "OVERWRITEHOST": "${KONAK_HOST}",
+    "OVERWRITEHOST": "${KONAK_HOSTPORT}",
     "OVERWRITECLIURL": "${KONAK_URL}"
   },
   "post_rename": "occ() { docker-compose -p nextcloud exec -T -u www-data app php occ \"$@\" </dev/null; }\nst=$(occ status --output=json)\ncase \"$st\" in *'\"installed\":true'*) occ config:system:set trusted_domains 0 --value=\"$KONAK_HOST\"; occ config:system:set overwrite.cli.url --value=\"$KONAK_URL\" ;; esac\n"

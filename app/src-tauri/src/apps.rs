@@ -9,7 +9,7 @@ use crate::catalog::{self, Manifest};
 use crate::installer::{now, InstalledApp, State};
 use crate::paths::Paths;
 use crate::redact::Redactor;
-use crate::services::{lan_ip, HOME_NAME};
+use crate::services::{active_ports, lan_ip, WebPorts, HOME_NAME};
 use crate::shell::{self, tail};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,8 @@ pub struct Container {
 pub struct AppInfo {
     pub id: String,
     pub name: String,
-    /// The `.local` URL; served on the LAN only once the app is claimed.
+    /// The `.local` URL on the web ports Caddy serves on (`:47080`/`:47443` on the fallback); served
+    /// on the LAN only once the app is claimed.
     pub url: String,
     /// `http://127.0.0.1:<port>`, reachable from this PC only. Used to finish an unclaimed app's
     /// first-run setup (a browser secure context, so Vaultwarden's web vault works there too).
@@ -214,13 +215,15 @@ fn podman_ps(paths: &Paths) -> Result<HashMap<String, Vec<Container>>, String> {
     parse_ps(&out.text)
 }
 
-pub fn url(m: &Manifest, name: &str) -> String {
-    format!("{}://{name}.local", if m.https { "https" } else { "http" })
+/// The app's `.local` URL on `ports`: with `:47080` / `:47443` on the fallback, no port on 80/443.
+pub fn url(m: &Manifest, name: &str, ports: WebPorts) -> String {
+    ports.url(m.https, name)
 }
 
 /// Installed apps with live container status. When the distro cannot be read, status is `unknown`.
 pub fn list(paths: &Paths) -> Vec<AppInfo> {
     let state = State::load(paths);
+    let ports = active_ports(paths);
     let ps = podman_ps(paths).map_err(|e| crate::log(paths, &e)).ok();
     state
         .apps
@@ -237,7 +240,7 @@ pub fn list(paths: &Paths) -> Vec<AppInfo> {
             Some(AppInfo {
                 id: a.id.clone(),
                 name: a.name.clone(),
-                url: url(m, &a.name),
+                url: url(m, &a.name, ports),
                 local_url: format!("http://127.0.0.1:{}", m.port),
                 https: m.https,
                 port: m.port,
@@ -337,13 +340,23 @@ fn b64(s: &str) -> String {
 pub const PROXY_NET: &str = "10.234.0.0/16";
 
 /// Values written to the app's `.env` by Konak (secrets and mounts are added by the script).
-/// `claimed_env` is added only once the app is claimed.
-pub fn env_lines(m: &Manifest, name: &str, claimed: bool) -> String {
-    let (host, url) = (format!("{name}.local"), url(m, name));
-    let mut lines = vec![format!("KONAK_HOST={host}"), format!("KONAK_URL={url}"), format!("KONAK_PORT={}", m.port), format!("KONAK_PROXY_NET={PROXY_NET}")];
+/// `claimed_env` is added only once the app is claimed. `ports` are the web ports Caddy serves on:
+/// `KONAK_URL` and `KONAK_HOSTPORT` carry the port on the fallback and drop it on 80/443, while
+/// `KONAK_HOST` is always the bare name (trusted domains, Forgejo's DOMAIN).
+pub fn env_lines(m: &Manifest, name: &str, claimed: bool, ports: WebPorts) -> String {
+    let (host, url) = (format!("{name}.local"), url(m, name, ports));
+    let hostport = format!("{host}{}", ports.suffix(m.https));
+    let mut lines = vec![
+        format!("KONAK_HOST={host}"),
+        format!("KONAK_HOSTPORT={hostport}"),
+        format!("KONAK_URL={url}"),
+        format!("KONAK_PORT={}", m.port),
+        format!("KONAK_PROXY_NET={PROXY_NET}"),
+    ];
     let claimed_env = m.claimed_env.iter().filter(|_| claimed);
     for (k, v) in m.env.iter().chain(claimed_env) {
-        lines.push(format!("{k}={}", v.replace("${KONAK_HOST}", &host).replace("${KONAK_URL}", &url).replace("${KONAK_PROXY_NET}", PROXY_NET)));
+        let v = v.replace("${KONAK_HOSTPORT}", &hostport).replace("${KONAK_HOST}", &host).replace("${KONAK_URL}", &url).replace("${KONAK_PROXY_NET}", PROXY_NET);
+        lines.push(format!("{k}={v}"));
     }
     lines.join("\n")
 }
@@ -352,8 +365,10 @@ fn redacted(paths: &Paths, text: &str) -> String {
     Redactor::load(paths).apply(text)
 }
 
-/// Renders and starts the app under `name`; with `hook`, runs it after the app is healthy.
-fn run_install(paths: &Paths, m: &Manifest, name: &str, claimed: bool, hook: Option<&str>) -> Result<(), String> {
+/// Renders the app under `name` for the web `ports` and, with `up`, (re)creates and starts it; with
+/// `hook`, runs it after the app is healthy. Without `up` only the files are written (a stopped app
+/// stays stopped) and `hook` is not run.
+fn run_install(paths: &Paths, m: &Manifest, name: &str, claimed: bool, hook: Option<&str>, ports: WebPorts, up: bool) -> Result<(), String> {
     let mut mounts = String::new();
     for (var, kind) in &m.mounts {
         let dir = if kind == "photos" { &paths.photos } else { &paths.media };
@@ -362,7 +377,9 @@ fn run_install(paths: &Paths, m: &Manifest, name: &str, claimed: bool, hook: Opt
     }
     let port = m.port.to_string();
     let secrets = if m.secrets.is_empty() { "-".to_string() } else { m.secrets.join(" ") };
-    let args = [&m.id, port.as_str(), &m.health_path, &b64(m.compose), &b64(&env_lines(m, name, claimed)), &secrets, &b64(&mounts), &b64(hook.unwrap_or(""))];
+    let hook = if up { hook.unwrap_or("") } else { "" };
+    let mode = if up { "up" } else { "render" };
+    let args = [&m.id, port.as_str(), &m.health_path, &b64(m.compose), &b64(&env_lines(m, name, claimed, ports)), &secrets, &b64(&mounts), &b64(hook), mode];
     let out = shell::distro_script(&paths.distro, INSTALL_SH, &args);
     crate::log(paths, &format!("install {} as {name}: {}", m.id, redacted(paths, &tail(&out.text, 2))));
     if !out.ok {
@@ -391,7 +408,7 @@ pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
         }
     };
     let repair = reservation.is_none();
-    if let Err(e) = run_install(paths, m, &name, claimed, None) {
+    if let Err(e) = run_install(paths, m, &name, claimed, None, active_ports(paths), true) {
         if !repair {
             // The containers may already run, holding the port and RAM, while the panel shows the app
             // as not installed. Stop them; the data stays, so a retry reuses its secrets.
@@ -452,8 +469,9 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
     if !name_free_on_lan(paths, new_name)? {
         return Err("name_taken_on_lan".into());
     }
-    if let Err(e) = run_install(paths, m, new_name, app.claimed, m.post_rename.as_deref()) {
-        if let Err(back) = run_install(paths, m, &app.name, app.claimed, m.post_rename.as_deref()) {
+    let ports = active_ports(paths);
+    if let Err(e) = run_install(paths, m, new_name, app.claimed, m.post_rename.as_deref(), ports, true) {
+        if let Err(back) = run_install(paths, m, &app.name, app.claimed, m.post_rename.as_deref(), ports, true) {
             // The containers may still carry the new name: render the saved one again at next start.
             crate::log(paths, &format!("rename of {id}: restoring {} failed: {back}", app.name));
             let _ = update_state(paths, |s| {
@@ -482,7 +500,7 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
 pub fn claim(paths: &Paths, id: &str) -> Result<(), String> {
     let m = manifest(id)?;
     let app = installed(paths, id)?;
-    run_install(paths, m, &app.name, true, None)?;
+    run_install(paths, m, &app.name, true, None, active_ports(paths), true)?;
     update_state(paths, |s| {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.claimed = true;
@@ -491,6 +509,35 @@ pub fn claim(paths: &Paths, id: &str) -> Result<(), String> {
         }
     })?;
     Ok(())
+}
+
+/// Re-renders every claimed app for the web ports Caddy now serves on, so the settings that embed
+/// the app's own address (Nextcloud's OVERWRITEHOST and OVERWRITECLIURL, Vaultwarden's DOMAIN,
+/// Forgejo's ROOT_URL) carry the port on the fallback and drop it on 80/443. The same render as a
+/// rename, `post_rename` hook included: a running app's changed containers are recreated. A stopped
+/// app only gets its files rewritten and stays stopped; `start` brings it up with them.
+///
+/// Idempotent: nothing happens when the apps were last rendered for `ports`, and `ports` is
+/// recorded only once every app succeeded, so a failure is retried as a whole. Unclaimed apps are
+/// left alone; `claim` renders them for the ports of that moment. `on_app` hears each app's result.
+pub fn rerender_for_ports(paths: &Paths, ports: WebPorts, on_app: &dyn Fn(&str, &Result<(), String>)) -> Result<(), String> {
+    let state = State::try_load(paths)?;
+    if state.rendered_ports == ports {
+        return Ok(());
+    }
+    let mut failed = vec![];
+    for a in state.apps.iter().filter(|a| a.claimed) {
+        let Some(m) = catalog::get(&a.id) else { continue };
+        let result = run_install(paths, m, &a.name, true, m.post_rename.as_deref(), ports, !a.stopped);
+        on_app(&a.id, &result);
+        if let Err(e) = result {
+            failed.push(e);
+        }
+    }
+    if !failed.is_empty() {
+        return Err(failed.join("; "));
+    }
+    update_state(paths, |s| s.rendered_ports = ports)
 }
 
 /// Runs a docker-compose command for an installed app in its directory.
@@ -782,15 +829,75 @@ time="2026-11-24" level=warning msg="something""#;
         let mut m = catalog::get("jellyfin").unwrap().clone();
         m.env.insert("PUBLIC_URL".into(), "${KONAK_URL}/x".into());
         m.env.insert("HOST".into(), "${KONAK_HOST}".into());
-        let env = env_lines(&m, "movies", true);
-        assert!(env.contains("KONAK_HOST=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=47101\nKONAK_PROXY_NET=10.234.0.0/16"));
+        let env = env_lines(&m, "movies", true, WebPorts::STANDARD);
+        assert!(env.contains("KONAK_HOST=movies.local\nKONAK_HOSTPORT=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=47101\nKONAK_PROXY_NET=10.234.0.0/16"));
         assert!(env.contains("PUBLIC_URL=http://movies.local/x"));
         assert!(env.contains("HOST=movies.local"));
     }
 
     #[test]
+    fn env_carries_the_fallback_port() {
+        let line = |id: &str, ports: WebPorts, key: &str| {
+            let env = env_lines(catalog::get(id).unwrap(), "x", true, ports);
+            env.lines().find_map(|l| l.strip_prefix(&format!("{key}="))).map(String::from)
+        };
+        let fb = WebPorts::FALLBACK;
+        assert_eq!(line("nextcloud", fb, "OVERWRITEHOST").as_deref(), Some("x.local:47080"));
+        assert_eq!(line("nextcloud", fb, "OVERWRITECLIURL").as_deref(), Some("http://x.local:47080"));
+        // Nextcloud checks trusted domains without the port; Forgejo's DOMAIN is a bare host too.
+        assert_eq!(line("nextcloud", fb, "NEXTCLOUD_TRUSTED_DOMAINS").as_deref(), Some("x.local"));
+        assert_eq!(line("forgejo", fb, "KONAK_HOST").as_deref(), Some("x.local"));
+        assert_eq!(line("forgejo", fb, "KONAK_URL").as_deref(), Some("http://x.local:47080"));
+        // Vaultwarden is HTTPS: its DOMAIN (KONAK_URL in compose.yml) gets the HTTPS port.
+        assert_eq!(line("vaultwarden", fb, "KONAK_URL").as_deref(), Some("https://x.local:47443"));
+        assert_eq!(line("vaultwarden", fb, "KONAK_HOSTPORT").as_deref(), Some("x.local:47443"));
+        assert!(catalog::get("vaultwarden").unwrap().compose.contains("DOMAIN: ${KONAK_URL}"));
+        assert!(catalog::get("forgejo").unwrap().compose.contains("ROOT_URL=${KONAK_URL}/"));
+        // Back on 80/443 the port is dropped again.
+        let std = WebPorts::STANDARD;
+        assert_eq!(line("nextcloud", std, "OVERWRITEHOST").as_deref(), Some("x.local"));
+        assert_eq!(line("vaultwarden", std, "KONAK_URL").as_deref(), Some("https://x.local"));
+        assert_eq!(url(catalog::get("jellyfin").unwrap(), "movies", fb), "http://movies.local:47080");
+        assert_eq!(url(catalog::get("jellyfin").unwrap(), "movies", std), "http://movies.local");
+        for m in catalog::all() {
+            let env = env_lines(m, "x", true, fb);
+            assert!(!env.contains(".local:80") && !env.contains(".local:443") && !env.contains("${"), "{}: {env}", m.id);
+        }
+    }
+
+    #[test]
+    fn rerender_for_ports_is_a_no_op_when_already_rendered_and_records_only_on_success() {
+        let home = std::env::temp_dir().join(format!("konak-rerender-test-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let mut s = State::default();
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: false, stopped: false });
+        s.save(&paths);
+        let seen = std::cell::RefCell::new(vec![]);
+        let on_app = |id: &str, _: &Result<(), String>| seen.borrow_mut().push(id.to_string());
+        // Already rendered for 80/443: nothing runs.
+        let same = rerender_for_ports(&paths, WebPorts::STANDARD, &on_app);
+        // Only an unclaimed app: nothing to render, the new ports are recorded.
+        let none_claimed = rerender_for_ports(&paths, WebPorts::FALLBACK, &on_app);
+        let recorded = State::load(&paths).rendered_ports;
+        // A claimed app whose render fails (no such distro): the ports are not recorded.
+        let mut s = State::load(&paths);
+        s.apps[0].claimed = true;
+        s.apps[0].stopped = true;
+        s.save(&paths);
+        let failed = rerender_for_ports(&paths, WebPorts::STANDARD, &on_app);
+        let after = State::load(&paths);
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(same.is_ok() && none_claimed.is_ok());
+        assert_eq!(recorded, WebPorts::FALLBACK);
+        assert!(failed.is_err());
+        assert_eq!(after.rendered_ports, WebPorts::FALLBACK, "retried as a whole later");
+        assert!(after.apps[0].stopped, "a stopped app stays stopped");
+        assert_eq!(*seen.borrow(), ["forgejo"]);
+    }
+
+    #[test]
     fn apps_trust_only_the_proxy_net() {
-        let env = |id: &str| env_lines(catalog::get(id).unwrap(), id, true);
+        let env = |id: &str| env_lines(catalog::get(id).unwrap(), id, true, WebPorts::STANDARD);
         assert!(env("nextcloud").lines().any(|l| l == "TRUSTED_PROXIES=10.234.0.0/16"));
         assert!(env("nextcloud").lines().any(|l| l == "FORWARDED_FOR_HEADERS=HTTP_X_FORWARDED_FOR"));
         assert!(env("immich").lines().any(|l| l == "IMMICH_TRUSTED_PROXIES=10.234.0.0/16"));
@@ -809,8 +916,8 @@ time="2026-11-24" level=warning msg="something""#;
     fn claimed_env_only_after_claim() {
         let m = catalog::get("forgejo").unwrap();
         assert_eq!(m.claimed_env["FORGEJO_DISABLE_REGISTRATION"], "true");
-        assert!(!env_lines(m, "git", false).contains("FORGEJO_DISABLE_REGISTRATION"));
-        assert!(env_lines(m, "git", true).lines().any(|l| l == "FORGEJO_DISABLE_REGISTRATION=true"));
+        assert!(!env_lines(m, "git", false, WebPorts::STANDARD).contains("FORGEJO_DISABLE_REGISTRATION"));
+        assert!(env_lines(m, "git", true, WebPorts::STANDARD).lines().any(|l| l == "FORGEJO_DISABLE_REGISTRATION=true"));
         // The compose file falls back to open registration while the app is unclaimed.
         assert!(m.compose.contains("FORGEJO__service__DISABLE_REGISTRATION=${FORGEJO_DISABLE_REGISTRATION:-false}"));
     }
@@ -821,9 +928,9 @@ time="2026-11-24" level=warning msg="something""#;
         // which nothing announces yet. The image applies OVERWRITEHOST per request, and Nextcloud
         // trusts every host once overwritehost is set, so the claimed .local name is trusted.
         let m = catalog::get("nextcloud").unwrap();
-        let before = env_lines(m, "cloud", false);
+        let before = env_lines(m, "cloud", false, WebPorts::STANDARD);
         assert!(!before.contains("OVERWRITEHOST") && !before.contains("OVERWRITECLIURL"));
-        let after = env_lines(m, "cloud", true);
+        let after = env_lines(m, "cloud", true, WebPorts::STANDARD);
         assert!(after.lines().any(|l| l == "OVERWRITEHOST=cloud.local"));
         assert!(after.lines().any(|l| l == "OVERWRITECLIURL=http://cloud.local"));
     }

@@ -3,7 +3,7 @@
 //! `logs/install.log` so the run can be measured (UAC prompts, reboots, time, download size).
 
 use crate::paths::{skip_elevation, Paths};
-use crate::services::{lan_ip, Supervisor, HOME_NAME};
+use crate::services::{lan_ip, Supervisor, WebPorts, HOME_NAME};
 use crate::shell::{self, tail};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -64,6 +64,9 @@ pub struct State {
     /// Apps whose containers must be re-rendered by the install script at the next start (the
     /// migrated Jellyfin still listens on its old port 8096).
     pub rerender: Vec<String>,
+    /// The web ports the claimed apps' settings were last rendered for (`apps::rerender_for_ports`).
+    /// State files from before the port fallback were rendered for 80/443.
+    pub rendered_ports: WebPorts,
     pub done: bool,
 }
 
@@ -283,8 +286,8 @@ pub fn repair_network(paths: &Paths) -> Result<(), String> {
     elevate(paths, false, 0).map(|_| ())
 }
 
-fn http_status(ip: &str, host: &str) -> Option<u16> {
-    let addr = format!("{ip}:80").parse().ok()?;
+fn http_status(ip: &str, port: u16, host: &str) -> Option<u16> {
+    let addr = format!("{ip}:{port}").parse().ok()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).ok()?;
     s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     write!(s, "GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").ok()?;
@@ -371,16 +374,19 @@ pub fn run_step(step: &str, paths: &Paths, state: &mut State, pre: &Preflight, s
             sup.tick();
             let host = format!("{HOME_NAME}.local");
             let deadline = Instant::now() + Duration::from_secs(60);
-            loop {
-                match http_status(&ip, &host) {
-                    Some(200) => break,
+            // The supervisor may serve on the fallback ports (another program holds port 80); read
+            // them each try, as a later tick can switch.
+            let ports = loop {
+                let ports = sup.web_status().ports();
+                match http_status(&ip, ports.http, &host) {
+                    Some(200) => break ports,
                     other if Instant::now() > deadline => {
-                        return Err(format!("http://{host} did not answer through Caddy (last status {other:?})"));
+                        return Err(format!("{} did not answer through Caddy (last status {other:?})", ports.url(false, HOME_NAME)));
                     }
                     _ => std::thread::sleep(Duration::from_secs(2)),
                 }
-            }
-            crate::log(paths, &format!("reachable: http://{host} via {ip}:80"));
+            };
+            crate::log(paths, &format!("reachable: {} via {ip}:{}", ports.url(false, HOME_NAME), ports.http));
         }
         _ => return Err(format!("unknown step {step}")),
     }
@@ -430,6 +436,17 @@ mod tests {
     fn fresh_state_has_no_apps() {
         let s = State::from_json(r#"{"completed":["preflight"]}"#).unwrap();
         assert!(s.apps.is_empty() && s.rerender.is_empty() && !s.done);
+    }
+
+    #[test]
+    fn state_from_before_the_port_fallback_was_rendered_for_80_and_443() {
+        let old = r#"{"completed":["preflight","network"],"apps":[{"id":"nextcloud","name":"cloud","installed_unix":5,"claimed":true,"stopped":true}],"rerender":[],"done":true}"#;
+        let s = State::from_json(old).unwrap();
+        assert_eq!(s.rendered_ports, WebPorts::STANDARD);
+        assert!(s.done && s.apps[0].stopped);
+        let fallback = State { rendered_ports: WebPorts::FALLBACK, ..s };
+        let back = State::from_json(&serde_json::to_string(&fallback).unwrap()).unwrap();
+        assert_eq!(back.rendered_ports, WebPorts { http: 47080, https: 47443 });
     }
 
     fn temp_paths(tag: &str) -> Paths {
