@@ -3,7 +3,7 @@
 //! `logs/install.log` so the run can be measured (UAC prompts, reboots, time, download size).
 
 use crate::paths::{skip_elevation, Paths};
-use crate::services::{lan_ip, Supervisor, HOME_NAME};
+use crate::services::{lan_ip, Supervisor, WebPorts, HOME_NAME};
 use crate::shell::{self, tail};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -31,6 +31,10 @@ pub struct InstalledApp {
     /// entries from before this field were already exposed, so they load as claimed.
     #[serde(default = "claimed_by_default")]
     pub claimed: bool,
+    /// Stopped by the user (`apps::stop`): its containers are removed, data kept, so nothing starts
+    /// it again until `apps::start`. Older state files have no such field and load as running.
+    #[serde(default)]
+    pub stopped: bool,
 }
 
 fn claimed_by_default() -> bool {
@@ -60,6 +64,9 @@ pub struct State {
     /// Apps whose containers must be re-rendered by the install script at the next start (the
     /// migrated Jellyfin still listens on its old port 8096).
     pub rerender: Vec<String>,
+    /// The web ports the claimed apps' settings were last rendered for (`apps::rerender_for_ports`).
+    /// State files from before the port fallback were rendered for 80/443.
+    pub rendered_ports: WebPorts,
     pub done: bool,
 }
 
@@ -130,7 +137,7 @@ impl State {
         let mut s: State = serde_json::from_str(text).map_err(|e| e.to_string())?;
         if let Some(name) = s.app_name.take() {
             if !s.apps.iter().any(|a| a.id == "jellyfin") {
-                s.apps.push(InstalledApp { id: "jellyfin".into(), name, installed_unix: s.finished_unix, claimed: true });
+                s.apps.push(InstalledApp { id: "jellyfin".into(), name, installed_unix: s.finished_unix, claimed: true, stopped: false });
                 s.rerender.push("jellyfin".into());
             }
         }
@@ -279,8 +286,8 @@ pub fn repair_network(paths: &Paths) -> Result<(), String> {
     elevate(paths, false, 0).map(|_| ())
 }
 
-fn http_status(ip: &str, host: &str) -> Option<u16> {
-    let addr = format!("{ip}:80").parse().ok()?;
+fn http_status(ip: &str, port: u16, host: &str) -> Option<u16> {
+    let addr = format!("{ip}:{port}").parse().ok()?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).ok()?;
     s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     write!(s, "GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").ok()?;
@@ -367,16 +374,19 @@ pub fn run_step(step: &str, paths: &Paths, state: &mut State, pre: &Preflight, s
             sup.tick();
             let host = format!("{HOME_NAME}.local");
             let deadline = Instant::now() + Duration::from_secs(60);
-            loop {
-                match http_status(&ip, &host) {
-                    Some(200) => break,
+            // The supervisor may serve on the fallback ports (another program holds port 80); read
+            // them each try, as a later tick can switch.
+            let ports = loop {
+                let ports = sup.web_status().ports();
+                match http_status(&ip, ports.http, &host) {
+                    Some(200) => break ports,
                     other if Instant::now() > deadline => {
-                        return Err(format!("http://{host} did not answer through Caddy (last status {other:?})"));
+                        return Err(format!("{} did not answer through Caddy (last status {other:?})", ports.url(false, HOME_NAME)));
                     }
                     _ => std::thread::sleep(Duration::from_secs(2)),
                 }
-            }
-            crate::log(paths, &format!("reachable: http://{host} via {ip}:80"));
+            };
+            crate::log(paths, &format!("reachable: {} via {ip}:{}", ports.url(false, HOME_NAME), ports.http));
         }
         _ => return Err(format!("unknown step {step}")),
     }
@@ -403,7 +413,7 @@ mod tests {
             "app_name":"jellyfin-2","done":true}"#;
         let s = State::from_json(old).unwrap();
         assert!(s.done);
-        assert_eq!(s.apps, vec![InstalledApp { id: "jellyfin".into(), name: "jellyfin-2".into(), installed_unix: 20, claimed: true }]);
+        assert_eq!(s.apps, vec![InstalledApp { id: "jellyfin".into(), name: "jellyfin-2".into(), installed_unix: 20, claimed: true, stopped: false }]);
         assert_eq!(s.rerender, vec!["jellyfin".to_string()]);
         let saved = serde_json::to_string(&s).unwrap();
         assert!(!saved.contains("app_name"));
@@ -416,8 +426,8 @@ mod tests {
     #[test]
     fn apps_saved_before_the_claim_step_load_as_claimed() {
         let s = State::from_json(r#"{"apps":[{"id":"immich","name":"photos","installed_unix":5}]}"#).unwrap();
-        assert!(s.apps[0].claimed);
-        let unclaimed = InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 6, claimed: false };
+        assert!(s.apps[0].claimed && !s.apps[0].stopped);
+        let unclaimed = InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 6, claimed: false, stopped: false };
         let back: InstalledApp = serde_json::from_str(&serde_json::to_string(&unclaimed).unwrap()).unwrap();
         assert_eq!(back, unclaimed);
     }
@@ -426,6 +436,17 @@ mod tests {
     fn fresh_state_has_no_apps() {
         let s = State::from_json(r#"{"completed":["preflight"]}"#).unwrap();
         assert!(s.apps.is_empty() && s.rerender.is_empty() && !s.done);
+    }
+
+    #[test]
+    fn state_from_before_the_port_fallback_was_rendered_for_80_and_443() {
+        let old = r#"{"completed":["preflight","network"],"apps":[{"id":"nextcloud","name":"cloud","installed_unix":5,"claimed":true,"stopped":true}],"rerender":[],"done":true}"#;
+        let s = State::from_json(old).unwrap();
+        assert_eq!(s.rendered_ports, WebPorts::STANDARD);
+        assert!(s.done && s.apps[0].stopped);
+        let fallback = State { rendered_ports: WebPorts::FALLBACK, ..s };
+        let back = State::from_json(&serde_json::to_string(&fallback).unwrap()).unwrap();
+        assert_eq!(back.rendered_ports, WebPorts { http: 47080, https: 47443 });
     }
 
     fn temp_paths(tag: &str) -> Paths {
@@ -438,7 +459,7 @@ mod tests {
     fn save_is_atomic_and_leaves_no_temp_files() {
         let paths = temp_paths("save");
         assert!(State::try_load(&paths).unwrap().apps.is_empty(), "missing file is a fresh state");
-        let mut s = State { done: true, apps: vec![InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: true }], ..State::default() };
+        let mut s = State { done: true, apps: vec![InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: true, stopped: false }], ..State::default() };
         s.save(&paths);
         s.apps[0].name = "code".into();
         s.save(&paths);

@@ -4,7 +4,10 @@
 // See: https://v2.tauri.app/start/frontend/sveltekit/ for more info
 export const ssr = false;
 
+import { applyTheme, loadTheme } from "$lib/theme";
+
 export async function load() {
+  applyTheme(loadTheme());
   // `npm run dev` in a plain browser: a mocked backend. Compiled out of production builds.
   if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) (await import("$lib/dev/mock")).installMock();
 }

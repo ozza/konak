@@ -1,54 +1,140 @@
 @import "tailwindcss";
 
-/* Semantic tokens; components use these names, never raw colors. Calm, Windows 11-like palette. */
+/* Light/dark comes from data-theme on <html> ("light" | "dark"), set by $lib/theme. Without it
+   the theme follows Windows. */
+
+/* Semantic tokens; components use these names, never raw colors. Light theme here, dark below. */
 @theme {
-  --color-surface: #f6f6f4;
+  --color-surface: #f5f6f8;
+  --color-chrome: #ffffff;
   --color-panel: #ffffff;
-  --color-border: #dedcd6;
-  --color-text: #1d1d1b;
-  --color-muted: #5f5e59;
-  --color-accent: #1f5f8b;
-  --color-accent-strong: #174a6d;
+  --color-raised: #f3f4f6;
+  --color-raised-hover: #e8ebef;
+  --color-border: #dfe3e8;
+  --color-border-soft: #edf0f3;
+  --color-control: #cfd5dc;
+  --color-control-hover: #b5bdc7;
+  --color-text: #1f2328;
+  --color-text-2: #3d444d;
+  --color-muted: #59636e;
+  --color-console: #f6f8fa;
+  --color-console-text: #3d444d;
+  --color-link: #0969da;
+  --color-accent: #1f6feb;
+  --color-accent-strong: #1858c4;
   --color-on-accent: #ffffff;
-  --color-ok: #2d6a3e;
-  --color-warn-bg: #fdf3e1;
-  --color-warn-border: #e2b766;
-  --color-error-bg: #fbeaea;
-  --color-error-border: #d98c8c;
-  --color-error: #9b2c2c;
+  --color-ok: #1a7f37;
+  --color-ok-bg: rgb(26 127 55 / 0.1);
+  --color-warn: #9a6700;
+  --color-warn-bg: #fff8e6;
+  --color-warn-border: #e9c46a;
+  --color-warn-title: #7d4e00;
+  --color-warn-text: #5c4a1a;
+  --color-warn-icon: #fbe5b0;
+  --color-error: #cf222e;
+  --color-error-bg: #ffebe9;
+  --color-error-border: #f1a9a9;
+  --color-danger: #cf222e;
   --color-on-error: #ffffff;
+  --color-icon-tile: #e8ebef;
+  --color-icon-ink: #3d444d;
+  --shadow-card: 0 1px 2px rgb(31 35 40 / 0.06);
   --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-surface: #1c1c1b;
-    --color-panel: #262624;
-    --color-border: #3a3936;
-    --color-text: #ecebe7;
-    --color-muted: #a9a79f;
-    --color-accent: #6aa9d6;
-    --color-accent-strong: #8cc0e4;
-    --color-on-accent: #0f1e29;
-    --color-ok: #7cc28e;
-    --color-warn-bg: #3a2f1c;
-    --color-warn-border: #8a6a2c;
-    --color-error-bg: #3a2222;
-    --color-error-border: #8a4444;
-    --color-error: #f0a3a3;
-    --color-on-error: #2a1010;
+@layer base {
+  /* Same values twice: once when Windows is dark and no override is set, once for the override. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --color-surface: #0f1115;
+      --color-chrome: #14171c;
+      --color-panel: #161a20;
+      --color-raised: #1c2128;
+      --color-raised-hover: #232a33;
+      --color-border: #262b33;
+      --color-border-soft: #1f242b;
+      --color-control: #2d333b;
+      --color-control-hover: #3a424d;
+      --color-text: #e6e8eb;
+      --color-text-2: #c9d1d9;
+      --color-muted: #8b949e;
+      --color-console: #0b0d10;
+      --color-console-text: #b1bac4;
+      --color-link: #58a6ff;
+      --color-accent-strong: #3b82f6;
+      --color-ok: #3fb950;
+      --color-ok-bg: rgb(63 185 80 / 0.13);
+      --color-warn: #e3b341;
+      --color-warn-bg: #231c0e;
+      --color-warn-border: #6e5418;
+      --color-warn-title: #f2cc60;
+      --color-warn-text: #d9c9a3;
+      --color-warn-icon: #3a2e12;
+      --color-error: #ff7b72;
+      --color-error-bg: #2d1517;
+      --color-error-border: #6e2b2b;
+      --color-danger: #da3633;
+      --color-icon-tile: #262b33;
+      --color-icon-ink: #c9d1d9;
+      --shadow-card: none;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --color-surface: #0f1115;
+    --color-chrome: #14171c;
+    --color-panel: #161a20;
+    --color-raised: #1c2128;
+    --color-raised-hover: #232a33;
+    --color-border: #262b33;
+    --color-border-soft: #1f242b;
+    --color-control: #2d333b;
+    --color-control-hover: #3a424d;
+    --color-text: #e6e8eb;
+    --color-text-2: #c9d1d9;
+    --color-muted: #8b949e;
+    --color-console: #0b0d10;
+    --color-console-text: #b1bac4;
+    --color-link: #58a6ff;
+    --color-accent-strong: #3b82f6;
+    --color-ok: #3fb950;
+    --color-ok-bg: rgb(63 185 80 / 0.13);
+    --color-warn: #e3b341;
+    --color-warn-bg: #231c0e;
+    --color-warn-border: #6e5418;
+    --color-warn-title: #f2cc60;
+    --color-warn-text: #d9c9a3;
+    --color-warn-icon: #3a2e12;
+    --color-error: #ff7b72;
+    --color-error-bg: #2d1517;
+    --color-error-border: #6e2b2b;
+    --color-danger: #da3633;
+    --color-icon-tile: #262b33;
+    --color-icon-ink: #c9d1d9;
+    --shadow-card: none;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
   }
 }
 
-/* Buttons used by the panel. */
+/* Controls used by the panel. */
 @utility btn {
-  @apply inline-flex items-center justify-center gap-1.5 rounded-md border border-border bg-panel px-3 py-1.5 text-sm font-medium hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-control bg-raised px-3.5 text-[13px] font-medium whitespace-nowrap text-text hover:border-control-hover hover:bg-raised-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-link disabled:cursor-not-allowed disabled:opacity-50;
 }
 @utility btn-primary {
-  @apply btn border-transparent bg-accent text-on-accent hover:bg-accent-strong;
+  @apply btn border-accent bg-accent text-on-accent hover:border-accent-strong hover:bg-accent-strong;
 }
 @utility btn-danger {
-  @apply btn border-transparent bg-error text-on-error hover:bg-error/85;
+  @apply btn border-danger bg-danger text-on-error hover:border-danger hover:bg-danger/85;
+}
+@utility card {
+  @apply flex min-w-0 flex-col gap-3.5 rounded-xl border border-border bg-panel p-[18px] shadow-card;
+}
+@utility label-caps {
+  @apply text-[11px] font-semibold tracking-[0.08em] text-muted uppercase;
 }
 
 html,

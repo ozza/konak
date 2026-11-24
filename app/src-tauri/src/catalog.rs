@@ -37,7 +37,8 @@ pub struct Manifest {
     #[serde(default)]
     pub mounts: BTreeMap<String, String>,
     pub min_ram_mb: u32,
-    /// Env var name -> value; `${KONAK_HOST}` and `${KONAK_URL}` are filled in at install time.
+    /// Env var name -> value; `${KONAK_HOST}` (`name.local`), `${KONAK_HOSTPORT}` (with the web port
+    /// when it is not the default), `${KONAK_URL}` and `${KONAK_PROXY_NET}` are filled in at install time.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Like `env`, but written only once the app is claimed (its admin account exists), e.g. to

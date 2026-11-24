@@ -6,7 +6,7 @@ use crate::diag::{self, Distro};
 use crate::installer::{now, State, STEPS};
 use crate::paths::Paths;
 use crate::redact::Redactor;
-use crate::services::{lan_ip, HOME_NAME};
+use crate::services::{active_ports, lan_ip, HOME_NAME};
 use crate::shell::{self, tail};
 use crate::{apps, catalog};
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
@@ -58,7 +58,7 @@ pub fn redact_value(r: &Redactor, v: Value) -> Value {
 fn heartbeat_json(paths: &Paths) -> Value {
     let now = now();
     match diag::heartbeat(paths) {
-        Some(h) => json!({"age_s": h.age(now), "stale": h.stale(now), "lan_ip": h.lan_ip, "names": h.names, "pids": h.pids, "https_available": h.https_available}),
+        Some(h) => json!({"age_s": h.age(now), "stale": h.stale(now), "lan_ip": h.lan_ip, "names": h.names, "pids": h.pids, "https_available": h.https_available, "web_ports": h.web_ports}),
         None => Value::Null,
     }
 }
@@ -72,12 +72,13 @@ fn status(paths: &Paths, d: &Distro) -> Value {
             json!({"id": id, "state": state})
         })
         .collect();
+    let ports = active_ports(paths);
     let apps = if d.running {
         serde_json::to_value(apps::list(paths)).unwrap_or_default()
     } else {
         s.apps
             .iter()
-            .filter_map(|a| catalog::get(&a.id).map(|m| json!({"id": a.id, "name": a.name, "url": apps::url(m, &a.name), "claimed": a.claimed, "status": "distro_not_running"})))
+            .filter_map(|a| catalog::get(&a.id).map(|m| json!({"id": a.id, "name": a.name, "url": apps::url(m, &a.name, ports), "claimed": a.claimed, "status": "distro_not_running"})))
             .collect()
     };
     json!({"setup": {"done": s.done, "steps": steps}, "distro": d, "apps": apps, "heartbeat": heartbeat_json(paths)})
@@ -93,20 +94,23 @@ fn logs(paths: &Paths, d: &Distro, args: LogsArgs) -> Result<Value, String> {
 }
 
 fn network(paths: &Paths) -> Result<Value, String> {
-    let ip = lan_ip();
-    let net = diag::net_facts(paths, ip.as_deref())?;
-    let caddy = paths.caddy().to_string_lossy().to_string();
-    let caddy_pid = diag::heartbeat(paths).and_then(|h| h.pids.caddy);
-    let konak_owns_80 = ip.as_ref().is_some_and(|ip| {
-        net.port80.iter().any(|l| (l.address == *ip || l.address == "0.0.0.0") && (Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(&caddy))))
-    });
-    let firewall: Vec<Value> = net.firewall.iter().map(|p| json!({"program": p.program, "private_allow": p.private_allow(), "rules": p.rules})).collect();
+    let n = diag::network(paths)?;
+    let firewall: Vec<Value> = n.facts.firewall.iter().map(|p| json!({"program": p.program, "private_allow": p.private_allow(), "rules": p.rules})).collect();
     Ok(json!({
-        "lan_ip": ip,
-        "adapter": net.adapter,
-        "adapter_virtual": net.adapter.as_ref().map(diag::Adapter::is_virtual),
+        "lan_ip": n.lan_ip,
+        "adapter": n.facts.adapter,
+        "adapter_virtual": n.facts.adapter.as_ref().map(diag::Adapter::is_virtual),
         "firewall": firewall,
-        "port80": {"listeners": net.port80, "konak_caddy_owns": konak_owns_80},
+        "port80": {"listeners": n.facts.port80, "konak_caddy_owns": n.konak_owns_port80},
+        // Konak moves to the fallback ports while another program holds port 80, and back by itself.
+        "web_ports": {
+            "http": n.web_ports.http,
+            "https": n.web_ports.https,
+            "fallback": n.web_ports.is_fallback(),
+            "home_url": n.web_ports.url(false, HOME_NAME),
+            "port80_owner": n.port80_owner,
+            "fallback_http_listeners": n.facts.fallback_http,
+        },
     }))
 }
 
@@ -137,8 +141,7 @@ fn resources(paths: &Paths, d: &Distro) -> Value {
     let mb = |v: Option<(u64, u64)>| v.map(|(free, total)| json!({"free_mb": free, "total_mb": total}));
     let vhdx = paths.distro_dir().join("ext4.vhdx");
     let vhdx_mb = std::fs::metadata(&vhdx).ok().map(|m| m.len() / 1_048_576);
-    let inside = diag::in_distro(paths, d, diag::RESOURCES_SH);
-    let (mem, disk) = inside.as_deref().map(|t| t.split_once("---").unwrap_or((t, ""))).map(|(m, df)| (diag::parse_free(m), diag::parse_df(df))).unwrap_or((None, None));
+    let (mem, disk) = diag::distro_usage(paths, d);
     json!({
         "home": {"path": paths.home, "drive": mb(diag::disk_space(&paths.home))},
         "vhdx": {"path": vhdx, "size_mb": vhdx_mb},
@@ -186,7 +189,7 @@ impl Server {
         self.run(move |p, d| logs(p, d, args)).await
     }
 
-    #[tool(description = "LAN networking: the LAN IP, its adapter and network category (Private/Public), whether Konak's firewall rules exist for caddy.exe and mdns-responder.exe, and who owns port 80 on the LAN IP.")]
+    #[tool(description = "LAN networking: the LAN IP, its adapter and network category (Private/Public), whether Konak's firewall rules exist for caddy.exe and mdns-responder.exe, who owns port 80 on the LAN IP, and the web ports Konak serves on (80/443, or 47080/47443 while another program holds port 80).")]
     async fn network_check(&self) -> Result<String, String> {
         self.run(|p, _| network(p)).await
     }
@@ -246,7 +249,7 @@ mod tests {
         assert_eq!(log_lines(Some(0)), 1);
         assert_eq!(log_lines(Some(5000)), 1000);
         let mut s = State::default();
-        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 0, claimed: true });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 0, claimed: true, stopped: false });
         assert_eq!(resolve_app(&s, "jellyfin").unwrap(), "jellyfin");
         assert_eq!(resolve_app(&s, "movies.local").unwrap(), "jellyfin");
         assert!(resolve_app(&State::default(), "jellyfin").unwrap_err().starts_with("not_installed"));
@@ -269,8 +272,8 @@ mod tests {
         let mut s = State::default();
         s.done = true;
         s.completed = vec!["preflight".into(), "network".into()];
-        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true });
-        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 2, claimed: false });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true, stopped: false });
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 2, claimed: false, stopped: false });
         s.save(&paths);
         let d = Distro { name: paths.distro.clone(), ..Default::default() };
         let v = status(&paths, &d);
@@ -283,5 +286,20 @@ mod tests {
         assert_eq!(v["apps"][0], json!({"id": "jellyfin", "name": "movies", "url": "http://movies.local", "claimed": true, "status": "distro_not_running"}));
         assert_eq!(v["apps"][1]["claimed"], false);
         assert!(v["heartbeat"].is_null());
+    }
+
+    #[test]
+    fn status_urls_follow_the_fallback_ports() {
+        let home = std::env::temp_dir().join(format!("konak-mcp-ports-test-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let mut s = State::default();
+        s.apps.push(InstalledApp { id: "vaultwarden".into(), name: "vault".into(), installed_unix: 1, claimed: true, stopped: false });
+        s.save(&paths);
+        std::fs::write(paths.supervisor_file(), r#"{"last_tick_unix":1,"lan_ip":"10.0.0.2","web_ports":{"http":47080,"https":47443},"port80_owner":"httpd.exe (pid 7)"}"#).unwrap();
+        let d = Distro { name: paths.distro.clone(), ..Default::default() };
+        let v = status(&paths, &d);
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(v["apps"][0]["url"], "https://vault.local:47443");
+        assert_eq!(v["heartbeat"]["web_ports"], json!({"http": 47080, "https": 47443}));
     }
 }

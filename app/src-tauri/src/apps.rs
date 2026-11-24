@@ -9,7 +9,7 @@ use crate::catalog::{self, Manifest};
 use crate::installer::{now, InstalledApp, State};
 use crate::paths::Paths;
 use crate::redact::Redactor;
-use crate::services::{lan_ip, HOME_NAME};
+use crate::services::{active_ports, lan_ip, WebPorts, HOME_NAME};
 use crate::shell::{self, tail};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,8 @@ pub struct Container {
 pub struct AppInfo {
     pub id: String,
     pub name: String,
-    /// The `.local` URL; served on the LAN only once the app is claimed.
+    /// The `.local` URL on the web ports Caddy serves on (`:47080`/`:47443` on the fallback); served
+    /// on the LAN only once the app is claimed.
     pub url: String,
     /// `http://127.0.0.1:<port>`, reachable from this PC only. Used to finish an unclaimed app's
     /// first-run setup (a browser secure context, so Vaultwarden's web vault works there too).
@@ -53,6 +54,8 @@ pub struct AppInfo {
     pub port: u16,
     pub installed_unix: u64,
     pub claimed: bool,
+    /// Stopped by the user; it stays stopped across distro restarts and reboots until started.
+    pub stopped: bool,
     /// running | starting | unhealthy | stopped | missing (no containers) | unknown (distro unreadable)
     pub status: &'static str,
     pub containers: Vec<Container>,
@@ -75,13 +78,17 @@ struct PsEntry {
 /// Containers grouped by compose project (= app id), from `podman ps -a --format json` output.
 pub fn parse_ps(json: &str) -> Result<HashMap<String, Vec<Container>>, String> {
     let entries: Vec<PsEntry> = serde_json::from_str(json.trim()).map_err(|e| format!("podman ps output unreadable: {e}"))?;
+    Ok(group_ps(entries))
+}
+
+fn group_ps(entries: Vec<PsEntry>) -> HashMap<String, Vec<Container>> {
     let mut by_project: HashMap<String, Vec<Container>> = HashMap::new();
     for e in entries {
         let Some(project) = e.labels.as_ref().and_then(|l| l.get("com.docker.compose.project")) else { continue };
         let health = ["unhealthy", "healthy", "starting"].into_iter().find(|h| e.status.contains(&format!("({h})"))).map(String::from);
         by_project.entry(project.clone()).or_default().push(Container { name: e.names.join(","), state: e.state, health });
     }
-    Ok(by_project)
+    by_project
 }
 
 pub fn status_of(containers: &[Container]) -> &'static str {
@@ -99,6 +106,107 @@ pub fn status_of(containers: &[Container]) -> &'static str {
     }
 }
 
+/// CPU and memory of one app: its running containers summed.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AppStats {
+    pub id: String,
+    pub cpu_percent: f64,
+    pub mem_bytes: u64,
+}
+
+/// One row of `podman stats --format json`. Podman 5 prints strings ("0.17%", "4.76MB / 67.3GB");
+/// other versions print numbers (percent, bytes) under the Go field names.
+#[derive(Deserialize)]
+struct StatsEntry {
+    #[serde(default, alias = "Name")]
+    name: String,
+    #[serde(default, alias = "CPU")]
+    cpu_percent: serde_json::Value,
+    #[serde(default, alias = "MemUsage")]
+    mem_usage: serde_json::Value,
+}
+
+/// A size as podman or docker prints it: `4.76MB`, `512kB`, `1.5GiB`, `0B`.
+fn parse_size(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let n: f64 = s[..split].parse().ok()?;
+    let unit = match s[split..].trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "kb" | "k" => 1e3,
+        "mb" => 1e6,
+        "gb" => 1e9,
+        "tb" => 1e12,
+        "kib" => 1024.0,
+        "mib" => 1024.0 * 1024.0,
+        "gib" => 1024.0 * 1024.0 * 1024.0,
+        "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some(n * unit)
+}
+
+fn cpu_of(v: &serde_json::Value) -> f64 {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+        serde_json::Value::String(s) => s.trim().trim_end_matches('%').trim().parse().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+/// Used memory in bytes: a number, or the part before ` / ` of `"used / limit"`.
+fn mem_of(v: &serde_json::Value) -> u64 {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) as u64,
+        serde_json::Value::String(s) => parse_size(s.split('/').next().unwrap_or("")).unwrap_or(0.0).round() as u64,
+        _ => 0,
+    }
+}
+
+/// The first JSON value of `text`; anything after it (stderr warnings appended by `distro_script`)
+/// is ignored. Empty text is `None`.
+fn first_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<Option<T>, String> {
+    serde_json::Deserializer::from_str(text).into_iter::<T>().next().transpose().map_err(|e| e.to_string())
+}
+
+/// Sums `podman stats --format json` rows per compose project, using the container names of
+/// `parse_ps` output to find each row's project. Rows of containers outside any project are left
+/// out. Sorted by app id.
+pub fn aggregate_stats(stats_json: &str, ps: &HashMap<String, Vec<Container>>) -> Result<Vec<AppStats>, String> {
+    let rows: Vec<StatsEntry> = first_json(stats_json).map_err(|e| format!("podman stats output unreadable: {e}"))?.unwrap_or_default();
+    let project_of: HashMap<&str, &str> = ps.iter().flat_map(|(p, cs)| cs.iter().flat_map(|c| c.name.split(',')).map(move |n| (n, p.as_str()))).collect();
+    let mut sums: HashMap<&str, AppStats> = HashMap::new();
+    for r in &rows {
+        let Some(&project) = project_of.get(r.name.as_str()) else { continue };
+        let s = sums.entry(project).or_insert_with(|| AppStats { id: project.to_string(), cpu_percent: 0.0, mem_bytes: 0 });
+        s.cpu_percent += cpu_of(&r.cpu_percent);
+        s.mem_bytes += mem_of(&r.mem_usage);
+    }
+    let mut out: Vec<AppStats> = sums.into_values().collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// `podman stats` is skipped when nothing runs, so an empty engine is never an error.
+const STATS_SH: &str = "set -e\nif [ -n \"$(podman ps -q)\" ]; then podman stats --no-stream --format json; fi\necho '## ps'\npodman ps --format json\n";
+
+/// CPU and memory per installed app, from one `podman stats` call. Empty when the distro is not
+/// running: it is never started for this.
+pub fn stats(paths: &Paths) -> Result<Vec<AppStats>, String> {
+    if !crate::diag::distro(paths).running {
+        return Ok(vec![]);
+    }
+    let out = shell::distro_script(&paths.distro, STATS_SH, &[]);
+    if !out.ok {
+        return Err(format!("podman stats failed: {}", tail(&out.text, 3)));
+    }
+    let (stats, ps) = out.text.split_once("## ps").ok_or("podman stats output unreadable")?;
+    let entries: Vec<PsEntry> = first_json(ps).map_err(|e| format!("podman ps output unreadable: {e}"))?.unwrap_or_default();
+    let ps = group_ps(entries);
+    let installed = State::load(paths).apps;
+    Ok(aggregate_stats(stats, &ps)?.into_iter().filter(|s| installed.iter().any(|a| a.id == s.id)).collect())
+}
+
 fn podman_ps(paths: &Paths) -> Result<HashMap<String, Vec<Container>>, String> {
     let out = shell::run("wsl.exe", &["-d", &paths.distro, "-u", "root", "--", "podman", "ps", "-a", "--format", "json"]);
     if !out.ok {
@@ -107,13 +215,15 @@ fn podman_ps(paths: &Paths) -> Result<HashMap<String, Vec<Container>>, String> {
     parse_ps(&out.text)
 }
 
-pub fn url(m: &Manifest, name: &str) -> String {
-    format!("{}://{name}.local", if m.https { "https" } else { "http" })
+/// The app's `.local` URL on `ports`: with `:47080` / `:47443` on the fallback, no port on 80/443.
+pub fn url(m: &Manifest, name: &str, ports: WebPorts) -> String {
+    ports.url(m.https, name)
 }
 
 /// Installed apps with live container status. When the distro cannot be read, status is `unknown`.
 pub fn list(paths: &Paths) -> Vec<AppInfo> {
     let state = State::load(paths);
+    let ports = active_ports(paths);
     let ps = podman_ps(paths).map_err(|e| crate::log(paths, &e)).ok();
     state
         .apps
@@ -121,16 +231,23 @@ pub fn list(paths: &Paths) -> Vec<AppInfo> {
         .filter_map(|a| {
             let m = catalog::get(&a.id)?;
             let containers = ps.as_ref().map(|p| p.get(&a.id).cloned().unwrap_or_default());
+            // A user-stopped app has no containers (`stop`), which would otherwise read as missing.
+            let status = match containers.as_deref() {
+                Some(c) if a.stopped && !c.iter().any(|c| c.state == "running") => "stopped",
+                Some(c) => status_of(c),
+                None => "unknown",
+            };
             Some(AppInfo {
                 id: a.id.clone(),
                 name: a.name.clone(),
-                url: url(m, &a.name),
+                url: url(m, &a.name, ports),
                 local_url: format!("http://127.0.0.1:{}", m.port),
                 https: m.https,
                 port: m.port,
                 installed_unix: a.installed_unix,
                 claimed: a.claimed,
-                status: containers.as_deref().map(status_of).unwrap_or("unknown"),
+                stopped: a.stopped,
+                status,
                 containers: containers.unwrap_or_default(),
             })
         })
@@ -223,13 +340,23 @@ fn b64(s: &str) -> String {
 pub const PROXY_NET: &str = "10.234.0.0/16";
 
 /// Values written to the app's `.env` by Konak (secrets and mounts are added by the script).
-/// `claimed_env` is added only once the app is claimed.
-pub fn env_lines(m: &Manifest, name: &str, claimed: bool) -> String {
-    let (host, url) = (format!("{name}.local"), url(m, name));
-    let mut lines = vec![format!("KONAK_HOST={host}"), format!("KONAK_URL={url}"), format!("KONAK_PORT={}", m.port), format!("KONAK_PROXY_NET={PROXY_NET}")];
+/// `claimed_env` is added only once the app is claimed. `ports` are the web ports Caddy serves on:
+/// `KONAK_URL` and `KONAK_HOSTPORT` carry the port on the fallback and drop it on 80/443, while
+/// `KONAK_HOST` is always the bare name (trusted domains, Forgejo's DOMAIN).
+pub fn env_lines(m: &Manifest, name: &str, claimed: bool, ports: WebPorts) -> String {
+    let (host, url) = (format!("{name}.local"), url(m, name, ports));
+    let hostport = format!("{host}{}", ports.suffix(m.https));
+    let mut lines = vec![
+        format!("KONAK_HOST={host}"),
+        format!("KONAK_HOSTPORT={hostport}"),
+        format!("KONAK_URL={url}"),
+        format!("KONAK_PORT={}", m.port),
+        format!("KONAK_PROXY_NET={PROXY_NET}"),
+    ];
     let claimed_env = m.claimed_env.iter().filter(|_| claimed);
     for (k, v) in m.env.iter().chain(claimed_env) {
-        lines.push(format!("{k}={}", v.replace("${KONAK_HOST}", &host).replace("${KONAK_URL}", &url).replace("${KONAK_PROXY_NET}", PROXY_NET)));
+        let v = v.replace("${KONAK_HOSTPORT}", &hostport).replace("${KONAK_HOST}", &host).replace("${KONAK_URL}", &url).replace("${KONAK_PROXY_NET}", PROXY_NET);
+        lines.push(format!("{k}={v}"));
     }
     lines.join("\n")
 }
@@ -238,8 +365,10 @@ fn redacted(paths: &Paths, text: &str) -> String {
     Redactor::load(paths).apply(text)
 }
 
-/// Renders and starts the app under `name`; with `hook`, runs it after the app is healthy.
-fn run_install(paths: &Paths, m: &Manifest, name: &str, claimed: bool, hook: Option<&str>) -> Result<(), String> {
+/// Renders the app under `name` for the web `ports` and, with `up`, (re)creates and starts it; with
+/// `hook`, runs it after the app is healthy. Without `up` only the files are written (a stopped app
+/// stays stopped) and `hook` is not run.
+fn run_install(paths: &Paths, m: &Manifest, name: &str, claimed: bool, hook: Option<&str>, ports: WebPorts, up: bool) -> Result<(), String> {
     let mut mounts = String::new();
     for (var, kind) in &m.mounts {
         let dir = if kind == "photos" { &paths.photos } else { &paths.media };
@@ -248,7 +377,9 @@ fn run_install(paths: &Paths, m: &Manifest, name: &str, claimed: bool, hook: Opt
     }
     let port = m.port.to_string();
     let secrets = if m.secrets.is_empty() { "-".to_string() } else { m.secrets.join(" ") };
-    let args = [&m.id, port.as_str(), &m.health_path, &b64(m.compose), &b64(&env_lines(m, name, claimed)), &secrets, &b64(&mounts), &b64(hook.unwrap_or(""))];
+    let hook = if up { hook.unwrap_or("") } else { "" };
+    let mode = if up { "up" } else { "render" };
+    let args = [&m.id, port.as_str(), &m.health_path, &b64(m.compose), &b64(&env_lines(m, name, claimed, ports)), &secrets, &b64(&mounts), &b64(hook), mode];
     let out = shell::distro_script(&paths.distro, INSTALL_SH, &args);
     crate::log(paths, &format!("install {} as {name}: {}", m.id, redacted(paths, &tail(&out.text, 2))));
     if !out.ok {
@@ -277,7 +408,7 @@ pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
         }
     };
     let repair = reservation.is_none();
-    if let Err(e) = run_install(paths, m, &name, claimed, None) {
+    if let Err(e) = run_install(paths, m, &name, claimed, None, active_ports(paths), true) {
         if !repair {
             // The containers may already run, holding the port and RAM, while the panel shows the app
             // as not installed. Stop them; the data stays, so a retry reuses its secrets.
@@ -289,13 +420,17 @@ pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
     let mut result = None;
     update_state(paths, |s| {
         s.rerender.retain(|r| r != id);
-        result = match s.apps.iter().find(|a| a.id == id) {
-            Some(a) => Some(a.clone()),
+        result = match s.apps.iter_mut().find(|a| a.id == id) {
+            // `up -d` has started it, so a repaired app is no longer stopped.
+            Some(a) => {
+                a.stopped = false;
+                Some(a.clone())
+            }
             // Removed while it was being repaired: a repair never brings an app back.
             None if repair => None,
             None => {
                 // New apps stay off the LAN until the user has created the admin account (`claim`).
-                let a = InstalledApp { id: id.into(), name: name.clone(), installed_unix: now(), claimed: false };
+                let a = InstalledApp { id: id.into(), name: name.clone(), installed_unix: now(), claimed: false, stopped: false };
                 s.apps.push(a.clone());
                 Some(a)
             }
@@ -334,8 +469,9 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
     if !name_free_on_lan(paths, new_name)? {
         return Err("name_taken_on_lan".into());
     }
-    if let Err(e) = run_install(paths, m, new_name, app.claimed, m.post_rename.as_deref()) {
-        if let Err(back) = run_install(paths, m, &app.name, app.claimed, m.post_rename.as_deref()) {
+    let ports = active_ports(paths);
+    if let Err(e) = run_install(paths, m, new_name, app.claimed, m.post_rename.as_deref(), ports, true) {
+        if let Err(back) = run_install(paths, m, &app.name, app.claimed, m.post_rename.as_deref(), ports, true) {
             // The containers may still carry the new name: render the saved one again at next start.
             crate::log(paths, &format!("rename of {id}: restoring {} failed: {back}", app.name));
             let _ = update_state(paths, |s| {
@@ -350,6 +486,8 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
     update_state(paths, |s| {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.name = new_name.to_string();
+            // The re-render (`up -d`) has started it.
+            a.stopped = false;
         }
     })?;
     Ok(())
@@ -362,13 +500,44 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
 pub fn claim(paths: &Paths, id: &str) -> Result<(), String> {
     let m = manifest(id)?;
     let app = installed(paths, id)?;
-    run_install(paths, m, &app.name, true, None)?;
+    run_install(paths, m, &app.name, true, None, active_ports(paths), true)?;
     update_state(paths, |s| {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.claimed = true;
+            // The re-render (`up -d`) has started it.
+            a.stopped = false;
         }
     })?;
     Ok(())
+}
+
+/// Re-renders every claimed app for the web ports Caddy now serves on, so the settings that embed
+/// the app's own address (Nextcloud's OVERWRITEHOST and OVERWRITECLIURL, Vaultwarden's DOMAIN,
+/// Forgejo's ROOT_URL) carry the port on the fallback and drop it on 80/443. The same render as a
+/// rename, `post_rename` hook included: a running app's changed containers are recreated. A stopped
+/// app only gets its files rewritten and stays stopped; `start` brings it up with them.
+///
+/// Idempotent: nothing happens when the apps were last rendered for `ports`, and `ports` is
+/// recorded only once every app succeeded, so a failure is retried as a whole. Unclaimed apps are
+/// left alone; `claim` renders them for the ports of that moment. `on_app` hears each app's result.
+pub fn rerender_for_ports(paths: &Paths, ports: WebPorts, on_app: &dyn Fn(&str, &Result<(), String>)) -> Result<(), String> {
+    let state = State::try_load(paths)?;
+    if state.rendered_ports == ports {
+        return Ok(());
+    }
+    let mut failed = vec![];
+    for a in state.apps.iter().filter(|a| a.claimed) {
+        let Some(m) = catalog::get(&a.id) else { continue };
+        let result = run_install(paths, m, &a.name, true, m.post_rename.as_deref(), ports, !a.stopped);
+        on_app(&a.id, &result);
+        if let Err(e) = result {
+            failed.push(e);
+        }
+    }
+    if !failed.is_empty() {
+        return Err(failed.join("; "));
+    }
+    update_state(paths, |s| s.rendered_ports = ports)
 }
 
 /// Runs a docker-compose command for an installed app in its directory.
@@ -377,8 +546,45 @@ fn compose(paths: &Paths, id: &str, args: &str) -> shell::Out {
     shell::distro_script(&paths.distro, &script, &[id])
 }
 
-pub fn restart(paths: &Paths, id: &str) -> Result<(), String> {
+fn set_stopped(paths: &Paths, id: &str, stopped: bool) -> Result<(), String> {
+    update_state(paths, |s| {
+        if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
+            a.stopped = stopped;
+        }
+    })
+}
+
+/// Stops an app so that it stays stopped. Its containers are removed (`down`; data, volumes and the
+/// rendered files are kept): konak-boot.service starts every container with a restart policy at each
+/// boot of the distro, and Podman does not remember a manual stop across boots, so a container that
+/// is merely stopped would come back after a distro restart or a reboot. With none left there is
+/// nothing to start, and this needs no change to the boot unit already written into existing distros.
+pub fn stop(paths: &Paths, id: &str) -> Result<(), String> {
     installed(paths, id)?;
+    let out = shell::distro_script(&paths.distro, REMOVE_SH, &[id, "keep"]);
+    crate::log(paths, &format!("stop {id}: {}", tail(&out.text, 2)));
+    if !out.ok {
+        return Err(redacted(paths, &format!("stop of {id} failed: {}", tail(&out.text, 6))));
+    }
+    set_stopped(paths, id, true)
+}
+
+/// Recreates a stopped app's containers from its rendered compose file and `.env`.
+pub fn start(paths: &Paths, id: &str) -> Result<(), String> {
+    installed(paths, id)?;
+    let out = compose(paths, id, "up -d --remove-orphans");
+    if !out.ok {
+        return Err(redacted(paths, &format!("start of {id} failed: {}", tail(&out.text, 6))));
+    }
+    set_stopped(paths, id, false)
+}
+
+/// A stopped app has no containers to restart, so restarting it starts it: the user asked for it to
+/// run, and a silent no-op would leave it stopped.
+pub fn restart(paths: &Paths, id: &str) -> Result<(), String> {
+    if installed(paths, id)?.stopped {
+        return start(paths, id);
+    }
     let out = compose(paths, id, "restart");
     if !out.ok {
         return Err(redacted(paths, &format!("restart of {id} failed: {}", tail(&out.text, 6))));
@@ -435,7 +641,7 @@ mod tests {
 
     fn state_with(apps: &[(&str, &str)]) -> State {
         let mut s = State::default();
-        s.apps = apps.iter().map(|(id, name)| InstalledApp { id: id.to_string(), name: name.to_string(), installed_unix: 0, claimed: true }).collect();
+        s.apps = apps.iter().map(|(id, name)| InstalledApp { id: id.to_string(), name: name.to_string(), installed_unix: 0, claimed: true, stopped: false }).collect();
         s
     }
 
@@ -456,7 +662,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("konak-claim-test-{}", std::process::id()));
         let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
         let mut s = State::default();
-        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: false });
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: false, stopped: false });
         s.save(&paths);
         let not_installed = claim(&paths, "immich").unwrap_err();
         // The distro does not exist, so the re-render with claimed_env fails.
@@ -469,11 +675,32 @@ mod tests {
     }
 
     #[test]
+    fn stop_and_start_change_the_flag_only_when_they_succeed() {
+        let home = std::env::temp_dir().join(format!("konak-stop-test-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let mut s = State::default();
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: true, stopped: false });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true, stopped: true });
+        s.save(&paths);
+        let not_installed = stop(&paths, "immich").unwrap_err();
+        // The distro does not exist, so `down` and `up -d` fail.
+        let stop_failed = stop(&paths, "forgejo").is_err();
+        let start_failed = start(&paths, "jellyfin").is_err();
+        let restart_failed = restart(&paths, "jellyfin").unwrap_err();
+        let after = State::load(&paths);
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(not_installed, "not_installed");
+        assert!(stop_failed && start_failed);
+        assert!(restart_failed.starts_with("start of jellyfin failed"), "restart of a stopped app starts it: {restart_failed}");
+        assert!(!after.apps[0].stopped && after.apps[1].stopped);
+    }
+
+    #[test]
     fn a_reserved_name_cannot_be_taken_by_another_app() {
         let home = std::env::temp_dir().join(format!("konak-reserve-test-{}", std::process::id()));
         let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
         let mut s = State::default();
-        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true, stopped: false });
         s.save(&paths);
         let r = reserve(&paths, "forgejo", "code").unwrap();
         let clash = reserve(&paths, "immich", "code").err();
@@ -560,19 +787,117 @@ c");
     }
 
     #[test]
+    fn stats_are_summed_per_app() {
+        let ps = parse_ps(
+            r#"[
+          {"Names":["immich_server"],"State":"running","Labels":{"com.docker.compose.project":"immich"}},
+          {"Names":["immich_postgres"],"State":"running","Labels":{"com.docker.compose.project":"immich"}},
+          {"Names":["jellyfin"],"State":"running","Labels":{"com.docker.compose.project":"jellyfin"}},
+          {"Names":["loose"],"State":"running","Labels":null}
+        ]"#,
+        )
+        .unwrap();
+        // Podman 5.4: strings with units, decimal sizes. Trailing stderr text is ignored.
+        let podman5 = r#"[
+         {"id": "3c816f05c85d", "name": "immich_server", "cpu_percent": "0.13%", "mem_usage": "715.9MB / 67.3GB", "pids": "81"},
+         {"id": "0fe1d646cde1", "name": "immich_postgres", "cpu_percent": "1.5%", "mem_usage": "6.009MB / 67.3GB"},
+         {"id": "5b8d97b9206d", "name": "jellyfin", "cpu_percent": "0.07%", "mem_usage": "512kB / 67.3GB"},
+         {"id": "aaaaaaaaaaaa", "name": "loose", "cpu_percent": "50%", "mem_usage": "1GB / 67.3GB"}
+        ]
+time="2026-11-24" level=warning msg="something""#;
+        let s = aggregate_stats(podman5, &ps).unwrap();
+        assert_eq!(s.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["immich", "jellyfin"]);
+        assert!((s[0].cpu_percent - 1.63).abs() < 1e-9, "{s:?}");
+        assert_eq!(s[0].mem_bytes, 715_900_000 + 6_009_000);
+        assert_eq!(s[1].mem_bytes, 512_000);
+
+        // Numbers (percent and bytes) under the Go field names, and binary units.
+        let numbers = r#"[{"Name": "jellyfin", "CPU": 2.25, "MemUsage": 1048576}, {"Name": "immich_server", "CPU": 0, "MemUsage": "1.5GiB / 16GiB"}]"#;
+        let s = aggregate_stats(numbers, &ps).unwrap();
+        assert_eq!(s, vec![AppStats { id: "immich".into(), cpu_percent: 0.0, mem_bytes: 1_610_612_736 }, AppStats { id: "jellyfin".into(), cpu_percent: 2.25, mem_bytes: 1_048_576 }]);
+
+        // Nothing running: no stats output at all.
+        assert!(aggregate_stats("", &ps).unwrap().is_empty());
+        assert!(aggregate_stats("[]", &ps).unwrap().is_empty());
+        assert!(aggregate_stats("not json", &ps).is_err());
+        assert_eq!(parse_size("0B"), Some(0.0));
+        assert_eq!(parse_size("12XB"), None);
+    }
+
+    #[test]
     fn env_is_templated() {
         let mut m = catalog::get("jellyfin").unwrap().clone();
         m.env.insert("PUBLIC_URL".into(), "${KONAK_URL}/x".into());
         m.env.insert("HOST".into(), "${KONAK_HOST}".into());
-        let env = env_lines(&m, "movies", true);
-        assert!(env.contains("KONAK_HOST=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=47101\nKONAK_PROXY_NET=10.234.0.0/16"));
+        let env = env_lines(&m, "movies", true, WebPorts::STANDARD);
+        assert!(env.contains("KONAK_HOST=movies.local\nKONAK_HOSTPORT=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=47101\nKONAK_PROXY_NET=10.234.0.0/16"));
         assert!(env.contains("PUBLIC_URL=http://movies.local/x"));
         assert!(env.contains("HOST=movies.local"));
     }
 
     #[test]
+    fn env_carries_the_fallback_port() {
+        let line = |id: &str, ports: WebPorts, key: &str| {
+            let env = env_lines(catalog::get(id).unwrap(), "x", true, ports);
+            env.lines().find_map(|l| l.strip_prefix(&format!("{key}="))).map(String::from)
+        };
+        let fb = WebPorts::FALLBACK;
+        assert_eq!(line("nextcloud", fb, "OVERWRITEHOST").as_deref(), Some("x.local:47080"));
+        assert_eq!(line("nextcloud", fb, "OVERWRITECLIURL").as_deref(), Some("http://x.local:47080"));
+        // Nextcloud checks trusted domains without the port; Forgejo's DOMAIN is a bare host too.
+        assert_eq!(line("nextcloud", fb, "NEXTCLOUD_TRUSTED_DOMAINS").as_deref(), Some("x.local"));
+        assert_eq!(line("forgejo", fb, "KONAK_HOST").as_deref(), Some("x.local"));
+        assert_eq!(line("forgejo", fb, "KONAK_URL").as_deref(), Some("http://x.local:47080"));
+        // Vaultwarden is HTTPS: its DOMAIN (KONAK_URL in compose.yml) gets the HTTPS port.
+        assert_eq!(line("vaultwarden", fb, "KONAK_URL").as_deref(), Some("https://x.local:47443"));
+        assert_eq!(line("vaultwarden", fb, "KONAK_HOSTPORT").as_deref(), Some("x.local:47443"));
+        assert!(catalog::get("vaultwarden").unwrap().compose.contains("DOMAIN: ${KONAK_URL}"));
+        assert!(catalog::get("forgejo").unwrap().compose.contains("ROOT_URL=${KONAK_URL}/"));
+        // Back on 80/443 the port is dropped again.
+        let std = WebPorts::STANDARD;
+        assert_eq!(line("nextcloud", std, "OVERWRITEHOST").as_deref(), Some("x.local"));
+        assert_eq!(line("vaultwarden", std, "KONAK_URL").as_deref(), Some("https://x.local"));
+        assert_eq!(url(catalog::get("jellyfin").unwrap(), "movies", fb), "http://movies.local:47080");
+        assert_eq!(url(catalog::get("jellyfin").unwrap(), "movies", std), "http://movies.local");
+        for m in catalog::all() {
+            let env = env_lines(m, "x", true, fb);
+            assert!(!env.contains(".local:80") && !env.contains(".local:443") && !env.contains("${"), "{}: {env}", m.id);
+        }
+    }
+
+    #[test]
+    fn rerender_for_ports_is_a_no_op_when_already_rendered_and_records_only_on_success() {
+        let home = std::env::temp_dir().join(format!("konak-rerender-test-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let mut s = State::default();
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: false, stopped: false });
+        s.save(&paths);
+        let seen = std::cell::RefCell::new(vec![]);
+        let on_app = |id: &str, _: &Result<(), String>| seen.borrow_mut().push(id.to_string());
+        // Already rendered for 80/443: nothing runs.
+        let same = rerender_for_ports(&paths, WebPorts::STANDARD, &on_app);
+        // Only an unclaimed app: nothing to render, the new ports are recorded.
+        let none_claimed = rerender_for_ports(&paths, WebPorts::FALLBACK, &on_app);
+        let recorded = State::load(&paths).rendered_ports;
+        // A claimed app whose render fails (no such distro): the ports are not recorded.
+        let mut s = State::load(&paths);
+        s.apps[0].claimed = true;
+        s.apps[0].stopped = true;
+        s.save(&paths);
+        let failed = rerender_for_ports(&paths, WebPorts::STANDARD, &on_app);
+        let after = State::load(&paths);
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(same.is_ok() && none_claimed.is_ok());
+        assert_eq!(recorded, WebPorts::FALLBACK);
+        assert!(failed.is_err());
+        assert_eq!(after.rendered_ports, WebPorts::FALLBACK, "retried as a whole later");
+        assert!(after.apps[0].stopped, "a stopped app stays stopped");
+        assert_eq!(*seen.borrow(), ["forgejo"]);
+    }
+
+    #[test]
     fn apps_trust_only_the_proxy_net() {
-        let env = |id: &str| env_lines(catalog::get(id).unwrap(), id, true);
+        let env = |id: &str| env_lines(catalog::get(id).unwrap(), id, true, WebPorts::STANDARD);
         assert!(env("nextcloud").lines().any(|l| l == "TRUSTED_PROXIES=10.234.0.0/16"));
         assert!(env("nextcloud").lines().any(|l| l == "FORWARDED_FOR_HEADERS=HTTP_X_FORWARDED_FOR"));
         assert!(env("immich").lines().any(|l| l == "IMMICH_TRUSTED_PROXIES=10.234.0.0/16"));
@@ -591,8 +916,8 @@ c");
     fn claimed_env_only_after_claim() {
         let m = catalog::get("forgejo").unwrap();
         assert_eq!(m.claimed_env["FORGEJO_DISABLE_REGISTRATION"], "true");
-        assert!(!env_lines(m, "git", false).contains("FORGEJO_DISABLE_REGISTRATION"));
-        assert!(env_lines(m, "git", true).lines().any(|l| l == "FORGEJO_DISABLE_REGISTRATION=true"));
+        assert!(!env_lines(m, "git", false, WebPorts::STANDARD).contains("FORGEJO_DISABLE_REGISTRATION"));
+        assert!(env_lines(m, "git", true, WebPorts::STANDARD).lines().any(|l| l == "FORGEJO_DISABLE_REGISTRATION=true"));
         // The compose file falls back to open registration while the app is unclaimed.
         assert!(m.compose.contains("FORGEJO__service__DISABLE_REGISTRATION=${FORGEJO_DISABLE_REGISTRATION:-false}"));
     }
@@ -603,9 +928,9 @@ c");
         // which nothing announces yet. The image applies OVERWRITEHOST per request, and Nextcloud
         // trusts every host once overwritehost is set, so the claimed .local name is trusted.
         let m = catalog::get("nextcloud").unwrap();
-        let before = env_lines(m, "cloud", false);
+        let before = env_lines(m, "cloud", false, WebPorts::STANDARD);
         assert!(!before.contains("OVERWRITEHOST") && !before.contains("OVERWRITECLIURL"));
-        let after = env_lines(m, "cloud", true);
+        let after = env_lines(m, "cloud", true, WebPorts::STANDARD);
         assert!(after.lines().any(|l| l == "OVERWRITEHOST=cloud.local"));
         assert!(after.lines().any(|l| l == "OVERWRITECLIURL=http://cloud.local"));
     }

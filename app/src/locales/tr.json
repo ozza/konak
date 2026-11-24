@@ -83,11 +83,9 @@
       "running": "Ağ erişimi onarılıyor…",
       "failed": "Onarım tamamlanmadı."
     },
-    "home_link": "konak.local",
-    "home_link_label": "Konak ana sayfasını aç, konak.local",
-    "installed_title": "Uygulamalarınız",
+    "home_link_label": "Konak ana sayfasını aç, {host}",
     "loading": "Yükleniyor…",
-    "empty": "Henüz kurulu uygulama yok. Kurmak için aşağıdan birini seçin.",
+    "empty": "Henüz kurulu uygulama yok. Kurmak için Uygulama ekle'yi kullanın.",
     "status": {
       "running": "Çalışıyor",
       "starting": "Başlıyor",
@@ -101,14 +99,18 @@
       "remove": "Kaldırılıyor…",
       "rename": "Adı değiştiriliyor…",
       "restart": "Yeniden başlatılıyor…",
-      "claim": "Ağda erişime açılıyor…"
+      "claim": "Ağda erişime açılıyor…",
+      "start": "Başlatılıyor…",
+      "stop": "Durduruluyor…"
     },
     "failed": {
       "install": "Kurulum başarısız oldu. Konak uygulamayı durdurdu ve verilerini sakladı, yeniden deneyebilirsiniz.",
       "remove": "Kaldırma başarısız oldu.",
       "rename": "Ad değiştirme başarısız oldu.",
       "restart": "Yeniden başlatma başarısız oldu.",
-      "claim": "Ağda erişime açılamadı."
+      "claim": "Ağda erişime açılamadı.",
+      "start": "Başlatma başarısız oldu.",
+      "stop": "Durdurma başarısız oldu."
     },
     "dismiss": "Kapat",
     "actions": {
@@ -117,14 +119,17 @@
       "logs": "Kayıtlar",
       "rename": "Adını değiştir",
       "remove": "Kaldır",
-      "group": "{name} işlemleri"
+      "group": "{name} işlemleri",
+      "start": "Başlat",
+      "stop": "Durdur"
     },
     "claim": {
-      "notice": "Önce kurulumu bu bilgisayarda tamamlayın: yönetici hesabınızı oluşturun, ardından uygulamayı ağınızda erişime açın.",
+      "notice": "Yönetici hesabınızı oluşturun, ardından uygulamayı ağınızda erişime açın.",
       "local_only": "Şimdilik yalnızca bu bilgisayardan {url} adresinde açılabilir. Diğer cihazlar henüz erişemez.",
       "open_setup": "Kurulumu aç",
       "done": "Tamam, ağda erişime aç",
-      "future_name": "Kurulumdan sonra ağdaki adı: {name}"
+      "future_name": "Kurulumdan sonra ağdaki adı: {name}",
+      "title": "Önce kurulumu bu bilgisayarda bitirin"
     },
     "rename": {
       "label": "Ağdaki adı",
@@ -151,11 +156,6 @@
       "cancel": "Vazgeç"
     },
     "catalog": {
-      "title": "Uygulama ekle",
-      "empty": "Katalogdaki tüm uygulamalar kurulu.",
-      "ram": "En az {amount} bellek gerekir",
-      "https": "Güvenli bağlantı (HTTPS) kullanır. Her cihaza Konak sertifikasının bir kez kurulması gerekir, aşağıya bakın.",
-      "install": "Kur",
       "install_label": "{name} uygulamasını kur"
     },
     "cert": {
@@ -191,6 +191,194 @@
     },
     "network": {
       "public": "Bu ağ Ortak olarak ayarlı, bu yüzden evdeki diğer cihazlar uygulamalarınıza ulaşamaz. Bu sizin ev ağınızsa Windows ağ ayarlarından Özel olarak değiştirin."
+    },
+    "header": {
+      "engine_running": "Motor çalışıyor",
+      "engine_stopped": "Motor durdu",
+      "network_private": "Özel ağ",
+      "network_public": "Ortak ağ",
+      "add": "Uygulama ekle",
+      "settings": "Ayarlar",
+      "theme": "Tema",
+      "theme_system": "Windows ile aynı",
+      "theme_light": "Açık",
+      "theme_dark": "Koyu"
+    },
+    "sidebar": {
+      "label": "Bu bilgisayar ve uygulamalar",
+      "search": "Uygulama ara",
+      "host": "Sunucu",
+      "host_sub": "Motor ve ağ",
+      "host_ok": "Sorun yok",
+      "host_attention": "İlgi gerekiyor",
+      "apps": "Uygulamalar · {n}",
+      "no_match": "Aramaya uyan uygulama yok.",
+      "setup_needed": "Kurulum gerekiyor"
+    },
+    "host": {
+      "title": "Bu bilgisayar",
+      "subtitle": "Windows 11 · WSL 2 · Konak'ın Podman içeren kendi Linux ortamı",
+      "memory": "Bellek",
+      "disk": "Disk",
+      "problems": "{n} kontrol ilgi bekliyor",
+      "all_ok": "Tüm kontroller geçti",
+      "actions": "Bu bilgisayar için işlemler",
+      "diagnose": "Tanılamayı çalıştır",
+      "diagnosing": "Kontroller çalışıyor…",
+      "engine": "Motor",
+      "environment": "Ortam",
+      "apps": "Uygulamalar",
+      "apps_n": "{n} kurulu",
+      "memory_disk": "Bellek ve disk",
+      "of": "{used} / {total}",
+      "free": "{free} boş",
+      "data_drive": "Konak'ın sürücüsü",
+      "no_usage": "Kullanım, motor çalışırken görünür.",
+      "profile": "Profil",
+      "adapter": "Bağdaştırıcı",
+      "lan_ip": "Yerel ağ adresi",
+      "firewall": "Güvenlik duvarı",
+      "firewall_ok": "Kurallar yerinde",
+      "firewall_missing": "Kurallar eksik",
+      "diagnostics": "Tanılama",
+      "not_run": "Henüz çalıştırılmadı.",
+      "check_ok": "Geçti",
+      "check_warn": "Uyarı",
+      "check_fail": "Başarısız",
+      "problems_one": "1 kontrol ilgi bekliyor",
+      "technical": "Teknik ayrıntılar"
+    },
+    "diag": {
+      "forward_policy": "Paylaşılan ağ politikası değişmemiş",
+      "stale_netavark": "Eski konteyner ağı kuralı yok",
+      "keepalive": "Ortam uyanık kalıyor",
+      "port80_owner": "80 numaralı port Konak'ta",
+      "lan_adapter": "Doğru ağ bağdaştırıcısı"
+    },
+    "detail": {
+      "recent_logs": "Son kayıtlar",
+      "full_logs": "Tüm kayıtları aç",
+      "logs_note": "Parolalar ve anahtarlar gizlenir.",
+      "overview": "Genel bakış",
+      "status": "Durum",
+      "installed": "Kuruldu",
+      "containers": "Konteynerler",
+      "network": "Ağ",
+      "address": "Adres",
+      "on_this_pc": "Bu bilgisayarda",
+      "reachable": "Erişilebildiği yer",
+      "reach_all": "Evdeki tüm cihazlar",
+      "reach_pc": "Kurulum bitene kadar yalnızca bu bilgisayar",
+      "connection": "Bağlantı",
+      "resources": "Kaynaklar",
+      "cpu": "İşlemci",
+      "no_stats": "Henüz kullanım bilgisi yok.",
+      "no_stats_stopped": "Uygulama durduruldu.",
+      "no_containers": "Konteyner bulunamadı.",
+      "col_name": "Ad",
+      "col_state": "Durum",
+      "col_health": "Sağlık",
+      "stopped_note": "Uygulama durduruldu. Ayarları ve verileri saklanıyor, Başlat ile geri gelir. Durduğu sürece diğer cihazlar ona erişemez.",
+      "reach_none": "Durduğu sürece hiç kimse"
+    },
+    "add": {
+      "title": "Uygulama ekle",
+      "intro": "Her uygulama bu bilgisayarda kendi konteynerlerinde çalışır. Birini seçin, neye ihtiyaç duyduğuna bakın, sonra kurun. Diğer cihazlar erişmeden önce kurulumunu bu bilgisayarda tamamlarsınız.",
+      "filter": "Kategoriye göre süz",
+      "installed": "Kurulu",
+      "needs": "{amount} gerekir",
+      "install_label": "Kur",
+      "already": "{name} zaten kurulu.",
+      "go_to_app": "Uygulamaya git",
+      "install_wait": "Büyük uygulamaların indirilmesi birkaç dakika sürebilir.",
+      "name_later": "Kurulduktan sonra adını değiştirebilirsiniz.",
+      "before": "Kurmadan önce",
+      "req_memory": "Bellek: {amount} gerekir",
+      "req_memory_unknown": "Konak'ın ortamı çalışmıyor, boş bellek bilinmiyor.",
+      "req_memory_ok": "Konak'ın ortamında {total} bellek var.",
+      "req_memory_low": "Konak'ın ortamında yalnızca {total} bellek var. Uygulama yavaş çalışabilir ya da açılmayabilir.",
+      "req_network": "Ağ Özel olarak ayarlı",
+      "req_network_ok": "Evdeki diğer cihazlar uygulamaya erişebilecek.",
+      "req_network_public": "Bu ağ Ortak olarak ayarlı, evdeki diğer cihazlar henüz erişemez.",
+      "req_https": "Güvenli bağlantı (HTTPS) kullanır",
+      "req_https_detail": "Her cihaza Konak sertifikasını bir kez kurmak gerekir. Bu bilgisayar sayfasına bakın."
+    },
+    "category": {
+      "all": "Tümü",
+      "photos": "Fotoğraflar",
+      "media": "Medya",
+      "files": "Dosyalar",
+      "passwords": "Parolalar",
+      "developer": "Geliştirici"
+    },
+    "port80": {
+      "title": "80 numaralı port başka bir programda",
+      "owner": "Bu bilgisayarda 80 numaralı portu {owner} kullanıyor.",
+      "owner_unknown": "Bu bilgisayarda 80 numaralı portu başka bir program kullanıyor.",
+      "body": "Port boşalana kadar Konak uygulamalarınızı {port} numaralı porttan sunar, bu yüzden adreslerde port numarası da yer alır (örneğin http://konak.local:{port}). Port 80 boşalınca Konak kendiliğinden geri döner ve adreslerdeki port kalkar.",
+      "restart_note": "Her geçişte uygulamalarınız yeniden başlar, bu yüzden birkaç saniye erişilemezler."
+    },
+    "diag_msg": {
+      "distro_down": "Konak'ın Linux ortamı çalışmıyor.",
+      "no_network": "Bu bilgisayar bir ağa bağlı değil.",
+      "forward_policy": {
+        "no_tool": "Bu kontrol için gereken ağ araçları eksik.",
+        "ok": "Konteyner trafiği paylaşılan WSL ağından geçebiliyor.",
+        "drop": "Başka bir WSL dağıtımı paylaşılan ağda konteyner trafiğini engelliyor."
+      },
+      "stale_netavark": {
+        "table_missing": "{containers} konteyner çalışıyor ama ağ kuralları eksik.",
+        "foreign": "Silinmiş bir ortamdan kalan kurallar hâlâ {ports} numaralı portu tutuyor.",
+        "closed": "Bu uygulama portları henüz yanıt vermiyor: {ports}. Bir uygulama hâlâ başlıyor olabilir.",
+        "ok": "{containers} konteyner çalışıyor, {open} uygulama portu yanıt veriyor."
+      },
+      "keepalive": {
+        "no_heartbeat": "Konak'ın arka plan hizmeti henüz çalışmadı.",
+        "stale": "Konak'ın arka plan hizmeti en son {age} saniye önce bildirimde bulundu.",
+        "not_running": "Ortamı uyanık tutan işlem çalışmıyor.",
+        "ok": "Ortam uyanık tutuluyor."
+      },
+      "port80_owner": {
+        "net_error": "Ağ kontrolü okunamadı.",
+        "fallback": "80 numaralı portu {owner} tutuyor, bu yüzden Konak şimdilik {port} numaralı portu kullanıyor.",
+        "taken": "80 numaralı portu {owner} tutuyor, bu yüzden Konak'ın web sunucusu başlayamıyor.",
+        "returning": "80 numaralı port yeniden boş. Konak yaklaşık iki dakika içinde ona geri döner.",
+        "ok": "Konak'ın web sunucusu 80 numaralı portta yanıt veriyor.",
+        "nothing": "80 numaralı portta yanıt veren yok."
+      },
+      "lan_adapter": {
+        "virtual": "Kullanılan bağlantı sanal bir bağdaştırıcı ({adapter}), bu yüzden diğer cihazlar bu bilgisayara ulaşamayabilir.",
+        "ip_changed": "Bu bilgisayarın ağ adresi değişti. Konak yeni adrese geçiyor.",
+        "ok": "{adapter} üzerinde {ip} ağ adresi."
+      }
+    },
+    "diag_fix": {
+      "distro_down": "Konak'ı sistem tepsisindeki simgesinden başlatın, sonra tanılamayı yeniden çalıştırın.",
+      "no_network": "Bu bilgisayarı ev ağınıza bağlayın.",
+      "forward_policy": {
+        "no_tool": "Konteyner motorunu yeniden kurmak için Konak kurulumunu tekrar çalıştırın.",
+        "drop": "Bunu başka bir WSL dağıtımındaki Docker değiştirdi. O Docker'ı durdurup Konak'taki uygulamalarınızı yeniden başlatın."
+      },
+      "stale_netavark": {
+        "table_missing": "Bir dakika bekleyip tanılamayı yeniden çalıştırın. Sorun sürerse teknik ayrıntılar nasıl onarılacağını gösterir.",
+        "foreign": "Bir dakika bekleyip tanılamayı yeniden çalıştırın. Sorun sürerse teknik ayrıntılar nasıl onarılacağını gösterir.",
+        "closed": "Bir dakika bekleyip tanılamayı yeniden çalıştırın. Sorun sürerse teknik ayrıntılar nasıl onarılacağını gösterir."
+      },
+      "keepalive": {
+        "no_heartbeat": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın.",
+        "stale": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın.",
+        "not_running": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın."
+      },
+      "port80_owner": {
+        "net_error": "Tanılamayı yeniden çalıştırın.",
+        "fallback": "80 numaralı portu boşaltmak için o programı durdurun ya da ayarını değiştirin. Konak sonra kendiliğinden geri döner.",
+        "taken": "80 numaralı portu boşaltmak için o programı durdurun ya da ayarını değiştirin. Konak web sunucusunu birkaç saniye içinde başlatır.",
+        "nothing": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın."
+      },
+      "lan_adapter": {
+        "virtual": "Bağlantıyı tutan VPN'i ya da sanal ağı kapatın.",
+        "ip_changed": "Birkaç saniye bekleyin. Sürerse Konak'ı yeniden başlatın."
+      }
     }
   },
   "apps": {

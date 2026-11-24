@@ -1,152 +1,186 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { openUrl } from "@tauri-apps/plugin-opener";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { t } from "$lib/i18n";
-  import { appName, errorText, HOME_URL, type AppInfo, type AppProgress, type Failure, type Manifest, type Op } from "./api";
-  import AppCard from "./AppCard.svelte";
-  import Catalog from "./Catalog.svelte";
-  import CertHelp from "./CertHelp.svelte";
+  import { appName, errorText, portSuffix, type AppInfo, type AppProgress, type AppStats, type Check, type Failure, type HostInfo, type Manifest, type Op, type WebPorts } from "./api";
+  import AddApp from "./AddApp.svelte";
+  import AppDetail from "./AppDetail.svelte";
+  import Header from "./Header.svelte";
+  import HostDetail from "./HostDetail.svelte";
   import LogsDrawer from "./LogsDrawer.svelte";
+  import Notices from "./Notices.svelte";
   import RemoveDialog from "./RemoveDialog.svelte";
+  import Sidebar from "./Sidebar.svelte";
 
   const POLL_MS = 5000;
+  const HOST_POLL_MS = 15000;
+  type Summary = { minutes: number; uac_prompts: number; reboots: number; download_mb: number };
   let {
     networkCategory,
     firewallMissing,
     repairing,
     repairError,
-  }: { networkCategory: string | null; firewallMissing: boolean; repairing: boolean; repairError: string | null } = $props();
-  let repairFailure = $derived(repairError ? errorText(repairError) : null);
+    summary,
+    homeUrl,
+    webPorts,
+  }: {
+    networkCategory: string | null;
+    firewallMissing: boolean;
+    repairing: boolean;
+    repairError: string | null;
+    summary: Summary | null;
+    homeUrl: string;
+    webPorts: WebPorts | null;
+  } = $props();
 
   let apps = $state<AppInfo[] | null>(null);
   let catalog = $state<Manifest[]>([]);
+  let stats = $state<Record<string, AppStats>>({});
+  let host = $state<HostInfo | null>(null);
+  let checks = $state<Check[] | null>(null);
+  let diagnosing = $state(false);
+  let diagError = $state<string | null>(null);
   let busy = $state<Record<string, Op>>({});
   let failed = $state<Record<string, Failure>>({});
+  /** Bumped per app when an operation finishes, so its log preview reloads. */
+  let versions = $state<Record<string, number>>({});
+  /** "host", "add" or an installed app's id. */
+  let view = $state<string | null>(null);
   let logsFor = $state<AppInfo | null>(null);
   let removeFor = $state<AppInfo | null>(null);
 
-  let available = $derived(catalog.filter((m) => !apps?.some((a) => a.id === m.id)));
   let showCert = $derived(catalog.some((m) => m.https) || (apps?.some((a) => a.https) ?? false));
+  // Nothing picked yet, or the picked app was removed: the first app, else This PC.
+  let shown = $derived(
+    view === "add" || view === "host" || apps?.some((a) => a.id === view) ? view : apps === null ? null : (apps[0]?.id ?? "host"),
+  );
+  let current = $derived(apps?.find((a) => a.id === shown) ?? null);
 
   async function refresh() {
-    apps = await invoke<AppInfo[]>("list_apps");
+    const [list, s] = await Promise.all([invoke<AppInfo[]>("list_apps"), invoke<AppStats[]>("app_stats").catch(() => [] as AppStats[])]);
+    apps = list;
+    stats = Object.fromEntries(s.map((x) => [x.id, x]));
   }
 
-  function setFailed(id: string, f: Failure | null) {
-    const { [id]: _, ...rest } = failed;
-    failed = f ? { ...rest, [id]: f } : rest;
+  async function refreshHost() {
+    host = await invoke<HostInfo>("host_info").catch(() => host);
   }
 
-  function setBusy(id: string, op: Op | null) {
-    const { [id]: _, ...rest } = busy;
-    busy = op ? { ...rest, [id]: op } : rest;
+  async function diagnose() {
+    diagnosing = true;
+    diagError = null;
+    try {
+      checks = await invoke<Check[]>("diagnose");
+    } catch (e) {
+      const f = errorText(e);
+      diagError = f.message ?? f.details;
+    } finally {
+      diagnosing = false;
+    }
+  }
+
+  function patch<T>(map: Record<string, T>, id: string, value: T | null): Record<string, T> {
+    const { [id]: _, ...rest } = map;
+    return value === null ? rest : { ...rest, [id]: value };
   }
 
   /** Starts an operation; its progress and result arrive as `app-progress` events. */
   async function run(id: string, op: Op, args: Record<string, unknown> = {}) {
-    setFailed(id, null);
+    failed = patch(failed, id, null);
     try {
       await invoke(`${op}_app`, { id, ...args });
     } catch (e) {
-      setFailed(id, { op, ...errorText(e) });
+      failed = patch(failed, id, { op, ...errorText(e) });
     }
+  }
+
+  let mainEl = $state<HTMLElement>();
+
+  async function select(id: string) {
+    view = id;
+    // In the stacked (narrow) layout the detail sits below the sidebar: bring it into view.
+    await tick();
+    if (mainEl && mainEl.getBoundingClientRect().top > window.innerHeight / 2) mainEl.scrollIntoView({ block: "start" });
   }
 
   onMount(() => {
     invoke<Manifest[]>("list_catalog").then((c) => (catalog = c));
     refresh();
+    refreshHost();
+    // The sidebar shows This PC's health from the start, not only once its page is opened.
+    diagnose();
     // Network category and firewall rules can change while Konak is not running; both reads are cheap.
     invoke("refresh_network");
     // Poll only while the window is visible; the tray keeps Konak running when it is hidden.
-    const timer = setInterval(() => document.visibilityState === "visible" && refresh(), POLL_MS);
-    const onVisible = () => document.visibilityState === "visible" && refresh();
+    const visible = () => document.visibilityState === "visible";
+    const timer = setInterval(() => visible() && refresh(), POLL_MS);
+    const hostTimer = setInterval(() => visible() && refreshHost(), HOST_POLL_MS);
+    const onVisible = () => visible() && (refresh(), refreshHost());
     document.addEventListener("visibilitychange", onVisible);
     const unlisten = listen<AppProgress>("app-progress", ({ payload: p }) => {
-      setBusy(p.id, p.state === "running" ? p.op : null);
-      if (p.state === "failed") setFailed(p.id, { op: p.op, ...errorText(p.error) });
-      if (p.state !== "running") refresh();
+      busy = patch(busy, p.id, p.state === "running" ? p.op : null);
+      if (p.state === "failed") failed = patch(failed, p.id, { op: p.op, ...errorText(p.error) });
+      if (p.state !== "running") {
+        versions = { ...versions, [p.id]: (versions[p.id] ?? 0) + 1 };
+        refresh();
+      }
     });
     return () => {
       clearInterval(timer);
+      clearInterval(hostTimer);
       document.removeEventListener("visibilitychange", onVisible);
       unlisten.then((f) => f());
     };
   });
+
+  $effect(() => {
+    if (shown === "host" && checks === null && !diagnosing && !diagError) diagnose();
+  });
 </script>
 
-<div class="mx-auto flex max-w-4xl flex-col gap-6 px-4 py-5 sm:px-6">
-  <header class="flex flex-wrap items-center justify-between gap-3">
-    <div>
-      <h1 class="text-2xl font-semibold">Konak</h1>
-      <p class="text-sm text-muted">{t("app.tagline")}</p>
-    </div>
-    <button type="button" class="btn" aria-label={t("panel.home_link_label")} onclick={() => openUrl(HOME_URL)}>
-      <span class="font-mono">{t("panel.home_link")}</span><span aria-hidden="true">↗</span>
-    </button>
-  </header>
+<div class="flex min-h-dvh flex-col">
+  <Header engineRunning={host ? host.distro.running : null} {networkCategory} {homeUrl} onadd={() => select("add")} />
 
-  {#if firewallMissing}
-    <section class="flex flex-col gap-2 rounded-md border border-warn-border bg-warn-bg p-3 text-sm" aria-labelledby="repair-title">
-      <h2 id="repair-title" class="font-semibold">{t("panel.repair.title")}</h2>
-      <p>{t("panel.repair.body")}</p>
-      {#if repairFailure}
-        <div class="text-error" role="alert">
-          <p class="font-medium">{t("panel.repair.failed")}</p>
-          {#if repairFailure.message}
-            <p>{repairFailure.message}</p>
-          {:else}
-            <details>
-              <summary class="cursor-pointer">{t("errors.details")}</summary>
-              <pre class="mt-2 text-xs whitespace-pre-wrap">{repairFailure.details}</pre>
-            </details>
-          {/if}
-        </div>
-      {/if}
-      <div>
-        <button type="button" class="btn-primary" disabled={repairing} onclick={() => invoke("repair_network")}>
-          {repairing ? t("panel.repair.running") : t("panel.repair.button")}
-        </button>
-      </div>
-      {#if repairing}<p class="sr-only" role="status">{t("panel.repair.running")}</p>{/if}
-    </section>
-  {/if}
+  <div class="flex flex-1 flex-wrap items-stretch">
+    <Sidebar {apps} selected={shown ?? ""} {host} {checks} {busy} onselect={select} />
 
-  {#if networkCategory === "Public"}
-    <p class="rounded-md border border-warn-border bg-warn-bg p-3 text-sm" role="status">{t("panel.network.public")}</p>
-  {/if}
+    <main bind:this={mainEl} class="flex min-w-0 flex-[999_1_480px] flex-col gap-5 px-4 pt-6 pb-8 sm:px-7">
+      <Notices {networkCategory} {firewallMissing} {repairing} {repairError} {webPorts} />
 
-  <main class="flex flex-col gap-8">
-    <section aria-labelledby="installed-title" class="flex flex-col gap-3">
-      <h2 id="installed-title" class="text-lg font-semibold">{t("panel.installed_title")}</h2>
-      {#if apps === null}
-        <p class="text-sm text-muted" role="status">{t("panel.loading")}</p>
-      {:else if apps.length === 0}
-        <p class="rounded-md border border-dashed border-border p-4 text-sm text-muted">{t("panel.empty")}</p>
+      {#if shown === "add"}
+        <AddApp
+          {catalog}
+          apps={apps ?? []}
+          {busy}
+          {failed}
+          {host}
+          {networkCategory}
+          portSuffix={portSuffix(webPorts)}
+          oninstall={(id) => run(id, "install")}
+          onopen={select}
+          ondismiss={(id) => (failed = patch(failed, id, null))}
+        />
+      {:else if shown === "host"}
+        <HostDetail {host} {checks} {diagnosing} {diagError} appCount={apps?.length ?? 0} {showCert} {summary} {homeUrl} ondiagnose={diagnose} />
+      {:else if current && apps}
+        <AppDetail
+          app={current}
+          {apps}
+          stats={stats[current.id]}
+          busy={busy[current.id]}
+          failed={failed[current.id]}
+          version={versions[current.id] ?? 0}
+          onop={(op) => run(current.id, op)}
+          onlogs={() => (logsFor = current)}
+          onremove={() => (removeFor = current)}
+          ondismiss={() => (failed = patch(failed, current.id, null))}
+        />
       {:else}
-        <ul class="grid grid-cols-1 gap-3 md:grid-cols-2">
-          {#each apps as app (app.id)}
-            <AppCard
-              {app}
-              {apps}
-              busy={busy[app.id]}
-              failed={failed[app.id]}
-              onrestart={() => run(app.id, "restart")}
-              onclaim={() => run(app.id, "claim")}
-              onlogs={() => (logsFor = app)}
-              onremove={() => (removeFor = app)}
-              ondismiss={() => setFailed(app.id, null)}
-            />
-          {/each}
-        </ul>
+        <p class="text-sm text-muted" role="status">{t("panel.loading")}</p>
       {/if}
-    </section>
-
-    <Catalog items={available} {busy} {failed} oninstall={(id) => run(id, "install")} ondismiss={(id) => setFailed(id, null)} />
-
-    {#if showCert}<CertHelp />{/if}
-  </main>
+    </main>
+  </div>
 </div>
 
 <LogsDrawer app={logsFor} name={logsFor ? appName(logsFor.id) : ""} onclose={() => (logsFor = null)} />

@@ -4,8 +4,10 @@
 
 use crate::installer::now;
 use crate::paths::Paths;
+use crate::services::WebPorts;
 use crate::shell::{self, tail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
@@ -98,6 +100,11 @@ pub struct Heartbeat {
     pub https_available: bool,
     #[serde(default)]
     pub caddy_failures: u32,
+    /// Ports Caddy serves on; heartbeats from before the port fallback were always 80/443.
+    #[serde(default)]
+    pub web_ports: WebPorts,
+    #[serde(default)]
+    pub port80_owner: Option<String>,
 }
 
 impl Heartbeat {
@@ -157,14 +164,19 @@ pub fn process_image(pid: u32) -> Option<String> {
 
 const MB: u64 = 1_048_576;
 
-/// (free, total) MB of the drive holding `dir` (or its nearest existing parent).
-pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
+/// (free, total) bytes of the drive holding `dir` (or its nearest existing parent).
+pub fn disk_space_bytes(dir: &Path) -> Option<(u64, u64)> {
     let dir = dir.ancestors().find(|p| p.exists())?;
     let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
     let (mut avail, mut total, mut free) = (0, 0, 0);
     // SAFETY: NUL-terminated path and valid out pointers.
     let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut avail, &mut total, &mut free) } != 0;
-    ok.then_some((avail / MB, total / MB))
+    ok.then_some((avail, total))
+}
+
+/// (free, total) MB of the drive holding `dir` (or its nearest existing parent).
+pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
+    disk_space_bytes(dir).map(|(free, total)| (free / MB, total / MB))
 }
 
 /// (available, total) MB of host RAM.
@@ -253,23 +265,73 @@ pub struct NetFacts {
     pub firewall: Vec<FwProgram>,
     #[serde(default)]
     pub port80: Vec<Listener>,
+    /// Listeners on the fallback HTTP port (`WebPorts::FALLBACK.http`).
+    #[serde(default)]
+    pub fallback_http: Vec<Listener>,
 }
 
 fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// Adapter, firewall rules and port 80 listeners, through one read-only PowerShell run.
+/// Adapter, firewall rules, and port 80 and fallback port listeners, through one read-only
+/// PowerShell run.
 pub fn net_facts(paths: &Paths, ip: Option<&str>) -> Result<NetFacts, String> {
     let progs = [paths.caddy(), paths.mdns()].map(|p| ps_quote(&p.to_string_lossy())).join(",");
-    let cmd = format!("& {{\n{NET_PS1}\n}} -Ip {} -Programs {progs}", ps_quote(ip.unwrap_or("")));
+    let cmd = format!("& {{\n{NET_PS1}\n}} -Ip {} -Programs {progs} -FallbackPort {}", ps_quote(ip.unwrap_or("")), WebPorts::FALLBACK.http);
     let out = shell::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &cmd]);
     let json = out.text.lines().rev().find(|l| l.trim_start().starts_with('{')).unwrap_or("");
     let mut facts: NetFacts = serde_json::from_str(json).map_err(|e| format!("network facts unreadable: {e}: {}", tail(&out.text, 3)))?;
-    for l in &mut facts.port80 {
+    for l in facts.port80.iter_mut().chain(facts.fallback_http.iter_mut()) {
         l.image = process_image(l.pid);
     }
     Ok(facts)
+}
+
+/// Whether a listener on `ip` (or on all addresses) is Konak's Caddy: the heartbeat's pid, or the
+/// bundled caddy.exe.
+fn konak_listener(l: &Listener, ip: &str, caddy_pid: Option<u32>, caddy: &str) -> bool {
+    (l.address == ip || l.address == "0.0.0.0" || l.address == "::") && (Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(caddy)))
+}
+
+/// The other program holding port 80 on `ip`, as `httpd.exe (pid 1234)`. `None` when there is none
+/// or its image cannot be read (pid 4 is always the System process: http.sys, e.g. IIS).
+pub fn port80_owner(net: &NetFacts, ip: &str, caddy: &str) -> Option<String> {
+    let other = net.port80.iter().find(|l| (l.address == ip || l.address == "0.0.0.0" || l.address == "::") && !konak_listener(l, ip, None, caddy))?;
+    let image = match (&other.image, other.pid) {
+        (Some(path), _) => path.rsplit(['\\', '/']).next().unwrap_or(path).to_string(),
+        (None, 4) => "System".to_string(),
+        (None, _) => return None,
+    };
+    Some(format!("{image} (pid {})", other.pid))
+}
+
+/// Whether Konak's Caddy (the heartbeat's pid, or the bundled caddy.exe) listens on port 80 of the
+/// LAN IP or on all addresses.
+pub fn konak_owns_port80(net: &NetFacts, ip: Option<&str>, caddy_pid: Option<u32>, caddy: &str) -> bool {
+    ip.is_some_and(|ip| {
+        net.port80.iter().any(|l| (l.address == ip || l.address == "0.0.0.0") && (Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(caddy))))
+    })
+}
+
+/// LAN networking: the MCP `network_check` tool and the panel's host view.
+pub struct Network {
+    pub lan_ip: Option<String>,
+    pub facts: NetFacts,
+    pub konak_owns_port80: bool,
+    /// The ports the supervisor last served on (its heartbeat), and the port 80 owner it found.
+    pub web_ports: WebPorts,
+    pub port80_owner: Option<String>,
+}
+
+pub fn network(paths: &Paths) -> Result<Network, String> {
+    let lan_ip = crate::services::lan_ip();
+    let facts = net_facts(paths, lan_ip.as_deref())?;
+    let hb = heartbeat(paths);
+    let caddy_pid = hb.as_ref().and_then(|h| h.pids.caddy);
+    let konak_owns_port80 = konak_owns_port80(&facts, lan_ip.as_deref(), caddy_pid, &paths.caddy().to_string_lossy());
+    let (web_ports, port80_owner) = hb.map(|h| (h.web_ports, h.port80_owner)).unwrap_or_default();
+    Ok(Network { lan_ip, facts, konak_owns_port80, web_ports, port80_owner })
 }
 
 /// Output of a read-only script run as root in the distro, or `None` when it is not running.
@@ -424,6 +486,37 @@ fn foreign_fix(n: &ForeignNetwork) -> String {
 
 pub const RESOURCES_SH: &str = "free -m\necho ---\ndf -P -m /\n";
 
+/// Memory and root disk usage inside the distro; both `None` when it is not running.
+pub fn distro_usage(paths: &Paths, d: &Distro) -> (Option<Usage>, Option<Usage>) {
+    in_distro(paths, d, RESOURCES_SH).as_deref().map(|t| t.split_once("---").unwrap_or((t, ""))).map(|(m, df)| (parse_free(m), parse_df(df))).unwrap_or((None, None))
+}
+
+/// The panel's "This PC" view. `category` is the network category Konak last read (the panel's
+/// `refresh_network`); when there is none, the LAN adapter's own category is used.
+pub fn host_info(paths: &Paths, category: Option<String>) -> serde_json::Value {
+    use serde_json::json;
+    let d = distro(paths);
+    let (mem, disk) = distro_usage(paths, &d);
+    let used_total = |u: Option<Usage>| u.map(|u| json!({"used_bytes": u.used_mb * MB, "total_bytes": u.total_mb * MB}));
+    let net = network(paths).map_err(|e| crate::log(paths, &format!("host info: {e}"))).ok();
+    let adapter = net.as_ref().and_then(|n| n.facts.adapter.as_ref());
+    let category = category.filter(|c| !c.is_empty()).or_else(|| adapter.map(|a| a.category.clone()).filter(|c| !c.is_empty()));
+    json!({
+        "distro": {"name": d.name, "running": d.running},
+        "memory": used_total(mem),
+        "disk": used_total(disk),
+        "data_drive": disk_space_bytes(&paths.home).map(|(free, total)| json!({"free_bytes": free, "total_bytes": total})),
+        "network": {
+            "lan_ip": net.as_ref().map_or_else(crate::services::lan_ip, |n| n.lan_ip.clone()),
+            "adapter": adapter.map(|a| a.alias.clone()),
+            "category": category,
+            // As the panel's firewall notice does: rules that cannot be read are not reported missing.
+            "firewall_ok": net.as_ref().is_none_or(|n| !crate::installer::rules_missing(&n.facts.firewall)),
+            "konak_owns_port80": net.as_ref().is_some_and(|n| n.konak_owns_port80),
+        },
+    })
+}
+
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Check {
     pub check: &'static str,
@@ -431,10 +524,23 @@ pub struct Check {
     pub status: &'static str,
     pub evidence: String,
     pub fix: String,
+    /// What the panel shows: `panel.diag_msg.<code>` and `panel.diag_fix.<code>` in its locale files,
+    /// filled with `args`. `evidence` and `fix` stay the technical English text for MCP clients and logs.
+    pub code: &'static str,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub args: BTreeMap<&'static str, String>,
+}
+
+impl Check {
+    fn msg(mut self, code: &'static str, args: &[(&'static str, String)]) -> Self {
+        self.code = code;
+        self.args = args.iter().cloned().collect();
+        self
+    }
 }
 
 fn check(check: &'static str, status: &'static str, evidence: impl Into<String>, fix: &str) -> Check {
-    Check { check, status, evidence: evidence.into(), fix: fix.to_string() }
+    Check { check, status, evidence: evidence.into(), fix: fix.to_string(), code: "", args: BTreeMap::new() }
 }
 
 /// Everything `diagnose` looks at, gathered once.
@@ -465,15 +571,15 @@ pub fn gather(paths: &Paths) -> Facts {
 
 pub fn forward_policy(f: &Facts) -> Check {
     const FIX: &str = "Another WSL distro's Docker set FORWARD to DROP in the shared WSL network namespace; there, run `iptables -P FORWARD ACCEPT` (or stop that Docker), then restart Konak's apps.";
-    let Some(out) = &f.forward else { return check("forward_policy", "warn", not_running(&f.distro), "Start Konak from the tray so the distro runs, then diagnose again.") };
+    let Some(out) = &f.forward else { return check("forward_policy", "warn", not_running(&f.distro), "Start Konak from the tray so the distro runs, then diagnose again.").msg("distro_down", &[]) };
     if !out.contains("## ") {
-        return check("forward_policy", "warn", "neither nft nor iptables-legacy found in the distro", "Reinstall the container engine from Konak's setup.");
+        return check("forward_policy", "warn", "neither nft nor iptables-legacy found in the distro", "Reinstall the container engine from Konak's setup.").msg("forward_policy.no_tool", &[]);
     }
     let drops: Vec<&str> = out.lines().filter(|l| l.contains("-P FORWARD DROP") || (l.contains("hook forward") && l.contains("policy drop"))).map(str::trim).collect();
     if drops.is_empty() {
-        check("forward_policy", "ok", "no FORWARD chain with a DROP policy", "")
+        check("forward_policy", "ok", "no FORWARD chain with a DROP policy", "").msg("forward_policy.ok", &[])
     } else {
-        check("forward_policy", "fail", drops.join("; "), FIX)
+        check("forward_policy", "fail", drops.join("; "), FIX).msg("forward_policy.drop", &[])
     }
 }
 
@@ -481,13 +587,14 @@ pub fn stale_netavark(f: &Facts) -> Check {
     // Never `nft delete table inet netavark`: every WSL distro shares one network namespace, so that
     // also wipes the port forwards of any other Podman distro on the PC.
     const FIX: &str = "In Konak's distro as root, run `podman network reload --all`: it rebuilds the port forwards of Konak's running containers and leaves other distros' rules alone. konak-boot.service runs the same reload at every boot of Konak's distro. Do not delete the shared `inet netavark` table.";
-    let Some(all) = &f.netavark else { return check("stale_netavark", "warn", not_running(&f.distro), "Start Konak from the tray so the distro runs, then diagnose again.") };
+    let Some(all) = &f.netavark else { return check("stale_netavark", "warn", not_running(&f.distro), "Start Konak from the tray so the distro runs, then diagnose again.").msg("distro_down", &[]) };
     // The probe lines come before the first `## ` section (networks, rule dump).
     let probes: Vec<&str> = all.lines().take_while(|l| !l.starts_with("## ")).collect();
     let containers = probes.iter().filter(|l| l.starts_with("container ")).count();
     let closed: Vec<String> = probes.iter().filter_map(|l| l.strip_prefix("probe ")).filter(|l| l.ends_with(" closed")).map(|l| l.trim_end_matches(" closed").replace(' ', ":")).collect();
     if containers > 0 && probes.contains(&"table missing") {
-        return check("stale_netavark", "fail", format!("{containers} containers running but the shared inet netavark table is missing (another Podman distro may have flushed it)"), FIX);
+        return check("stale_netavark", "fail", format!("{containers} containers running but the shared inet netavark table is missing (another Podman distro may have flushed it)"), FIX)
+            .msg("stale_netavark.table_missing", &[("containers", containers.to_string())]);
     }
     // Only when Konak's Podman listed its networks: otherwise every network would look foreign.
     if let Some(known) = section(all, "podman networks") {
@@ -499,66 +606,91 @@ pub fn stale_netavark(f: &Facts) -> Check {
                 "In Konak's distro as root, delete only that network's rules: {}. Then run `podman network reload --all`. Do not delete the shared `inet netavark` table.",
                 foreign.iter().map(foreign_fix).collect::<Vec<_>>().join("; ")
             );
-            return Check { check: "stale_netavark", status: "fail", evidence, fix };
+            let ports = foreign.iter().flat_map(|n| n.ports.iter().map(u16::to_string)).collect::<Vec<_>>().join(", ");
+            return Check { check: "stale_netavark", status: "fail", evidence, fix, code: "", args: BTreeMap::new() }.msg("stale_netavark.foreign", &[("ports", ports)]);
         }
     }
     if !closed.is_empty() {
-        return check("stale_netavark", "warn", format!("published ports not answering inside the distro: {} (container still starting, or stale DNAT rules)", closed.join(", ")), FIX);
+        return check("stale_netavark", "warn", format!("published ports not answering inside the distro: {} (container still starting, or stale DNAT rules)", closed.join(", ")), FIX)
+            .msg("stale_netavark.closed", &[("ports", closed.join(", "))]);
     }
     let open = probes.iter().filter(|l| l.ends_with(" open")).count();
     check("stale_netavark", "ok", format!("{containers} running containers, {open} published ports answering"), "")
+        .msg("stale_netavark.ok", &[("containers", containers.to_string()), ("open", open.to_string())])
 }
 
 pub fn keepalive(f: &Facts) -> Check {
     const START: &str = "Start Konak (or quit and restart it from the tray); its supervisor restarts the keepalive within 10 s.";
-    let Some(hb) = &f.heartbeat else { return check("keepalive", "warn", "no supervisor heartbeat: Konak's tray app has not run yet", START) };
+    let Some(hb) = &f.heartbeat else { return check("keepalive", "warn", "no supervisor heartbeat: Konak's tray app has not run yet", START).msg("keepalive.no_heartbeat", &[]) };
     if hb.stale(f.now) {
-        return check("keepalive", "fail", format!("supervisor heartbeat is {} s old (stale after {HEARTBEAT_STALE_S} s)", hb.age(f.now)), START);
+        return check("keepalive", "fail", format!("supervisor heartbeat is {} s old (stale after {HEARTBEAT_STALE_S} s)", hb.age(f.now)), START).msg("keepalive.stale", &[("age", hb.age(f.now).to_string())]);
     }
     let pid = hb.pids.keepalive.map(|p| p.to_string()).unwrap_or_else(|| "none".into());
     let wsl = f.keepalive_image.as_deref().is_some_and(|i| i.to_lowercase().ends_with("wsl.exe"));
     if !wsl {
-        return check("keepalive", "fail", format!("keepalive pid {pid} is not a live wsl.exe"), START);
+        return check("keepalive", "fail", format!("keepalive pid {pid} is not a live wsl.exe"), START).msg("keepalive.not_running", &[]);
     }
     if !f.distro.running {
-        return check("keepalive", "fail", format!("keepalive pid {pid} alive but {}", not_running(&f.distro)), START);
+        return check("keepalive", "fail", format!("keepalive pid {pid} alive but {}", not_running(&f.distro)), START).msg("distro_down", &[]);
     }
-    check("keepalive", "ok", format!("keepalive pid {pid} alive, distro {} running", f.distro.name), "")
+    check("keepalive", "ok", format!("keepalive pid {pid} alive, distro {} running", f.distro.name), "").msg("keepalive.ok", &[])
 }
 
 pub fn port80(f: &Facts) -> Check {
     let net = match &f.net {
         Ok(n) => n,
-        Err(e) => return check("port80_owner", "warn", e.clone(), "Run the check again; PowerShell's NetTCPIP module must be available."),
+        Err(e) => return check("port80_owner", "warn", e.clone(), "Run the check again; PowerShell's NetTCPIP module must be available.").msg("port80_owner.net_error", &[]),
     };
-    let Some(ip) = &f.lan_ip else { return check("port80_owner", "warn", "no LAN IP", "Connect the PC to the home network.") };
+    let Some(ip) = &f.lan_ip else { return check("port80_owner", "warn", "no LAN IP", "Connect the PC to the home network.").msg("no_network", &[]) };
     let caddy_pid = f.heartbeat.as_ref().and_then(|h| h.pids.caddy);
     let relevant: Vec<&Listener> = net.port80.iter().filter(|l| l.address == *ip || l.address == "0.0.0.0" || l.address == "::").collect();
     let konak = |l: &Listener| Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(&f.caddy));
+    // The first other program, as "httpd.exe (pid 4120)", for the panel's message.
+    let owner = relevant.iter().find(|l| !konak(l)).map(|l| {
+        let image = l.image.as_deref().map(|i| i.rsplit(['\\', '/']).next().unwrap_or(i).to_string()).unwrap_or_else(|| "?".into());
+        format!("{image} (pid {})", l.pid)
+    });
     let others: Vec<String> = relevant.iter().filter(|l| !konak(l)).map(|l| format!("{} pid {} {}", l.address, l.pid, l.image.as_deref().unwrap_or("(image unknown)"))).collect();
+    // Konak's Caddy on the fallback port: apps stay reachable there, so a warning, not a failure.
+    let fallback = WebPorts::FALLBACK;
+    let on_fallback = f.heartbeat.as_ref().is_some_and(|h| !h.stale(f.now) && h.web_ports.is_fallback()) && net.fallback_http.iter().any(|l| konak_listener(l, ip, caddy_pid, &f.caddy));
+    let serving = format!("Konak serves its apps on the fallback ports instead: {} (HTTPS port {})", fallback.url(false, "<name>"), fallback.https);
     if !others.is_empty() {
-        return check("port80_owner", "fail", format!("port 80 on {ip} held by another program: {}", others.join("; ")), "Stop or reconfigure that program so port 80 on the LAN IP is free; Konak's Caddy then takes it within 10 s.");
+        let evidence = format!("port 80 on {ip} held by another program: {}", others.join("; "));
+        if on_fallback {
+            return check("port80_owner", "warn", format!("{evidence}; {serving}"), "Stopping or reconfiguring that program frees port 80; Konak then returns to port 80 by itself within about 2 minutes.")
+                .msg("port80_owner.fallback", &[("owner", owner.clone().unwrap_or_default()), ("port", fallback.http.to_string())]);
+        }
+        return check("port80_owner", "fail", evidence, "Stop or reconfigure that program so port 80 on the LAN IP is free; Konak's Caddy then takes it within 10 s.")
+            .msg("port80_owner.taken", &[("owner", owner.unwrap_or_default())]);
+    }
+    if on_fallback {
+        return check("port80_owner", "warn", format!("port 80 on {ip} is free again; {serving} until port 80 tests free twice, a minute apart"), "Nothing to do: Konak returns to port 80 by itself within about 2 minutes.")
+            .msg("port80_owner.returning", &[]);
     }
     match relevant.first() {
-        Some(l) => check("port80_owner", "ok", format!("Konak's caddy (pid {}) listens on {}:80", l.pid, l.address), ""),
+        Some(l) => check("port80_owner", "ok", format!("Konak's caddy (pid {}) listens on {}:80", l.pid, l.address), "").msg("port80_owner.ok", &[]),
         None => {
             let failures = f.heartbeat.as_ref().map_or(0, |h| h.caddy_failures);
             let why = if failures > 0 { format!("; Konak's caddy exited {failures} times in a row (see logs\\caddy.log)") } else { String::new() };
-            check("port80_owner", "warn", format!("nothing listens on {ip}:80{why}"), "Start Konak from the tray; its supervisor starts Caddy.")
+            check("port80_owner", "warn", format!("nothing listens on {ip}:80{why}"), "Start Konak from the tray; its supervisor starts Caddy.").msg("port80_owner.nothing", &[])
         }
     }
 }
 
 pub fn lan_adapter(f: &Facts) -> Check {
-    let Some(ip) = &f.lan_ip else { return check("lan_adapter", "fail", "no IPv4 default route", "Connect the PC to the home network (Ethernet or Wi-Fi).") };
+    let Some(ip) = &f.lan_ip else { return check("lan_adapter", "fail", "no IPv4 default route", "Connect the PC to the home network (Ethernet or Wi-Fi).").msg("no_network", &[]) };
     let adapter = f.net.as_ref().ok().and_then(|n| n.adapter.clone());
     let name = adapter.as_ref().map(|a| format!("{} ({})", a.alias, a.description)).unwrap_or_else(|| "unknown adapter".into());
     if adapter.as_ref().is_some_and(Adapter::is_virtual) {
-        return check("lan_adapter", "fail", format!("LAN IP {ip} is on virtual adapter {name}"), "Disable the VPN or virtual switch that holds the default route, or give the physical adapter a lower interface metric.");
+        return check("lan_adapter", "fail", format!("LAN IP {ip} is on virtual adapter {name}"), "Disable the VPN or virtual switch that holds the default route, or give the physical adapter a lower interface metric.")
+            .msg("lan_adapter.virtual", &[("adapter", adapter.as_ref().map(|a| a.alias.clone()).unwrap_or_default())]);
     }
     match f.heartbeat.as_ref().filter(|h| !h.stale(f.now)).and_then(|h| h.lan_ip.clone()) {
-        Some(served) if served != *ip => check("lan_adapter", "warn", format!("supervisor serves {served}, current LAN IP is {ip} on {name}"), "Wait 10 s for the supervisor to follow the new IP; if it stays, restart Konak."),
-        _ => check("lan_adapter", "ok", format!("LAN IP {ip} on {name}"), ""),
+        Some(served) if served != *ip => check("lan_adapter", "warn", format!("supervisor serves {served}, current LAN IP is {ip} on {name}"), "Wait 10 s for the supervisor to follow the new IP; if it stays, restart Konak.")
+            .msg("lan_adapter.ip_changed", &[]),
+        _ => check("lan_adapter", "ok", format!("LAN IP {ip} on {name}"), "")
+            .msg("lan_adapter.ok", &[("ip", ip.clone()), ("adapter", adapter.as_ref().map(|a| a.alias.clone()).unwrap_or_default())]),
     }
 }
 
@@ -604,12 +736,13 @@ mod tests {
         Facts {
             now: 1000,
             distro: Distro { name: "konak".into(), exists: true, running: true, state: Some("Running".into()), version: Some(2) },
-            heartbeat: Some(Heartbeat { last_tick_unix: 995, lan_ip: Some("192.168.1.5".into()), names: vec!["konak".into()], pids: Pids { keepalive: Some(11), caddy: Some(22), mdns: Some(33) }, https_available: true, caddy_failures: 0 }),
+            heartbeat: Some(Heartbeat { last_tick_unix: 995, lan_ip: Some("192.168.1.5".into()), names: vec!["konak".into()], pids: Pids { keepalive: Some(11), caddy: Some(22), mdns: Some(33) }, https_available: true, caddy_failures: 0, web_ports: WebPorts::STANDARD, port80_owner: None }),
             lan_ip: Some("192.168.1.5".into()),
             net: Ok(NetFacts {
                 adapter: Some(Adapter { alias: "Ethernet".into(), description: "Intel(R) Ethernet I225-V".into(), index: 7, category: "Private".into() }),
                 firewall: vec![],
                 port80: vec![Listener { address: "192.168.1.5".into(), pid: 22, image: Some(r"C:\Konak\bin\caddy.exe".into()) }],
+                fallback_http: vec![],
             }),
             keepalive_image: Some(r"C:\Windows\System32\wsl.exe".into()),
             caddy: r"C:\Konak\bin\caddy.exe".into(),
@@ -628,6 +761,7 @@ mod tests {
         let checks = diagnose(&f);
         assert_eq!(checks.iter().map(|c| c.check).collect::<Vec<_>>(), ["forward_policy", "stale_netavark", "keepalive", "port80_owner", "lan_adapter"]);
         assert!(checks.iter().all(|c| c.status == "ok" && c.fix.is_empty()), "{checks:?}");
+        assert_eq!(checks.iter().map(|c| c.code).collect::<Vec<_>>(), ["forward_policy.ok", "stale_netavark.ok", "keepalive.ok", "port80_owner.ok", "lan_adapter.ok"]);
     }
 
     #[test]
@@ -643,6 +777,9 @@ mod tests {
         assert!(checks[0].evidence.contains("-P FORWARD DROP"));
         assert!(checks[3].evidence.contains("httpd.exe"));
         assert!(checks[1].fix.contains("podman network reload --all") && !checks[1].fix.contains("nft delete"));
+        assert_eq!(checks.iter().map(|c| c.code).collect::<Vec<_>>(), ["forward_policy.drop", "stale_netavark.table_missing", "keepalive.not_running", "port80_owner.taken", "lan_adapter.virtual"]);
+        assert_eq!(checks[3].args["owner"], "httpd.exe (pid 4)");
+        assert_eq!(checks[4].args["adapter"], "vEthernet (WSL)");
 
         // Only a closed port while the table exists: a warning (container may still be starting).
         let mut f = facts();
@@ -729,6 +866,71 @@ mod tests {
         // After the cleanup: ok.
         f.netavark = Some(format!("table present\ncontainer forgejo\nprobe forgejo 47105 open\n## podman networks\n{FORGEJO_NET}\n## nft text\n{N1_AFTER}"));
         assert_eq!(stale_netavark(&f).status, "ok");
+    }
+
+    #[test]
+    fn port80_ownership_by_pid_or_image() {
+        let caddy = r"C:\Konak\bin\caddy.exe";
+        let net = |address: &str, pid: u32, image: Option<&str>| NetFacts { port80: vec![Listener { address: address.into(), pid, image: image.map(String::from) }], ..Default::default() };
+        let ip = Some("192.168.1.5");
+        assert!(konak_owns_port80(&net("192.168.1.5", 22, None), ip, Some(22), caddy));
+        assert!(konak_owns_port80(&net("0.0.0.0", 9, Some(r"c:\konak\bin\CADDY.exe")), ip, None, caddy));
+        assert!(!konak_owns_port80(&net("192.168.1.5", 4, Some(r"C:\Windows\System32\httpd.exe")), ip, Some(22), caddy));
+        assert!(!konak_owns_port80(&net("10.0.0.2", 22, None), ip, Some(22), caddy), "another address");
+        assert!(!konak_owns_port80(&net("192.168.1.5", 22, None), None, Some(22), caddy), "no LAN IP");
+    }
+
+    #[test]
+    fn port80_taken_while_konak_serves_on_the_fallback_is_a_warning() {
+        let mut f = facts();
+        let httpd = Listener { address: "0.0.0.0".into(), pid: 4242, image: Some(r"C:\xampp\apache\bin\httpd.exe".into()) };
+        let net = f.net.as_mut().unwrap();
+        net.port80 = vec![httpd.clone()];
+        net.fallback_http = vec![Listener { address: "192.168.1.5".into(), pid: 22, image: None }];
+        f.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACK;
+        let c = port80(&f);
+        assert_eq!(c.status, "warn", "{c:?}");
+        assert!(c.evidence.contains("httpd.exe") && c.evidence.contains("pid 4242") && c.evidence.contains(":47080"), "{c:?}");
+        assert!(c.fix.contains("returns to port 80 by itself"), "{c:?}");
+        assert_eq!(port80_owner(f.net.as_ref().unwrap(), "192.168.1.5", &f.caddy).as_deref(), Some("httpd.exe (pid 4242)"));
+
+        // Caddy runs on neither port: still a failure.
+        f.net.as_mut().unwrap().fallback_http.clear();
+        assert_eq!(port80(&f).status, "fail");
+        // A stale heartbeat does not count as serving on the fallback.
+        let mut g = facts();
+        g.net.as_mut().unwrap().port80 = vec![httpd];
+        g.net.as_mut().unwrap().fallback_http = vec![Listener { address: "192.168.1.5".into(), pid: 22, image: None }];
+        g.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACK;
+        g.heartbeat.as_mut().unwrap().last_tick_unix = 0;
+        assert_eq!(port80(&g).status, "fail");
+
+        // Port 80 free again, switch-back pending: a warning that needs nothing.
+        let mut h = facts();
+        h.net.as_mut().unwrap().port80.clear();
+        h.net.as_mut().unwrap().fallback_http = vec![Listener { address: "0.0.0.0".into(), pid: 9, image: Some(r"c:\konak\bin\CADDY.EXE".into()) }];
+        h.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACK;
+        let c = port80(&h);
+        assert!(c.status == "warn" && c.evidence.contains("free again"), "{c:?}");
+    }
+
+    #[test]
+    fn port80_owner_names_the_program() {
+        let caddy = r"C:\Konak\bin\caddy.exe";
+        let net = |l: Vec<Listener>| NetFacts { port80: l, ..Default::default() };
+        let l = |address: &str, pid: u32, image: Option<&str>| Listener { address: address.into(), pid, image: image.map(String::from) };
+        assert_eq!(port80_owner(&net(vec![l("0.0.0.0", 4, None)]), "10.0.0.2", caddy).as_deref(), Some("System (pid 4)"));
+        assert_eq!(port80_owner(&net(vec![l("10.0.0.2", 77, None)]), "10.0.0.2", caddy), None, "image unknown");
+        assert_eq!(port80_owner(&net(vec![l("10.0.0.9", 77, Some(r"C:\x\iis.exe"))]), "10.0.0.2", caddy), None, "another address");
+        assert_eq!(port80_owner(&net(vec![l("10.0.0.2", 22, Some(caddy))]), "10.0.0.2", caddy), None, "Konak's own Caddy");
+        assert_eq!(port80_owner(&net(vec![]), "10.0.0.2", caddy), None);
+    }
+
+    #[test]
+    fn heartbeat_from_before_the_fallback_reads_as_80_and_443() {
+        let hb: Heartbeat = serde_json::from_str(r#"{"last_tick_unix":5,"lan_ip":"10.0.0.2","names":["konak"],"pids":{"keepalive":1,"caddy":2,"mdns":3},"https_available":true,"caddy_failures":0}"#).unwrap();
+        assert_eq!(hb.web_ports, WebPorts::STANDARD);
+        assert!(hb.port80_owner.is_none());
     }
 
     #[test]
