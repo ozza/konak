@@ -398,6 +398,26 @@ async fn app_logs(app: AppHandle, id: String, lines: Option<u32>) -> Result<Stri
     blocking(app, move |p| apps::logs(p, &id, lines.unwrap_or(200))).await?
 }
 
+/// Distro, memory, disk and network facts for the panel's "This PC" view. Read-only; never starts
+/// the distro (memory and disk are null while it is stopped).
+#[tauri::command]
+async fn host_info(app: AppHandle) -> Result<serde_json::Value, String> {
+    let category = app.state::<Konak>().rt.lock().unwrap().preflight.as_ref().map(|p| p.network_category.clone());
+    blocking(app, move |p| diag::host_info(p, category)).await
+}
+
+/// The MCP `diagnose` checks, redacted the same way. Never fixes anything or starts the distro.
+#[tauri::command]
+async fn diagnose(app: AppHandle) -> Result<Vec<diag::Check>, String> {
+    blocking(app, |p| {
+        let facts = diag::gather(p);
+        // Secret values are read only from a running distro, as the MCP server does.
+        let r = if facts.distro.running { redact::Redactor::load(p) } else { redact::Redactor::new(vec![]) };
+        diag::diagnose(&facts).into_iter().map(|c| diag::Check { evidence: r.apply(&c.evidence), fix: r.apply(&c.fix), ..c }).collect()
+    })
+    .await
+}
+
 #[derive(Serialize)]
 struct CaInfo {
     path: String,
@@ -566,6 +586,8 @@ pub fn run() {
             stop_app,
             start_app,
             app_logs,
+            host_info,
+            diagnose,
             ca_info,
             trust_ca_on_this_pc
         ])

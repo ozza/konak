@@ -157,14 +157,19 @@ pub fn process_image(pid: u32) -> Option<String> {
 
 const MB: u64 = 1_048_576;
 
-/// (free, total) MB of the drive holding `dir` (or its nearest existing parent).
-pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
+/// (free, total) bytes of the drive holding `dir` (or its nearest existing parent).
+pub fn disk_space_bytes(dir: &Path) -> Option<(u64, u64)> {
     let dir = dir.ancestors().find(|p| p.exists())?;
     let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
     let (mut avail, mut total, mut free) = (0, 0, 0);
     // SAFETY: NUL-terminated path and valid out pointers.
     let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut avail, &mut total, &mut free) } != 0;
-    ok.then_some((avail / MB, total / MB))
+    ok.then_some((avail, total))
+}
+
+/// (free, total) MB of the drive holding `dir` (or its nearest existing parent).
+pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
+    disk_space_bytes(dir).map(|(free, total)| (free / MB, total / MB))
 }
 
 /// (available, total) MB of host RAM.
@@ -270,6 +275,29 @@ pub fn net_facts(paths: &Paths, ip: Option<&str>) -> Result<NetFacts, String> {
         l.image = process_image(l.pid);
     }
     Ok(facts)
+}
+
+/// Whether Konak's Caddy (the heartbeat's pid, or the bundled caddy.exe) listens on port 80 of the
+/// LAN IP or on all addresses.
+pub fn konak_owns_port80(net: &NetFacts, ip: Option<&str>, caddy_pid: Option<u32>, caddy: &str) -> bool {
+    ip.is_some_and(|ip| {
+        net.port80.iter().any(|l| (l.address == ip || l.address == "0.0.0.0") && (Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(caddy))))
+    })
+}
+
+/// LAN networking: the MCP `network_check` tool and the panel's host view.
+pub struct Network {
+    pub lan_ip: Option<String>,
+    pub facts: NetFacts,
+    pub konak_owns_port80: bool,
+}
+
+pub fn network(paths: &Paths) -> Result<Network, String> {
+    let lan_ip = crate::services::lan_ip();
+    let facts = net_facts(paths, lan_ip.as_deref())?;
+    let caddy_pid = heartbeat(paths).and_then(|h| h.pids.caddy);
+    let konak_owns_port80 = konak_owns_port80(&facts, lan_ip.as_deref(), caddy_pid, &paths.caddy().to_string_lossy());
+    Ok(Network { lan_ip, facts, konak_owns_port80 })
 }
 
 /// Output of a read-only script run as root in the distro, or `None` when it is not running.
@@ -423,6 +451,37 @@ fn foreign_fix(n: &ForeignNetwork) -> String {
 }
 
 pub const RESOURCES_SH: &str = "free -m\necho ---\ndf -P -m /\n";
+
+/// Memory and root disk usage inside the distro; both `None` when it is not running.
+pub fn distro_usage(paths: &Paths, d: &Distro) -> (Option<Usage>, Option<Usage>) {
+    in_distro(paths, d, RESOURCES_SH).as_deref().map(|t| t.split_once("---").unwrap_or((t, ""))).map(|(m, df)| (parse_free(m), parse_df(df))).unwrap_or((None, None))
+}
+
+/// The panel's "This PC" view. `category` is the network category Konak last read (the panel's
+/// `refresh_network`); when there is none, the LAN adapter's own category is used.
+pub fn host_info(paths: &Paths, category: Option<String>) -> serde_json::Value {
+    use serde_json::json;
+    let d = distro(paths);
+    let (mem, disk) = distro_usage(paths, &d);
+    let used_total = |u: Option<Usage>| u.map(|u| json!({"used_bytes": u.used_mb * MB, "total_bytes": u.total_mb * MB}));
+    let net = network(paths).map_err(|e| crate::log(paths, &format!("host info: {e}"))).ok();
+    let adapter = net.as_ref().and_then(|n| n.facts.adapter.as_ref());
+    let category = category.filter(|c| !c.is_empty()).or_else(|| adapter.map(|a| a.category.clone()).filter(|c| !c.is_empty()));
+    json!({
+        "distro": {"name": d.name, "running": d.running},
+        "memory": used_total(mem),
+        "disk": used_total(disk),
+        "data_drive": disk_space_bytes(&paths.home).map(|(free, total)| json!({"free_bytes": free, "total_bytes": total})),
+        "network": {
+            "lan_ip": net.as_ref().map_or_else(crate::services::lan_ip, |n| n.lan_ip.clone()),
+            "adapter": adapter.map(|a| a.alias.clone()),
+            "category": category,
+            // As the panel's firewall notice does: rules that cannot be read are not reported missing.
+            "firewall_ok": net.as_ref().is_none_or(|n| !crate::installer::rules_missing(&n.facts.firewall)),
+            "konak_owns_port80": net.as_ref().is_some_and(|n| n.konak_owns_port80),
+        },
+    })
+}
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Check {
@@ -729,6 +788,18 @@ mod tests {
         // After the cleanup: ok.
         f.netavark = Some(format!("table present\ncontainer forgejo\nprobe forgejo 47105 open\n## podman networks\n{FORGEJO_NET}\n## nft text\n{N1_AFTER}"));
         assert_eq!(stale_netavark(&f).status, "ok");
+    }
+
+    #[test]
+    fn port80_ownership_by_pid_or_image() {
+        let caddy = r"C:\Konak\bin\caddy.exe";
+        let net = |address: &str, pid: u32, image: Option<&str>| NetFacts { port80: vec![Listener { address: address.into(), pid, image: image.map(String::from) }], ..Default::default() };
+        let ip = Some("192.168.1.5");
+        assert!(konak_owns_port80(&net("192.168.1.5", 22, None), ip, Some(22), caddy));
+        assert!(konak_owns_port80(&net("0.0.0.0", 9, Some(r"c:\konak\bin\CADDY.exe")), ip, None, caddy));
+        assert!(!konak_owns_port80(&net("192.168.1.5", 4, Some(r"C:\Windows\System32\httpd.exe")), ip, Some(22), caddy));
+        assert!(!konak_owns_port80(&net("10.0.0.2", 22, None), ip, Some(22), caddy), "another address");
+        assert!(!konak_owns_port80(&net("192.168.1.5", 22, None), None, Some(22), caddy), "no LAN IP");
     }
 
     #[test]

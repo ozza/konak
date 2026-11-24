@@ -93,20 +93,14 @@ fn logs(paths: &Paths, d: &Distro, args: LogsArgs) -> Result<Value, String> {
 }
 
 fn network(paths: &Paths) -> Result<Value, String> {
-    let ip = lan_ip();
-    let net = diag::net_facts(paths, ip.as_deref())?;
-    let caddy = paths.caddy().to_string_lossy().to_string();
-    let caddy_pid = diag::heartbeat(paths).and_then(|h| h.pids.caddy);
-    let konak_owns_80 = ip.as_ref().is_some_and(|ip| {
-        net.port80.iter().any(|l| (l.address == *ip || l.address == "0.0.0.0") && (Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(&caddy))))
-    });
-    let firewall: Vec<Value> = net.firewall.iter().map(|p| json!({"program": p.program, "private_allow": p.private_allow(), "rules": p.rules})).collect();
+    let n = diag::network(paths)?;
+    let firewall: Vec<Value> = n.facts.firewall.iter().map(|p| json!({"program": p.program, "private_allow": p.private_allow(), "rules": p.rules})).collect();
     Ok(json!({
-        "lan_ip": ip,
-        "adapter": net.adapter,
-        "adapter_virtual": net.adapter.as_ref().map(diag::Adapter::is_virtual),
+        "lan_ip": n.lan_ip,
+        "adapter": n.facts.adapter,
+        "adapter_virtual": n.facts.adapter.as_ref().map(diag::Adapter::is_virtual),
         "firewall": firewall,
-        "port80": {"listeners": net.port80, "konak_caddy_owns": konak_owns_80},
+        "port80": {"listeners": n.facts.port80, "konak_caddy_owns": n.konak_owns_port80},
     }))
 }
 
@@ -137,8 +131,7 @@ fn resources(paths: &Paths, d: &Distro) -> Value {
     let mb = |v: Option<(u64, u64)>| v.map(|(free, total)| json!({"free_mb": free, "total_mb": total}));
     let vhdx = paths.distro_dir().join("ext4.vhdx");
     let vhdx_mb = std::fs::metadata(&vhdx).ok().map(|m| m.len() / 1_048_576);
-    let inside = diag::in_distro(paths, d, diag::RESOURCES_SH);
-    let (mem, disk) = inside.as_deref().map(|t| t.split_once("---").unwrap_or((t, ""))).map(|(m, df)| (diag::parse_free(m), diag::parse_df(df))).unwrap_or((None, None));
+    let (mem, disk) = diag::distro_usage(paths, d);
     json!({
         "home": {"path": paths.home, "drive": mb(diag::disk_space(&paths.home))},
         "vhdx": {"path": vhdx, "size_mb": vhdx_mb},
