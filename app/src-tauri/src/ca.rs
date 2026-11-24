@@ -219,7 +219,7 @@ mod tests {
     #[test]
     #[ignore]
     fn write_root_and_caddyfile_for_manual_check() {
-        use crate::services::{caddyfile, CaddyFiles, Route};
+        use crate::services::{caddyfile, CaddyFiles, Route, WebPorts};
         let home = std::path::PathBuf::from(std::env::var("KONAK_CA_CHECK_DIR").expect("set KONAK_CA_CHECK_DIR"));
         let paths = Paths { home: home.clone(), distro: String::new(), bin: home.clone(), media: home.clone(), photos: home.clone() };
         ensure(&paths).unwrap();
@@ -228,7 +228,7 @@ mod tests {
         let routes = [Route { id: "test".into(), name: "test".into(), port: 47199, https: true }];
         let (cert, key, site) = (paths.ca_cert(), paths.ca_key(), paths.site_dir());
         let files = CaddyFiles { storage: &paths.caddy_storage(), site: &site, ca: Some((&cert, &key)) };
-        let c = caddyfile("127.0.0.1", &routes, &files).replace(":443 {", ":18443 {").replace(":80 {", ":18080 {");
+        let c = caddyfile("127.0.0.1", &routes, &files, WebPorts { http: 18080, https: 18443 });
         // A name outside .local, which the name constraint must make clients reject.
         let c = c + "https://outside.example:18443 {\n\tbind 127.0.0.1\n\ttls internal\n\trespond \"outside\"\n}\n";
         std::fs::write(home.join("Caddyfile"), c).unwrap();

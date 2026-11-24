@@ -79,6 +79,9 @@ struct Status {
     repairing: bool,
     repair_error: Option<String>,
     summary: Option<Summary>,
+    /// `{http, https, port80_owner}`: 80/443, or 47080/47443 while another program holds port 80
+    /// (then `port80_owner` names it when known, e.g. `httpd.exe (pid 1234)`).
+    web_ports: services::WebStatus,
 }
 
 fn build_status(k: &Konak) -> Status {
@@ -86,6 +89,7 @@ fn build_status(k: &Konak) -> Status {
         Ok(s) => (s, None),
         Err(e) => (State::default(), Some(e)),
     };
+    let web = k.sup.web_status();
     let rt = k.rt.lock().unwrap();
     let steps = STEPS
         .iter()
@@ -110,7 +114,7 @@ fn build_status(k: &Konak) -> Status {
         error: rt.error.clone().or(load_error),
         reboot_needed: s.reboot_pending && !rt.running,
         done: s.done,
-        url: s.done.then(|| format!("http://{}.local", services::HOME_NAME)),
+        url: s.done.then(|| web.ports().url(false, services::HOME_NAME)),
         network_category: rt.preflight.as_ref().map(|p| p.network_category.clone()),
         firewall_missing: rt.firewall_missing,
         repairing: rt.repairing,
@@ -121,6 +125,7 @@ fn build_status(k: &Konak) -> Status {
             reboots: s.reboots,
             download_mb: s.rx_total as f64 / 1_048_576.0,
         }),
+        web_ports: web,
     }
 }
 
@@ -326,6 +331,47 @@ fn spawn_op(app: AppHandle, id: String, op: &'static str, f: impl FnOnce(&Paths)
     Ok(())
 }
 
+/// The supervisor's re-render for new web ports, run as app operations: every claimed app is busy
+/// meanwhile (the panel shows it restarting, op `restart`, and refuses other operations on it), and
+/// an operation already running on one of them postpones the whole re-render (the supervisor
+/// retries a minute later), so two renders of one app never overlap.
+fn rerender_for_ports(app: &AppHandle, ports: services::WebPorts) -> Result<(), String> {
+    let k = app.try_state::<Konak>().ok_or("not ready")?;
+    let state = State::try_load(&k.paths)?;
+    if state.rendered_ports == ports {
+        return Ok(());
+    }
+    let ids: Vec<String> = state.apps.iter().filter(|a| a.claimed).map(|a| a.id.clone()).collect();
+    {
+        let mut busy = k.busy.lock().unwrap();
+        if let Some(id) = ids.iter().find(|id| busy.contains(*id)) {
+            return Err(format!("{id} has an operation in progress"));
+        }
+        busy.extend(ids.iter().cloned());
+    }
+    let progress = |id: &str, state: &'static str, error: Option<String>| {
+        let _ = app.emit("app-progress", AppProgress { id: id.to_string(), op: "restart", state, error });
+    };
+    for id in &ids {
+        progress(id, "running", None);
+    }
+    let result = apps::rerender_for_ports(&k.paths, ports, &|id, r| {
+        k.busy.lock().unwrap().remove(id);
+        match r {
+            Ok(()) => progress(id, "done", None),
+            Err(e) => progress(id, "failed", Some(e.clone())),
+        }
+    });
+    // Apps it skipped (left the catalog) are released too.
+    let mut busy = k.busy.lock().unwrap();
+    for id in &ids {
+        if busy.remove(id) {
+            progress(id, "done", None);
+        }
+    }
+    result
+}
+
 /// Runs blocking work off the main thread for async commands.
 async fn blocking<T: Send + 'static>(app: AppHandle, f: impl FnOnce(&Paths) -> T + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(move || f(&app.state::<Konak>().paths)).await.map_err(|e| e.to_string())
@@ -481,6 +527,15 @@ pub fn run() {
         .setup(move |app| {
             let paths = Paths::new(app.path().resource_dir()?);
             let sup = Supervisor::new(paths.clone());
+            // Port switches update the open window; the apps' settings follow as app operations.
+            let handle = app.handle().clone();
+            sup.on_change(move || {
+                if handle.try_state::<Konak>().is_some() {
+                    emit(&handle);
+                }
+            });
+            let handle = app.handle().clone();
+            sup.set_rerender(move |_, ports| rerender_for_ports(&handle, ports));
             // A damaged state.json is left alone: nothing starts, and the window shows the error.
             let mut state = State::try_load(&paths).unwrap_or_default();
 

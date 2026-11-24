@@ -4,6 +4,7 @@
 
 use crate::installer::now;
 use crate::paths::Paths;
+use crate::services::WebPorts;
 use crate::shell::{self, tail};
 use serde::{Deserialize, Serialize};
 use std::os::windows::ffi::OsStrExt;
@@ -98,6 +99,11 @@ pub struct Heartbeat {
     pub https_available: bool,
     #[serde(default)]
     pub caddy_failures: u32,
+    /// Ports Caddy serves on; heartbeats from before the port fallback were always 80/443.
+    #[serde(default)]
+    pub web_ports: WebPorts,
+    #[serde(default)]
+    pub port80_owner: Option<String>,
 }
 
 impl Heartbeat {
@@ -258,23 +264,45 @@ pub struct NetFacts {
     pub firewall: Vec<FwProgram>,
     #[serde(default)]
     pub port80: Vec<Listener>,
+    /// Listeners on the fallback HTTP port (`WebPorts::FALLBACK.http`).
+    #[serde(default)]
+    pub fallback_http: Vec<Listener>,
 }
 
 fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// Adapter, firewall rules and port 80 listeners, through one read-only PowerShell run.
+/// Adapter, firewall rules, and port 80 and fallback port listeners, through one read-only
+/// PowerShell run.
 pub fn net_facts(paths: &Paths, ip: Option<&str>) -> Result<NetFacts, String> {
     let progs = [paths.caddy(), paths.mdns()].map(|p| ps_quote(&p.to_string_lossy())).join(",");
-    let cmd = format!("& {{\n{NET_PS1}\n}} -Ip {} -Programs {progs}", ps_quote(ip.unwrap_or("")));
+    let cmd = format!("& {{\n{NET_PS1}\n}} -Ip {} -Programs {progs} -FallbackPort {}", ps_quote(ip.unwrap_or("")), WebPorts::FALLBACK.http);
     let out = shell::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &cmd]);
     let json = out.text.lines().rev().find(|l| l.trim_start().starts_with('{')).unwrap_or("");
     let mut facts: NetFacts = serde_json::from_str(json).map_err(|e| format!("network facts unreadable: {e}: {}", tail(&out.text, 3)))?;
-    for l in &mut facts.port80 {
+    for l in facts.port80.iter_mut().chain(facts.fallback_http.iter_mut()) {
         l.image = process_image(l.pid);
     }
     Ok(facts)
+}
+
+/// Whether a listener on `ip` (or on all addresses) is Konak's Caddy: the heartbeat's pid, or the
+/// bundled caddy.exe.
+fn konak_listener(l: &Listener, ip: &str, caddy_pid: Option<u32>, caddy: &str) -> bool {
+    (l.address == ip || l.address == "0.0.0.0" || l.address == "::") && (Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(caddy)))
+}
+
+/// The other program holding port 80 on `ip`, as `httpd.exe (pid 1234)`. `None` when there is none
+/// or its image cannot be read (pid 4 is always the System process: http.sys, e.g. IIS).
+pub fn port80_owner(net: &NetFacts, ip: &str, caddy: &str) -> Option<String> {
+    let other = net.port80.iter().find(|l| (l.address == ip || l.address == "0.0.0.0" || l.address == "::") && !konak_listener(l, ip, None, caddy))?;
+    let image = match (&other.image, other.pid) {
+        (Some(path), _) => path.rsplit(['\\', '/']).next().unwrap_or(path).to_string(),
+        (None, 4) => "System".to_string(),
+        (None, _) => return None,
+    };
+    Some(format!("{image} (pid {})", other.pid))
 }
 
 /// Whether Konak's Caddy (the heartbeat's pid, or the bundled caddy.exe) listens on port 80 of the
@@ -290,14 +318,19 @@ pub struct Network {
     pub lan_ip: Option<String>,
     pub facts: NetFacts,
     pub konak_owns_port80: bool,
+    /// The ports the supervisor last served on (its heartbeat), and the port 80 owner it found.
+    pub web_ports: WebPorts,
+    pub port80_owner: Option<String>,
 }
 
 pub fn network(paths: &Paths) -> Result<Network, String> {
     let lan_ip = crate::services::lan_ip();
     let facts = net_facts(paths, lan_ip.as_deref())?;
-    let caddy_pid = heartbeat(paths).and_then(|h| h.pids.caddy);
+    let hb = heartbeat(paths);
+    let caddy_pid = hb.as_ref().and_then(|h| h.pids.caddy);
     let konak_owns_port80 = konak_owns_port80(&facts, lan_ip.as_deref(), caddy_pid, &paths.caddy().to_string_lossy());
-    Ok(Network { lan_ip, facts, konak_owns_port80 })
+    let (web_ports, port80_owner) = hb.map(|h| (h.web_ports, h.port80_owner)).unwrap_or_default();
+    Ok(Network { lan_ip, facts, konak_owns_port80, web_ports, port80_owner })
 }
 
 /// Output of a read-only script run as root in the distro, or `None` when it is not running.
@@ -595,8 +628,19 @@ pub fn port80(f: &Facts) -> Check {
     let relevant: Vec<&Listener> = net.port80.iter().filter(|l| l.address == *ip || l.address == "0.0.0.0" || l.address == "::").collect();
     let konak = |l: &Listener| Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(&f.caddy));
     let others: Vec<String> = relevant.iter().filter(|l| !konak(l)).map(|l| format!("{} pid {} {}", l.address, l.pid, l.image.as_deref().unwrap_or("(image unknown)"))).collect();
+    // Konak's Caddy on the fallback port: apps stay reachable there, so a warning, not a failure.
+    let fallback = WebPorts::FALLBACK;
+    let on_fallback = f.heartbeat.as_ref().is_some_and(|h| !h.stale(f.now) && h.web_ports.is_fallback()) && net.fallback_http.iter().any(|l| konak_listener(l, ip, caddy_pid, &f.caddy));
+    let serving = format!("Konak serves its apps on the fallback ports instead: {} (HTTPS port {})", fallback.url(false, "<name>"), fallback.https);
     if !others.is_empty() {
-        return check("port80_owner", "fail", format!("port 80 on {ip} held by another program: {}", others.join("; ")), "Stop or reconfigure that program so port 80 on the LAN IP is free; Konak's Caddy then takes it within 10 s.");
+        let evidence = format!("port 80 on {ip} held by another program: {}", others.join("; "));
+        if on_fallback {
+            return check("port80_owner", "warn", format!("{evidence}; {serving}"), "Stopping or reconfiguring that program frees port 80; Konak then returns to port 80 by itself within about 2 minutes.");
+        }
+        return check("port80_owner", "fail", evidence, "Stop or reconfigure that program so port 80 on the LAN IP is free; Konak's Caddy then takes it within 10 s.");
+    }
+    if on_fallback {
+        return check("port80_owner", "warn", format!("port 80 on {ip} is free again; {serving} until port 80 tests free twice, a minute apart"), "Nothing to do: Konak returns to port 80 by itself within about 2 minutes.");
     }
     match relevant.first() {
         Some(l) => check("port80_owner", "ok", format!("Konak's caddy (pid {}) listens on {}:80", l.pid, l.address), ""),
@@ -663,12 +707,13 @@ mod tests {
         Facts {
             now: 1000,
             distro: Distro { name: "konak".into(), exists: true, running: true, state: Some("Running".into()), version: Some(2) },
-            heartbeat: Some(Heartbeat { last_tick_unix: 995, lan_ip: Some("192.168.1.5".into()), names: vec!["konak".into()], pids: Pids { keepalive: Some(11), caddy: Some(22), mdns: Some(33) }, https_available: true, caddy_failures: 0 }),
+            heartbeat: Some(Heartbeat { last_tick_unix: 995, lan_ip: Some("192.168.1.5".into()), names: vec!["konak".into()], pids: Pids { keepalive: Some(11), caddy: Some(22), mdns: Some(33) }, https_available: true, caddy_failures: 0, web_ports: WebPorts::STANDARD, port80_owner: None }),
             lan_ip: Some("192.168.1.5".into()),
             net: Ok(NetFacts {
                 adapter: Some(Adapter { alias: "Ethernet".into(), description: "Intel(R) Ethernet I225-V".into(), index: 7, category: "Private".into() }),
                 firewall: vec![],
                 port80: vec![Listener { address: "192.168.1.5".into(), pid: 22, image: Some(r"C:\Konak\bin\caddy.exe".into()) }],
+                fallback_http: vec![],
             }),
             keepalive_image: Some(r"C:\Windows\System32\wsl.exe".into()),
             caddy: r"C:\Konak\bin\caddy.exe".into(),
@@ -800,6 +845,59 @@ mod tests {
         assert!(!konak_owns_port80(&net("192.168.1.5", 4, Some(r"C:\Windows\System32\httpd.exe")), ip, Some(22), caddy));
         assert!(!konak_owns_port80(&net("10.0.0.2", 22, None), ip, Some(22), caddy), "another address");
         assert!(!konak_owns_port80(&net("192.168.1.5", 22, None), None, Some(22), caddy), "no LAN IP");
+    }
+
+    #[test]
+    fn port80_taken_while_konak_serves_on_the_fallback_is_a_warning() {
+        let mut f = facts();
+        let httpd = Listener { address: "0.0.0.0".into(), pid: 4242, image: Some(r"C:\xampp\apache\bin\httpd.exe".into()) };
+        let net = f.net.as_mut().unwrap();
+        net.port80 = vec![httpd.clone()];
+        net.fallback_http = vec![Listener { address: "192.168.1.5".into(), pid: 22, image: None }];
+        f.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACK;
+        let c = port80(&f);
+        assert_eq!(c.status, "warn", "{c:?}");
+        assert!(c.evidence.contains("httpd.exe") && c.evidence.contains("pid 4242") && c.evidence.contains(":47080"), "{c:?}");
+        assert!(c.fix.contains("returns to port 80 by itself"), "{c:?}");
+        assert_eq!(port80_owner(f.net.as_ref().unwrap(), "192.168.1.5", &f.caddy).as_deref(), Some("httpd.exe (pid 4242)"));
+
+        // Caddy runs on neither port: still a failure.
+        f.net.as_mut().unwrap().fallback_http.clear();
+        assert_eq!(port80(&f).status, "fail");
+        // A stale heartbeat does not count as serving on the fallback.
+        let mut g = facts();
+        g.net.as_mut().unwrap().port80 = vec![httpd];
+        g.net.as_mut().unwrap().fallback_http = vec![Listener { address: "192.168.1.5".into(), pid: 22, image: None }];
+        g.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACK;
+        g.heartbeat.as_mut().unwrap().last_tick_unix = 0;
+        assert_eq!(port80(&g).status, "fail");
+
+        // Port 80 free again, switch-back pending: a warning that needs nothing.
+        let mut h = facts();
+        h.net.as_mut().unwrap().port80.clear();
+        h.net.as_mut().unwrap().fallback_http = vec![Listener { address: "0.0.0.0".into(), pid: 9, image: Some(r"c:\konak\bin\CADDY.EXE".into()) }];
+        h.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACK;
+        let c = port80(&h);
+        assert!(c.status == "warn" && c.evidence.contains("free again"), "{c:?}");
+    }
+
+    #[test]
+    fn port80_owner_names_the_program() {
+        let caddy = r"C:\Konak\bin\caddy.exe";
+        let net = |l: Vec<Listener>| NetFacts { port80: l, ..Default::default() };
+        let l = |address: &str, pid: u32, image: Option<&str>| Listener { address: address.into(), pid, image: image.map(String::from) };
+        assert_eq!(port80_owner(&net(vec![l("0.0.0.0", 4, None)]), "10.0.0.2", caddy).as_deref(), Some("System (pid 4)"));
+        assert_eq!(port80_owner(&net(vec![l("10.0.0.2", 77, None)]), "10.0.0.2", caddy), None, "image unknown");
+        assert_eq!(port80_owner(&net(vec![l("10.0.0.9", 77, Some(r"C:\x\iis.exe"))]), "10.0.0.2", caddy), None, "another address");
+        assert_eq!(port80_owner(&net(vec![l("10.0.0.2", 22, Some(caddy))]), "10.0.0.2", caddy), None, "Konak's own Caddy");
+        assert_eq!(port80_owner(&net(vec![]), "10.0.0.2", caddy), None);
+    }
+
+    #[test]
+    fn heartbeat_from_before_the_fallback_reads_as_80_and_443() {
+        let hb: Heartbeat = serde_json::from_str(r#"{"last_tick_unix":5,"lan_ip":"10.0.0.2","names":["konak"],"pids":{"keepalive":1,"caddy":2,"mdns":3},"https_available":true,"caddy_failures":0}"#).unwrap();
+        assert_eq!(hb.web_ports, WebPorts::STANDARD);
+        assert!(hb.port80_owner.is_none());
     }
 
     #[test]
