@@ -276,7 +276,8 @@
       "no_containers": "No containers found.",
       "col_name": "Name",
       "col_state": "State",
-      "col_health": "Health"
+      "col_health": "Health",
+      "stopped_note": "The app is stopped. Its settings and data are kept, and Start brings it back. Other devices cannot reach it while it is stopped."
     },
     "add": {
       "title": "Add an app",

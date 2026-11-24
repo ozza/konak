@@ -132,8 +132,13 @@
     </div>
   </div>
 
-  <div class="grid grid-cols-[repeat(auto-fit,minmax(min(380px,100%),1fr))] gap-4">
-    <Containers containers={app.containers} />
-    <RecentLogs id={app.id} {version} onopen={onlogs} />
-  </div>
+  {#if app.stopped}
+    <!-- Stop removes the containers (data stays), so there is nothing to list or log. -->
+    <p class="card text-[13px] text-muted">{t("panel.detail.stopped_note")}</p>
+  {:else}
+    <div class="grid grid-cols-[repeat(auto-fit,minmax(min(380px,100%),1fr))] gap-4">
+      <Containers containers={app.containers} />
+      <RecentLogs id={app.id} {version} onopen={onlogs} />
+    </div>
+  {/if}
 </section>

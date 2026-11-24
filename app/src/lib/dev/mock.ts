@@ -55,7 +55,7 @@ function info(id: string, name: string, status: AppInfo["status"], claimed = tru
   const m = catalog.find((c) => c.id === id)!;
   const url = `${m.https ? "https" : "http"}://${name}.local`;
   const local_url = `http://127.0.0.1:${m.port}`;
-  return { id, name, url, local_url, https: m.https, port: m.port, installed_unix: 1763800000, claimed, stopped: status === "stopped", status, containers: containers[id] ?? [] };
+  return { id, name, url, local_url, https: m.https, port: m.port, installed_unix: 1763800000, claimed, stopped: status === "stopped", status, containers: status === "stopped" ? [] : (containers[id] ?? []) };
 }
 
 let apps: AppInfo[] = q.has("empty")
@@ -145,7 +145,7 @@ export function installMock() {
           await wait(900);
           return checks();
         case "stop_app":
-          return op(a.id, "stop", () => ((apps = apps.map((x) => (x.id === a.id ? { ...x, stopped: true, status: "stopped" } : x))), null));
+          return op(a.id, "stop", () => ((apps = apps.map((x) => (x.id === a.id ? { ...x, stopped: true, status: "stopped", containers: [] } : x))), null));
         case "start_app":
           return op(a.id, "start", () => ((apps = apps.map((x) => (x.id === a.id ? { ...x, stopped: false, status: "running" } : x))), null));
         case "restart_app":
