@@ -85,9 +85,8 @@
     },
     "home_link": "konak.local",
     "home_link_label": "Open Konak's home page, konak.local",
-    "installed_title": "Your apps",
     "loading": "Loading…",
-    "empty": "No apps installed yet. Pick one below to install it.",
+    "empty": "No apps installed yet. Use Add app to install one.",
     "status": {
       "running": "Running",
       "starting": "Starting",
@@ -101,14 +100,18 @@
       "remove": "Removing…",
       "rename": "Renaming…",
       "restart": "Restarting…",
-      "claim": "Making it available…"
+      "claim": "Making it available…",
+      "start": "Starting…",
+      "stop": "Stopping…"
     },
     "failed": {
       "install": "Install failed. Konak stopped the app and kept its data, so you can try again.",
       "remove": "Removing failed.",
       "rename": "Renaming failed.",
       "restart": "Restart failed.",
-      "claim": "Could not make it available on your network."
+      "claim": "Could not make it available on your network.",
+      "start": "Start failed.",
+      "stop": "Stop failed."
     },
     "dismiss": "Dismiss",
     "actions": {
@@ -117,14 +120,17 @@
       "logs": "Logs",
       "rename": "Rename",
       "remove": "Remove",
-      "group": "Actions for {name}"
+      "group": "Actions for {name}",
+      "start": "Start",
+      "stop": "Stop"
     },
     "claim": {
-      "notice": "Finish setup on this PC first: create your admin account, then make it available on your network.",
+      "notice": "Create your admin account, then make it available on your network.",
       "local_only": "For now only this PC can open it, at {url}. Other devices cannot reach it yet.",
       "open_setup": "Open setup",
       "done": "Done, make it available",
-      "future_name": "Name on your network after setup: {name}"
+      "future_name": "Name on your network after setup: {name}",
+      "title": "Finish setup on this PC first"
     },
     "rename": {
       "label": "Name on your network",
@@ -151,11 +157,6 @@
       "cancel": "Cancel"
     },
     "catalog": {
-      "title": "Add apps",
-      "empty": "Every app in the catalog is installed.",
-      "ram": "Needs at least {amount} of memory",
-      "https": "Uses a secure connection (HTTPS). Each device needs Konak's certificate once, see below.",
-      "install": "Install",
       "install_label": "Install {name}"
     },
     "cert": {
@@ -191,6 +192,121 @@
     },
     "network": {
       "public": "This network is set to Public, so other devices at home cannot reach your apps. Switch it to Private in Windows network settings if this is your home network."
+    },
+    "header": {
+      "engine_running": "Engine running",
+      "engine_stopped": "Engine stopped",
+      "network_private": "Private network",
+      "network_public": "Public network",
+      "add": "Add app",
+      "settings": "Settings",
+      "theme": "Theme",
+      "theme_system": "Same as Windows",
+      "theme_light": "Light",
+      "theme_dark": "Dark"
+    },
+    "sidebar": {
+      "label": "This PC and apps",
+      "search": "Search apps",
+      "host": "Host",
+      "host_sub": "Engine and network",
+      "host_ok": "Healthy",
+      "host_attention": "Needs attention",
+      "apps": "Apps · {n}",
+      "no_match": "No app matches the search.",
+      "setup_needed": "Setup needed"
+    },
+    "host": {
+      "title": "This PC",
+      "subtitle": "Windows 11 · WSL 2 · Konak's own Linux environment with Podman",
+      "memory": "Memory",
+      "disk": "Disk",
+      "problems": "{n} checks need attention",
+      "all_ok": "All checks passed",
+      "actions": "Actions for this PC",
+      "diagnose": "Run diagnostics",
+      "diagnosing": "Running checks…",
+      "engine": "Engine",
+      "environment": "Environment",
+      "apps": "Apps",
+      "apps_n": "{n} installed",
+      "memory_disk": "Memory and disk",
+      "of": "{used} of {total}",
+      "free": "{free} free",
+      "data_drive": "Konak's drive",
+      "no_usage": "Usage shows while the engine is running.",
+      "profile": "Profile",
+      "adapter": "Adapter",
+      "lan_ip": "LAN address",
+      "firewall": "Firewall",
+      "firewall_ok": "Rules in place",
+      "firewall_missing": "Rules missing",
+      "diagnostics": "Diagnostics",
+      "not_run": "Not run yet.",
+      "check_ok": "Pass",
+      "check_warn": "Warning",
+      "check_fail": "Fail"
+    },
+    "diag": {
+      "forward_policy": "Shared network policy unchanged",
+      "stale_netavark": "No stale container network rules",
+      "keepalive": "Environment stays awake",
+      "port80_owner": "Port 80 belongs to Konak",
+      "lan_adapter": "Right network adapter"
+    },
+    "detail": {
+      "recent_logs": "Recent logs",
+      "full_logs": "Open full logs",
+      "logs_note": "Passwords and keys are hidden.",
+      "overview": "Overview",
+      "status": "Status",
+      "installed": "Installed",
+      "containers": "Containers",
+      "network": "Network",
+      "address": "Address",
+      "on_this_pc": "On this PC",
+      "reachable": "Reachable from",
+      "reach_all": "All devices at home",
+      "reach_pc": "This PC only, until setup is done",
+      "connection": "Connection",
+      "resources": "Resources",
+      "cpu": "CPU",
+      "no_stats": "No usage reported yet.",
+      "no_stats_stopped": "The app is stopped.",
+      "no_containers": "No containers found.",
+      "col_name": "Name",
+      "col_state": "State",
+      "col_health": "Health"
+    },
+    "add": {
+      "title": "Add an app",
+      "intro": "Each app runs in its own containers on this PC. Pick one, check what it needs, then install. You finish its setup on this PC before other devices can reach it.",
+      "filter": "Filter by category",
+      "installed": "Installed",
+      "needs": "Needs {amount}",
+      "install_label": "Install",
+      "already": "{name} is already installed.",
+      "go_to_app": "Go to the app",
+      "install_wait": "Large apps can take several minutes to download.",
+      "name_later": "You can rename it after it is installed.",
+      "before": "Before you install",
+      "req_memory": "Memory: needs {amount}",
+      "req_memory_unknown": "Konak's environment is not running, so free memory is unknown.",
+      "req_memory_ok": "Konak's environment has {total} of memory.",
+      "req_memory_low": "Konak's environment has only {total} of memory. The app may run slowly or fail.",
+      "req_network": "Network is Private",
+      "req_network_ok": "Other devices at home will be able to reach it.",
+      "req_network_public": "This network is Public, so other devices at home cannot reach it yet.",
+      "req_https": "Uses a secure connection (HTTPS)",
+      "req_https_detail": "Each device needs Konak's certificate once. See This PC."
+    },
+    "category": {
+      "all": "All",
+      "photos": "Photos",
+      "media": "Media",
+      "files": "Files",
+      "passwords": "Passwords",
+      "developer": "Developer"
     }
   },
   "apps": {

@@ -1,7 +1,7 @@
 // Dev-only stand-in for the Tauri backend, so the UI can be viewed in a plain browser with `npm run dev`.
 // Loaded from +layout.ts only when import.meta.env.DEV is true and the page is not inside Tauri; the
 // production build drops it. URL flags: ?setup (first-run flow), ?public (Public network notice),
-// ?empty (no apps installed). Forgejo starts unclaimed; newly installed apps are unclaimed too. Rename to "taken" to see the LAN conflict error.
+// ?empty (no apps installed), ?firewall (missing firewall rules), ?stale (a failing diagnostic). Forgejo starts unclaimed; newly installed apps are unclaimed too. Rename to "taken" to see the LAN conflict error.
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type { AppInfo, Manifest, Op } from "$lib/panel/api";
@@ -17,11 +17,45 @@ const catalog: Manifest[] = [
   { id: "forgejo", default_name: "git", port: 47105, https: false, min_ram_mb: 1024 },
 ];
 
+// Container names as compose shows them; health only where the image defines a check.
+const containers: Record<string, AppInfo["containers"]> = {
+  jellyfin: [{ name: "jellyfin-1", state: "running", health: "healthy" }],
+  immich: [
+    { name: "server-1", state: "exited", health: null },
+    { name: "machine-learning-1", state: "exited", health: null },
+    { name: "database-1", state: "exited", health: null },
+    { name: "redis-1", state: "exited", health: null },
+  ],
+  nextcloud: [
+    { name: "app-1", state: "running", health: "starting" },
+    { name: "db-1", state: "running", health: "healthy" },
+    { name: "redis-1", state: "running", health: null },
+    { name: "cron-1", state: "running", health: null },
+  ],
+  forgejo: [{ name: "server-1", state: "running", health: "healthy" }],
+};
+
+const GB = 1024 ** 3;
+const hostInfo = () => ({
+  distro: { name: "konak-podman", running: true },
+  memory: { used_bytes: 7.4 * GB, total_bytes: 64 * GB },
+  disk: { used_bytes: 118 * GB, total_bytes: 900 * GB },
+  data_drive: { free_bytes: 412 * GB, total_bytes: 1863 * GB },
+  network: { lan_ip: "192.168.1.20", adapter: "Ethernet", category: q.has("public") ? "Public" : "Private", firewall_ok: !firewallMissing, konak_owns_port80: true },
+});
+const checks = () => [
+  { check: "forward_policy", status: "ok", evidence: "FORWARD policy is ACCEPT", fix: "" },
+  { check: "stale_netavark", status: q.has("stale") ? "fail" : "ok", evidence: q.has("stale") ? "DNAT jump for port 47104 points at a dead network" : "every netavark rule belongs to a live network", fix: "Remove the stale rule with a network reload." },
+  { check: "keepalive", status: "ok", evidence: "keepalive process running for konak-podman", fix: "" },
+  { check: "port80_owner", status: "ok", evidence: "caddy.exe listens on 192.168.1.20:80", fix: "" },
+  { check: "lan_adapter", status: "ok", evidence: "Ethernet, 192.168.1.20", fix: "" },
+];
+
 function info(id: string, name: string, status: AppInfo["status"], claimed = true): AppInfo {
   const m = catalog.find((c) => c.id === id)!;
   const url = `${m.https ? "https" : "http"}://${name}.local`;
   const local_url = `http://127.0.0.1:${m.port}`;
-  return { id, name, url, local_url, https: m.https, port: m.port, installed_unix: 1763800000, claimed, status, containers: [] };
+  return { id, name, url, local_url, https: m.https, port: m.port, installed_unix: 1763800000, claimed, stopped: status === "stopped", status, containers: containers[id] ?? [] };
 }
 
 let apps: AppInfo[] = q.has("empty")
@@ -101,6 +135,19 @@ export function installMock() {
             apps = [...apps, info(a.id, m.default_name, "starting", false)];
             return null;
           });
+        case "app_stats":
+          return apps
+            .filter((x) => x.status !== "stopped")
+            .map((x, i) => ({ id: x.id, cpu_percent: [2.1, 31.4, 0.8, 6.3][i % 4], mem_bytes: [620, 410, 180, 1900][i % 4] * 1_048_576 }));
+        case "host_info":
+          return hostInfo();
+        case "diagnose":
+          await wait(900);
+          return checks();
+        case "stop_app":
+          return op(a.id, "stop", () => ((apps = apps.map((x) => (x.id === a.id ? { ...x, stopped: true, status: "stopped" } : x))), null));
+        case "start_app":
+          return op(a.id, "start", () => ((apps = apps.map((x) => (x.id === a.id ? { ...x, stopped: false, status: "running" } : x))), null));
         case "restart_app":
           return op(a.id, "restart", () => null);
         case "claim_app":

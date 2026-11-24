@@ -3,6 +3,7 @@
   import { encode } from "uqr";
   import { t } from "$lib/i18n";
   import { CERT_URL, errorText, type CaInfo, type ErrorText } from "./api";
+  import Icon from "./Icon.svelte";
 
   let ca = $state<CaInfo | null>(null);
   let caError = $state<ErrorText | null>(null);
@@ -35,8 +36,8 @@
   }
 </script>
 
-<section aria-labelledby="cert-title" class="flex flex-col gap-4 rounded-md border border-border bg-panel p-4">
-  <h2 id="cert-title" class="text-lg font-semibold">{t("panel.cert.title")}</h2>
+<section aria-labelledby="cert-title" class="card gap-4">
+  <h2 id="cert-title" class="flex items-center gap-2 text-base font-semibold"><Icon name="lock" />{t("panel.cert.title")}</h2>
   <p class="text-sm">{t("panel.cert.what")}</p>
 
   <div class="flex flex-col gap-4 sm:flex-row sm:items-start">

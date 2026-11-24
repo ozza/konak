@@ -13,12 +13,25 @@ export type AppInfo = {
   port: number;
   installed_unix: number;
   claimed: boolean;
+  /** Stopped by the user; stays stopped across restarts until started again. */
+  stopped: boolean;
   status: AppStatus;
   containers: { name: string; state: string; health: string | null }[];
 };
 export type Manifest = { id: string; default_name: string; port: number; https: boolean; min_ram_mb: number };
 export type CaInfo = { path: string; fingerprint: string };
-export type Op = "install" | "remove" | "rename" | "restart" | "claim";
+export type Op = "install" | "remove" | "rename" | "restart" | "claim" | "stop" | "start";
+export type AppStats = { id: string; cpu_percent: number; mem_bytes: number };
+type Usage = { used_bytes: number; total_bytes: number };
+export type HostInfo = {
+  distro: { name: string; running: boolean };
+  /** Inside Konak's distro; null while it is not running. */
+  memory: Usage | null;
+  disk: Usage | null;
+  data_drive: { free_bytes: number; total_bytes: number } | null;
+  network: { lan_ip: string | null; adapter: string | null; category: string | null; firewall_ok: boolean; konak_owns_port80: boolean };
+};
+export type Check = { check: string; status: "ok" | "warn" | "fail"; evidence: string; fix: string };
 export type AppProgress = { id: string; op: Op; state: "running" | "done" | "failed"; error: string | null };
 /** A backend error: `message` when it is a known error code, otherwise `details` holds technical text. */
 export type ErrorText = { message: string | null; details: string | null };
@@ -38,6 +51,33 @@ export function appDescription(id: string): string | null {
   const key = `apps.${id}.description`;
   const text = t(key);
   return text === key ? null : text;
+}
+
+/** Catalog category, the key under `panel.category`. */
+export const CATEGORY: Record<string, string> = {
+  immich: "photos",
+  jellyfin: "media",
+  nextcloud: "files",
+  vaultwarden: "passwords",
+  forgejo: "developer",
+};
+
+/** Tile color behind an app's initial; white text passes 4.5:1 on each. */
+const TILE: Record<string, string> = {
+  immich: "#7c3aed",
+  jellyfin: "#0e7490",
+  nextcloud: "#1d4ed8",
+  vaultwarden: "#475569",
+  forgejo: "#c2410c",
+};
+export const tileColor = (id: string) => TILE[id] ?? "#475569";
+
+/** 1536 MiB -> "1.5 GB", 300 MiB -> "300 MB" (binary units, shown with the usual short names). */
+export function formatBytes(bytes: number): string {
+  const mb = bytes / 1_048_576;
+  if (mb < 1024) return `${Math.round(mb)} MB`;
+  const gb = mb / 1024;
+  return `${gb < 10 ? Math.round(gb * 10) / 10 : Math.round(gb)} GB`;
 }
 
 export function errorText(error: unknown): ErrorText {
