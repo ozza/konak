@@ -223,7 +223,11 @@ fn distro_cmd(paths: &Paths, verb: &str) -> Result<String, String> {
 const STOP_CONTAINERS_SH: &str = r#"set -uo pipefail
 timeout 120 systemctl is-system-running --wait >/dev/null 2>&1 || true
 command -v podman >/dev/null || { echo 'podman not installed, nothing to stop'; exit 0; }
-if out=$(podman stop --all --time 15 2>&1); then echo "podman stop --all: $(printf '%s' "$out" | grep -c .) containers stopped"; else echo "podman stop --all failed: $out"; exit 1; fi
+err=$(mktemp)
+# stdout has one line per stopped container; warnings (a container killed after the timeout) go to stderr.
+if out=$(podman stop --all --time 15 2>"$err"); then echo "podman stop --all: $(printf '%s' "$out" | grep -c .) containers stopped"; else echo "podman stop --all failed: $out $(tr '\n' ' ' <"$err")"; rm -f "$err"; exit 1; fi
+[ -s "$err" ] && echo "podman stop warnings: $(tr '\n' ' ' <"$err")"
+rm -f "$err"
 if out=$(podman network prune -f 2>&1); then echo "podman network prune: $(printf '%s' "$out" | grep -c .) networks removed"; else echo "podman network prune failed: $out"; exit 1; fi
 "#;
 
