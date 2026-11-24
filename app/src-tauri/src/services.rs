@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn unclaimed_apps_get_no_route() {
         use crate::installer::InstalledApp;
-        let app = |id: &str, name: &str, claimed| InstalledApp { id: id.into(), name: name.into(), installed_unix: 0, claimed };
+        let app = |id: &str, name: &str, claimed| InstalledApp { id: id.into(), name: name.into(), installed_unix: 0, claimed, stopped: false };
         let mut s = State::default();
         s.apps = vec![app("jellyfin", "movies", true), app("forgejo", "git", false)];
         let r = routes(&s);
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn a_duplicate_name_drops_only_the_later_route() {
         use crate::installer::InstalledApp;
-        let app = |id: &str, name: &str| InstalledApp { id: id.into(), name: name.into(), installed_unix: 0, claimed: true };
+        let app = |id: &str, name: &str| InstalledApp { id: id.into(), name: name.into(), installed_unix: 0, claimed: true, stopped: false };
         let mut s = State::default();
         s.apps = vec![app("jellyfin", "media"), app("immich", "media"), app("forgejo", "konak"), app("nextcloud", "cloud")];
         let (r, skipped) = routes_checked(&s);

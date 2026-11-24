@@ -341,6 +341,12 @@ async fn list_apps(app: AppHandle) -> Result<Vec<apps::AppInfo>, String> {
     blocking(app, apps::list).await
 }
 
+/// CPU and memory per installed app; empty while the distro is not running (never starts it).
+#[tauri::command]
+async fn app_stats(app: AppHandle) -> Result<Vec<apps::AppStats>, String> {
+    blocking(app, apps::stats).await?
+}
+
 #[tauri::command]
 fn install_app(app: AppHandle, id: String) -> Result<(), String> {
     catalog::get(&id).ok_or("unknown_app")?;
@@ -376,8 +382,40 @@ fn restart_app(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn stop_app(app: AppHandle, id: String) -> Result<(), String> {
+    let id2 = id.clone();
+    spawn_op(app, id, "stop", move |p| apps::stop(p, &id2))
+}
+
+#[tauri::command]
+fn start_app(app: AppHandle, id: String) -> Result<(), String> {
+    let id2 = id.clone();
+    spawn_op(app, id, "start", move |p| apps::start(p, &id2))
+}
+
+#[tauri::command]
 async fn app_logs(app: AppHandle, id: String, lines: Option<u32>) -> Result<String, String> {
     blocking(app, move |p| apps::logs(p, &id, lines.unwrap_or(200))).await?
+}
+
+/// Distro, memory, disk and network facts for the panel's "This PC" view. Read-only; never starts
+/// the distro (memory and disk are null while it is stopped).
+#[tauri::command]
+async fn host_info(app: AppHandle) -> Result<serde_json::Value, String> {
+    let category = app.state::<Konak>().rt.lock().unwrap().preflight.as_ref().map(|p| p.network_category.clone());
+    blocking(app, move |p| diag::host_info(p, category)).await
+}
+
+/// The MCP `diagnose` checks, redacted the same way. Never fixes anything or starts the distro.
+#[tauri::command]
+async fn diagnose(app: AppHandle) -> Result<Vec<diag::Check>, String> {
+    blocking(app, |p| {
+        let facts = diag::gather(p);
+        // Secret values are read only from a running distro, as the MCP server does.
+        let r = if facts.distro.running { redact::Redactor::load(p) } else { redact::Redactor::new(vec![]) };
+        diag::diagnose(&facts).into_iter().map(|c| diag::Check { evidence: r.apply(&c.evidence), fix: r.apply(&c.fix), ..c }).collect()
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -539,12 +577,17 @@ pub fn run() {
             restart_pc,
             list_catalog,
             list_apps,
+            app_stats,
             install_app,
             remove_app,
             rename_app,
             claim_app,
             restart_app,
+            stop_app,
+            start_app,
             app_logs,
+            host_info,
+            diagnose,
             ca_info,
             trust_ca_on_this_pc
         ])

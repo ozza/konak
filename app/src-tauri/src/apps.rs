@@ -53,6 +53,8 @@ pub struct AppInfo {
     pub port: u16,
     pub installed_unix: u64,
     pub claimed: bool,
+    /// Stopped by the user; it stays stopped across distro restarts and reboots until started.
+    pub stopped: bool,
     /// running | starting | unhealthy | stopped | missing (no containers) | unknown (distro unreadable)
     pub status: &'static str,
     pub containers: Vec<Container>,
@@ -75,13 +77,17 @@ struct PsEntry {
 /// Containers grouped by compose project (= app id), from `podman ps -a --format json` output.
 pub fn parse_ps(json: &str) -> Result<HashMap<String, Vec<Container>>, String> {
     let entries: Vec<PsEntry> = serde_json::from_str(json.trim()).map_err(|e| format!("podman ps output unreadable: {e}"))?;
+    Ok(group_ps(entries))
+}
+
+fn group_ps(entries: Vec<PsEntry>) -> HashMap<String, Vec<Container>> {
     let mut by_project: HashMap<String, Vec<Container>> = HashMap::new();
     for e in entries {
         let Some(project) = e.labels.as_ref().and_then(|l| l.get("com.docker.compose.project")) else { continue };
         let health = ["unhealthy", "healthy", "starting"].into_iter().find(|h| e.status.contains(&format!("({h})"))).map(String::from);
         by_project.entry(project.clone()).or_default().push(Container { name: e.names.join(","), state: e.state, health });
     }
-    Ok(by_project)
+    by_project
 }
 
 pub fn status_of(containers: &[Container]) -> &'static str {
@@ -97,6 +103,107 @@ pub fn status_of(containers: &[Container]) -> &'static str {
     } else {
         "running"
     }
+}
+
+/// CPU and memory of one app: its running containers summed.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AppStats {
+    pub id: String,
+    pub cpu_percent: f64,
+    pub mem_bytes: u64,
+}
+
+/// One row of `podman stats --format json`. Podman 5 prints strings ("0.17%", "4.76MB / 67.3GB");
+/// other versions print numbers (percent, bytes) under the Go field names.
+#[derive(Deserialize)]
+struct StatsEntry {
+    #[serde(default, alias = "Name")]
+    name: String,
+    #[serde(default, alias = "CPU")]
+    cpu_percent: serde_json::Value,
+    #[serde(default, alias = "MemUsage")]
+    mem_usage: serde_json::Value,
+}
+
+/// A size as podman or docker prints it: `4.76MB`, `512kB`, `1.5GiB`, `0B`.
+fn parse_size(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let n: f64 = s[..split].parse().ok()?;
+    let unit = match s[split..].trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "kb" | "k" => 1e3,
+        "mb" => 1e6,
+        "gb" => 1e9,
+        "tb" => 1e12,
+        "kib" => 1024.0,
+        "mib" => 1024.0 * 1024.0,
+        "gib" => 1024.0 * 1024.0 * 1024.0,
+        "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some(n * unit)
+}
+
+fn cpu_of(v: &serde_json::Value) -> f64 {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+        serde_json::Value::String(s) => s.trim().trim_end_matches('%').trim().parse().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+/// Used memory in bytes: a number, or the part before ` / ` of `"used / limit"`.
+fn mem_of(v: &serde_json::Value) -> u64 {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) as u64,
+        serde_json::Value::String(s) => parse_size(s.split('/').next().unwrap_or("")).unwrap_or(0.0).round() as u64,
+        _ => 0,
+    }
+}
+
+/// The first JSON value of `text`; anything after it (stderr warnings appended by `distro_script`)
+/// is ignored. Empty text is `None`.
+fn first_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<Option<T>, String> {
+    serde_json::Deserializer::from_str(text).into_iter::<T>().next().transpose().map_err(|e| e.to_string())
+}
+
+/// Sums `podman stats --format json` rows per compose project, using the container names of
+/// `parse_ps` output to find each row's project. Rows of containers outside any project are left
+/// out. Sorted by app id.
+pub fn aggregate_stats(stats_json: &str, ps: &HashMap<String, Vec<Container>>) -> Result<Vec<AppStats>, String> {
+    let rows: Vec<StatsEntry> = first_json(stats_json).map_err(|e| format!("podman stats output unreadable: {e}"))?.unwrap_or_default();
+    let project_of: HashMap<&str, &str> = ps.iter().flat_map(|(p, cs)| cs.iter().flat_map(|c| c.name.split(',')).map(move |n| (n, p.as_str()))).collect();
+    let mut sums: HashMap<&str, AppStats> = HashMap::new();
+    for r in &rows {
+        let Some(&project) = project_of.get(r.name.as_str()) else { continue };
+        let s = sums.entry(project).or_insert_with(|| AppStats { id: project.to_string(), cpu_percent: 0.0, mem_bytes: 0 });
+        s.cpu_percent += cpu_of(&r.cpu_percent);
+        s.mem_bytes += mem_of(&r.mem_usage);
+    }
+    let mut out: Vec<AppStats> = sums.into_values().collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// `podman stats` is skipped when nothing runs, so an empty engine is never an error.
+const STATS_SH: &str = "set -e\nif [ -n \"$(podman ps -q)\" ]; then podman stats --no-stream --format json; fi\necho '## ps'\npodman ps --format json\n";
+
+/// CPU and memory per installed app, from one `podman stats` call. Empty when the distro is not
+/// running: it is never started for this.
+pub fn stats(paths: &Paths) -> Result<Vec<AppStats>, String> {
+    if !crate::diag::distro(paths).running {
+        return Ok(vec![]);
+    }
+    let out = shell::distro_script(&paths.distro, STATS_SH, &[]);
+    if !out.ok {
+        return Err(format!("podman stats failed: {}", tail(&out.text, 3)));
+    }
+    let (stats, ps) = out.text.split_once("## ps").ok_or("podman stats output unreadable")?;
+    let entries: Vec<PsEntry> = first_json(ps).map_err(|e| format!("podman ps output unreadable: {e}"))?.unwrap_or_default();
+    let ps = group_ps(entries);
+    let installed = State::load(paths).apps;
+    Ok(aggregate_stats(stats, &ps)?.into_iter().filter(|s| installed.iter().any(|a| a.id == s.id)).collect())
 }
 
 fn podman_ps(paths: &Paths) -> Result<HashMap<String, Vec<Container>>, String> {
@@ -121,6 +228,12 @@ pub fn list(paths: &Paths) -> Vec<AppInfo> {
         .filter_map(|a| {
             let m = catalog::get(&a.id)?;
             let containers = ps.as_ref().map(|p| p.get(&a.id).cloned().unwrap_or_default());
+            // A user-stopped app has no containers (`stop`), which would otherwise read as missing.
+            let status = match containers.as_deref() {
+                Some(c) if a.stopped && !c.iter().any(|c| c.state == "running") => "stopped",
+                Some(c) => status_of(c),
+                None => "unknown",
+            };
             Some(AppInfo {
                 id: a.id.clone(),
                 name: a.name.clone(),
@@ -130,7 +243,8 @@ pub fn list(paths: &Paths) -> Vec<AppInfo> {
                 port: m.port,
                 installed_unix: a.installed_unix,
                 claimed: a.claimed,
-                status: containers.as_deref().map(status_of).unwrap_or("unknown"),
+                stopped: a.stopped,
+                status,
                 containers: containers.unwrap_or_default(),
             })
         })
@@ -289,13 +403,17 @@ pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
     let mut result = None;
     update_state(paths, |s| {
         s.rerender.retain(|r| r != id);
-        result = match s.apps.iter().find(|a| a.id == id) {
-            Some(a) => Some(a.clone()),
+        result = match s.apps.iter_mut().find(|a| a.id == id) {
+            // `up -d` has started it, so a repaired app is no longer stopped.
+            Some(a) => {
+                a.stopped = false;
+                Some(a.clone())
+            }
             // Removed while it was being repaired: a repair never brings an app back.
             None if repair => None,
             None => {
                 // New apps stay off the LAN until the user has created the admin account (`claim`).
-                let a = InstalledApp { id: id.into(), name: name.clone(), installed_unix: now(), claimed: false };
+                let a = InstalledApp { id: id.into(), name: name.clone(), installed_unix: now(), claimed: false, stopped: false };
                 s.apps.push(a.clone());
                 Some(a)
             }
@@ -350,6 +468,8 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
     update_state(paths, |s| {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.name = new_name.to_string();
+            // The re-render (`up -d`) has started it.
+            a.stopped = false;
         }
     })?;
     Ok(())
@@ -366,6 +486,8 @@ pub fn claim(paths: &Paths, id: &str) -> Result<(), String> {
     update_state(paths, |s| {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.claimed = true;
+            // The re-render (`up -d`) has started it.
+            a.stopped = false;
         }
     })?;
     Ok(())
@@ -377,8 +499,45 @@ fn compose(paths: &Paths, id: &str, args: &str) -> shell::Out {
     shell::distro_script(&paths.distro, &script, &[id])
 }
 
-pub fn restart(paths: &Paths, id: &str) -> Result<(), String> {
+fn set_stopped(paths: &Paths, id: &str, stopped: bool) -> Result<(), String> {
+    update_state(paths, |s| {
+        if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
+            a.stopped = stopped;
+        }
+    })
+}
+
+/// Stops an app so that it stays stopped. Its containers are removed (`down`; data, volumes and the
+/// rendered files are kept): konak-boot.service starts every container with a restart policy at each
+/// boot of the distro, and Podman does not remember a manual stop across boots, so a container that
+/// is merely stopped would come back after a distro restart or a reboot. With none left there is
+/// nothing to start, and this needs no change to the boot unit already written into existing distros.
+pub fn stop(paths: &Paths, id: &str) -> Result<(), String> {
     installed(paths, id)?;
+    let out = shell::distro_script(&paths.distro, REMOVE_SH, &[id, "keep"]);
+    crate::log(paths, &format!("stop {id}: {}", tail(&out.text, 2)));
+    if !out.ok {
+        return Err(redacted(paths, &format!("stop of {id} failed: {}", tail(&out.text, 6))));
+    }
+    set_stopped(paths, id, true)
+}
+
+/// Recreates a stopped app's containers from its rendered compose file and `.env`.
+pub fn start(paths: &Paths, id: &str) -> Result<(), String> {
+    installed(paths, id)?;
+    let out = compose(paths, id, "up -d --remove-orphans");
+    if !out.ok {
+        return Err(redacted(paths, &format!("start of {id} failed: {}", tail(&out.text, 6))));
+    }
+    set_stopped(paths, id, false)
+}
+
+/// A stopped app has no containers to restart, so restarting it starts it: the user asked for it to
+/// run, and a silent no-op would leave it stopped.
+pub fn restart(paths: &Paths, id: &str) -> Result<(), String> {
+    if installed(paths, id)?.stopped {
+        return start(paths, id);
+    }
     let out = compose(paths, id, "restart");
     if !out.ok {
         return Err(redacted(paths, &format!("restart of {id} failed: {}", tail(&out.text, 6))));
@@ -435,7 +594,7 @@ mod tests {
 
     fn state_with(apps: &[(&str, &str)]) -> State {
         let mut s = State::default();
-        s.apps = apps.iter().map(|(id, name)| InstalledApp { id: id.to_string(), name: name.to_string(), installed_unix: 0, claimed: true }).collect();
+        s.apps = apps.iter().map(|(id, name)| InstalledApp { id: id.to_string(), name: name.to_string(), installed_unix: 0, claimed: true, stopped: false }).collect();
         s
     }
 
@@ -456,7 +615,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("konak-claim-test-{}", std::process::id()));
         let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
         let mut s = State::default();
-        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: false });
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: false, stopped: false });
         s.save(&paths);
         let not_installed = claim(&paths, "immich").unwrap_err();
         // The distro does not exist, so the re-render with claimed_env fails.
@@ -469,11 +628,32 @@ mod tests {
     }
 
     #[test]
+    fn stop_and_start_change_the_flag_only_when_they_succeed() {
+        let home = std::env::temp_dir().join(format!("konak-stop-test-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let mut s = State::default();
+        s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: true, stopped: false });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true, stopped: true });
+        s.save(&paths);
+        let not_installed = stop(&paths, "immich").unwrap_err();
+        // The distro does not exist, so `down` and `up -d` fail.
+        let stop_failed = stop(&paths, "forgejo").is_err();
+        let start_failed = start(&paths, "jellyfin").is_err();
+        let restart_failed = restart(&paths, "jellyfin").unwrap_err();
+        let after = State::load(&paths);
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(not_installed, "not_installed");
+        assert!(stop_failed && start_failed);
+        assert!(restart_failed.starts_with("start of jellyfin failed"), "restart of a stopped app starts it: {restart_failed}");
+        assert!(!after.apps[0].stopped && after.apps[1].stopped);
+    }
+
+    #[test]
     fn a_reserved_name_cannot_be_taken_by_another_app() {
         let home = std::env::temp_dir().join(format!("konak-reserve-test-{}", std::process::id()));
         let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
         let mut s = State::default();
-        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true });
+        s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 1, claimed: true, stopped: false });
         s.save(&paths);
         let r = reserve(&paths, "forgejo", "code").unwrap();
         let clash = reserve(&paths, "immich", "code").err();
@@ -557,6 +737,44 @@ c");
         assert_eq!(status_of(&[]), "missing");
         assert_eq!(p["jellyfin"][0].health.as_deref(), Some("healthy"));
         assert!(parse_ps("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn stats_are_summed_per_app() {
+        let ps = parse_ps(
+            r#"[
+          {"Names":["immich_server"],"State":"running","Labels":{"com.docker.compose.project":"immich"}},
+          {"Names":["immich_postgres"],"State":"running","Labels":{"com.docker.compose.project":"immich"}},
+          {"Names":["jellyfin"],"State":"running","Labels":{"com.docker.compose.project":"jellyfin"}},
+          {"Names":["loose"],"State":"running","Labels":null}
+        ]"#,
+        )
+        .unwrap();
+        // Podman 5.4: strings with units, decimal sizes. Trailing stderr text is ignored.
+        let podman5 = r#"[
+         {"id": "3c816f05c85d", "name": "immich_server", "cpu_percent": "0.13%", "mem_usage": "715.9MB / 67.3GB", "pids": "81"},
+         {"id": "0fe1d646cde1", "name": "immich_postgres", "cpu_percent": "1.5%", "mem_usage": "6.009MB / 67.3GB"},
+         {"id": "5b8d97b9206d", "name": "jellyfin", "cpu_percent": "0.07%", "mem_usage": "512kB / 67.3GB"},
+         {"id": "aaaaaaaaaaaa", "name": "loose", "cpu_percent": "50%", "mem_usage": "1GB / 67.3GB"}
+        ]
+time="2026-11-24" level=warning msg="something""#;
+        let s = aggregate_stats(podman5, &ps).unwrap();
+        assert_eq!(s.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["immich", "jellyfin"]);
+        assert!((s[0].cpu_percent - 1.63).abs() < 1e-9, "{s:?}");
+        assert_eq!(s[0].mem_bytes, 715_900_000 + 6_009_000);
+        assert_eq!(s[1].mem_bytes, 512_000);
+
+        // Numbers (percent and bytes) under the Go field names, and binary units.
+        let numbers = r#"[{"Name": "jellyfin", "CPU": 2.25, "MemUsage": 1048576}, {"Name": "immich_server", "CPU": 0, "MemUsage": "1.5GiB / 16GiB"}]"#;
+        let s = aggregate_stats(numbers, &ps).unwrap();
+        assert_eq!(s, vec![AppStats { id: "immich".into(), cpu_percent: 0.0, mem_bytes: 1_610_612_736 }, AppStats { id: "jellyfin".into(), cpu_percent: 2.25, mem_bytes: 1_048_576 }]);
+
+        // Nothing running: no stats output at all.
+        assert!(aggregate_stats("", &ps).unwrap().is_empty());
+        assert!(aggregate_stats("[]", &ps).unwrap().is_empty());
+        assert!(aggregate_stats("not json", &ps).is_err());
+        assert_eq!(parse_size("0B"), Some(0.0));
+        assert_eq!(parse_size("12XB"), None);
     }
 
     #[test]

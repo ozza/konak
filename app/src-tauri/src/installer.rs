@@ -31,6 +31,10 @@ pub struct InstalledApp {
     /// entries from before this field were already exposed, so they load as claimed.
     #[serde(default = "claimed_by_default")]
     pub claimed: bool,
+    /// Stopped by the user (`apps::stop`): its containers are removed, data kept, so nothing starts
+    /// it again until `apps::start`. Older state files have no such field and load as running.
+    #[serde(default)]
+    pub stopped: bool,
 }
 
 fn claimed_by_default() -> bool {
@@ -130,7 +134,7 @@ impl State {
         let mut s: State = serde_json::from_str(text).map_err(|e| e.to_string())?;
         if let Some(name) = s.app_name.take() {
             if !s.apps.iter().any(|a| a.id == "jellyfin") {
-                s.apps.push(InstalledApp { id: "jellyfin".into(), name, installed_unix: s.finished_unix, claimed: true });
+                s.apps.push(InstalledApp { id: "jellyfin".into(), name, installed_unix: s.finished_unix, claimed: true, stopped: false });
                 s.rerender.push("jellyfin".into());
             }
         }
@@ -403,7 +407,7 @@ mod tests {
             "app_name":"jellyfin-2","done":true}"#;
         let s = State::from_json(old).unwrap();
         assert!(s.done);
-        assert_eq!(s.apps, vec![InstalledApp { id: "jellyfin".into(), name: "jellyfin-2".into(), installed_unix: 20, claimed: true }]);
+        assert_eq!(s.apps, vec![InstalledApp { id: "jellyfin".into(), name: "jellyfin-2".into(), installed_unix: 20, claimed: true, stopped: false }]);
         assert_eq!(s.rerender, vec!["jellyfin".to_string()]);
         let saved = serde_json::to_string(&s).unwrap();
         assert!(!saved.contains("app_name"));
@@ -416,8 +420,8 @@ mod tests {
     #[test]
     fn apps_saved_before_the_claim_step_load_as_claimed() {
         let s = State::from_json(r#"{"apps":[{"id":"immich","name":"photos","installed_unix":5}]}"#).unwrap();
-        assert!(s.apps[0].claimed);
-        let unclaimed = InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 6, claimed: false };
+        assert!(s.apps[0].claimed && !s.apps[0].stopped);
+        let unclaimed = InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 6, claimed: false, stopped: false };
         let back: InstalledApp = serde_json::from_str(&serde_json::to_string(&unclaimed).unwrap()).unwrap();
         assert_eq!(back, unclaimed);
     }
@@ -438,7 +442,7 @@ mod tests {
     fn save_is_atomic_and_leaves_no_temp_files() {
         let paths = temp_paths("save");
         assert!(State::try_load(&paths).unwrap().apps.is_empty(), "missing file is a fresh state");
-        let mut s = State { done: true, apps: vec![InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: true }], ..State::default() };
+        let mut s = State { done: true, apps: vec![InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 1, claimed: true, stopped: false }], ..State::default() };
         s.save(&paths);
         s.apps[0].name = "code".into();
         s.save(&paths);
