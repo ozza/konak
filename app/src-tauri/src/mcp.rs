@@ -241,7 +241,7 @@ impl Server {
         self.run(move |p, d| logs(p, d, args)).await
     }
 
-    #[tool(description = "LAN networking: the LAN IP, its adapter and network category (Private/Public), whether Konak's firewall rules exist for caddy.exe and mdns-responder.exe, who owns port 80 on the LAN IP, and the web ports Konak serves on (80/443, or 47080/47443 while another program holds port 80).")]
+    #[tool(description = "LAN networking: the LAN IP, its adapter and network category (Private/Public), whether Konak's firewall rules exist for caddy.exe and mdns-responder.exe, who owns port 80 on the LAN IP, and the web ports Konak serves on (80/443, or a fallback pair such as 18080/18443 while another program holds port 80).")]
     async fn network_check(&self) -> Result<String, String> {
         self.run(|p, _| network(p)).await
     }
@@ -256,7 +256,7 @@ impl Server {
         self.run(|p, d| Ok(resources(p, d))).await
     }
 
-    #[tool(description = "Runs the known failure checks and reports ok/warn/fail with evidence and a one-line suggested fix each: shared-namespace FORWARD policy, stale netavark rules, distro keepalive, port 80 owner, LAN adapter choice. Never fixes anything.")]
+    #[tool(description = "Runs the known failure checks and reports ok/warn/fail with evidence and a one-line suggested fix each: shared-namespace FORWARD policy, stale netavark rules, distro keepalive, port 80 owner, LAN adapter choice, WSL networking mode (nat or mirrored) and its reserved port range. Never fixes anything.")]
     async fn diagnose(&self) -> Result<String, String> {
         self.run(|p, _| Ok(json!({"checks": diag::diagnose(&diag::gather(p))}))).await
     }
@@ -427,11 +427,11 @@ mod tests {
         let mut s = State::default();
         s.apps.push(InstalledApp { id: "vaultwarden".into(), name: "vault".into(), installed_unix: 1, claimed: true, stopped: false });
         s.save(&paths);
-        std::fs::write(paths.supervisor_file(), r#"{"last_tick_unix":1,"lan_ip":"10.0.0.2","web_ports":{"http":47080,"https":47443},"port80_owner":"httpd.exe (pid 7)"}"#).unwrap();
+        std::fs::write(paths.supervisor_file(), r#"{"last_tick_unix":1,"lan_ip":"10.0.0.2","web_ports":{"http":18080,"https":18443},"port80_owner":"httpd.exe (pid 7)"}"#).unwrap();
         let d = Distro { name: paths.distro.clone(), ..Default::default() };
         let v = status(&paths, &d);
         let _ = std::fs::remove_dir_all(&home);
-        assert_eq!(v["apps"][0]["url"], "https://vault.local:47443");
-        assert_eq!(v["heartbeat"]["web_ports"], json!({"http": 47080, "https": 47443}));
+        assert_eq!(v["apps"][0]["url"], "https://vault.local:18443");
+        assert_eq!(v["heartbeat"]["web_ports"], json!({"http": 18080, "https": 18443}));
     }
 }

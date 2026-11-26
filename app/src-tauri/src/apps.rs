@@ -44,7 +44,7 @@ pub struct Container {
 pub struct AppInfo {
     pub id: String,
     pub name: String,
-    /// The `.local` URL on the web ports Caddy serves on (`:47080`/`:47443` on the fallback); served
+    /// The `.local` URL on the web ports Caddy serves on (with the port on a fallback pair); served
     /// on the LAN only once the app is claimed.
     pub url: String,
     /// `http://127.0.0.1:<port>`, reachable from this PC only. Used to finish an unclaimed app's
@@ -215,7 +215,7 @@ fn podman_ps(paths: &Paths) -> Result<HashMap<String, Vec<Container>>, String> {
     parse_ps(&out.text)
 }
 
-/// The app's `.local` URL on `ports`: with `:47080` / `:47443` on the fallback, no port on 80/443.
+/// The app's `.local` URL on `ports`: with the port on a fallback pair, no port on 80/443.
 pub fn url(m: &Manifest, name: &str, ports: WebPorts) -> String {
     ports.url(m.https, name)
 }
@@ -841,23 +841,23 @@ time="2026-11-24" level=warning msg="something""#;
             let env = env_lines(catalog::get(id).unwrap(), "x", true, ports);
             env.lines().find_map(|l| l.strip_prefix(&format!("{key}="))).map(String::from)
         };
-        let fb = WebPorts::FALLBACK;
-        assert_eq!(line("nextcloud", fb, "OVERWRITEHOST").as_deref(), Some("x.local:47080"));
-        assert_eq!(line("nextcloud", fb, "OVERWRITECLIURL").as_deref(), Some("http://x.local:47080"));
+        let fb = WebPorts::FALLBACKS[0];
+        assert_eq!(line("nextcloud", fb, "OVERWRITEHOST").as_deref(), Some("x.local:18080"));
+        assert_eq!(line("nextcloud", fb, "OVERWRITECLIURL").as_deref(), Some("http://x.local:18080"));
         // Nextcloud checks trusted domains without the port; Forgejo's DOMAIN is a bare host too.
         assert_eq!(line("nextcloud", fb, "NEXTCLOUD_TRUSTED_DOMAINS").as_deref(), Some("x.local"));
         assert_eq!(line("forgejo", fb, "KONAK_HOST").as_deref(), Some("x.local"));
-        assert_eq!(line("forgejo", fb, "KONAK_URL").as_deref(), Some("http://x.local:47080"));
+        assert_eq!(line("forgejo", fb, "KONAK_URL").as_deref(), Some("http://x.local:18080"));
         // Vaultwarden is HTTPS: its DOMAIN (KONAK_URL in compose.yml) gets the HTTPS port.
-        assert_eq!(line("vaultwarden", fb, "KONAK_URL").as_deref(), Some("https://x.local:47443"));
-        assert_eq!(line("vaultwarden", fb, "KONAK_HOSTPORT").as_deref(), Some("x.local:47443"));
+        assert_eq!(line("vaultwarden", fb, "KONAK_URL").as_deref(), Some("https://x.local:18443"));
+        assert_eq!(line("vaultwarden", fb, "KONAK_HOSTPORT").as_deref(), Some("x.local:18443"));
         assert!(catalog::get("vaultwarden").unwrap().compose.contains("DOMAIN: ${KONAK_URL}"));
         assert!(catalog::get("forgejo").unwrap().compose.contains("ROOT_URL=${KONAK_URL}/"));
         // Back on 80/443 the port is dropped again.
         let std = WebPorts::STANDARD;
         assert_eq!(line("nextcloud", std, "OVERWRITEHOST").as_deref(), Some("x.local"));
         assert_eq!(line("vaultwarden", std, "KONAK_URL").as_deref(), Some("https://x.local"));
-        assert_eq!(url(catalog::get("jellyfin").unwrap(), "movies", fb), "http://movies.local:47080");
+        assert_eq!(url(catalog::get("jellyfin").unwrap(), "movies", fb), "http://movies.local:18080");
         assert_eq!(url(catalog::get("jellyfin").unwrap(), "movies", std), "http://movies.local");
         for m in catalog::all() {
             let env = env_lines(m, "x", true, fb);
@@ -877,7 +877,7 @@ time="2026-11-24" level=warning msg="something""#;
         // Already rendered for 80/443: nothing runs.
         let same = rerender_for_ports(&paths, WebPorts::STANDARD, &on_app);
         // Only an unclaimed app: nothing to render, the new ports are recorded.
-        let none_claimed = rerender_for_ports(&paths, WebPorts::FALLBACK, &on_app);
+        let none_claimed = rerender_for_ports(&paths, WebPorts::FALLBACKS[0], &on_app);
         let recorded = State::load(&paths).rendered_ports;
         // A claimed app whose render fails (no such distro): the ports are not recorded.
         let mut s = State::load(&paths);
@@ -888,9 +888,9 @@ time="2026-11-24" level=warning msg="something""#;
         let after = State::load(&paths);
         let _ = std::fs::remove_dir_all(&home);
         assert!(same.is_ok() && none_claimed.is_ok());
-        assert_eq!(recorded, WebPorts::FALLBACK);
+        assert_eq!(recorded, WebPorts::FALLBACKS[0]);
         assert!(failed.is_err());
-        assert_eq!(after.rendered_ports, WebPorts::FALLBACK, "retried as a whole later");
+        assert_eq!(after.rendered_ports, WebPorts::FALLBACKS[0], "retried as a whole later");
         assert!(after.apps[0].stopped, "a stopped app stays stopped");
         assert_eq!(*seen.borrow(), ["forgejo"]);
     }
