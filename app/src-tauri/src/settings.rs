@@ -228,7 +228,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    // Unique per call, not only per process: two threads writing the same file at once must not
+    // share a temp file (the second rename would find it gone: "os error 2").
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp{}-{seq}", std::process::id()));
     let result = (|| {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
@@ -345,6 +349,24 @@ pub mod dpapi {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_atomic_writes_of_one_file_all_succeed() {
+        let dir = std::env::temp_dir().join(format!("konak-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("state.json");
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let file = file.clone();
+                std::thread::spawn(move || (0..50).map(|j| write_atomic(&file, format!("{i}-{j}").as_bytes())).collect::<Vec<_>>())
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        // Rename onto a file another thread holds open can still fail on Windows; a vanished temp
+        // file (os error 2) must not happen any more.
+        assert!(results.iter().all(|r| r.as_ref().map_err(|e| e.kind()) != Err(std::io::ErrorKind::NotFound)), "{results:?}");
+    }
 
     pub fn temp_paths(tag: &str) -> Paths {
         let home = std::env::temp_dir().join(format!("konak-settings-{tag}-{}", std::process::id()));
