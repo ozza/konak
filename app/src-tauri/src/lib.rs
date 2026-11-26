@@ -869,7 +869,7 @@ async fn list_backups(app: AppHandle) -> Result<Vec<backup::BackupEntry>, String
 
 /// The manifest of a backup file; an empty `password` uses the stored one.
 #[tauri::command]
-async fn inspect_backup(app: AppHandle, path: String, password: String) -> Result<backup_format::Manifest, String> {
+async fn inspect_backup(app: AppHandle, path: String, password: String) -> Result<backup::Inspected, String> {
     blocking(app, move |p| backup::inspect(p, &path, &password)).await?
 }
 
@@ -913,11 +913,13 @@ impl restore::Host for RestoreHost {
 }
 
 /// Starts a restore; progress arrives as `restore-progress` events, the last one with a summary.
-/// An empty `password` uses the stored one.
+/// An empty `password` uses the stored one. `ca` (default false): also restore the backup's root
+/// CA, only on a Konak with no apps.
 #[tauri::command]
-fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<String>, replace: bool, photos: bool, media: bool) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<String>, replace: bool, photos: bool, media: bool, ca: Option<bool>) -> Result<(), String> {
     let paths = app.state::<Konak>().paths.clone();
-    let req = restore::Request { path, password, apps, replace, photos, media };
+    let req = restore::Request { path, password, apps, replace, photos, media, ca: ca.unwrap_or(false) };
     restore::precheck(&paths, &req)?;
     let guard = backup::Guard::acquire()?;
     log(&paths, &format!("restore of {} starting", req.path));

@@ -19,6 +19,17 @@ pub struct Root {
 
 pub fn generate_root(common_name: &str) -> Result<Root, String> {
     let key = KeyPair::generate().map_err(|e| e.to_string())?;
+    let mut p = root_params(common_name);
+    // A serial derived from the new key: unique per root, and it names the cert for `certutil -delstore`.
+    let mut serial = Sha256::digest(key.serialize_der())[..16].to_vec();
+    serial[0] = (serial[0] & 0x7f) | 0x40; // positive, and no leading zero byte to strip in DER
+    p.serial_number = Some(SerialNumber::from_slice(&serial));
+    let cert = p.self_signed(&key).map_err(|e| e.to_string())?;
+    Ok(Root { cert_pem: cert.pem(), key_pem: key.serialize_pem() })
+}
+
+/// What every Konak root carries (`check_restored_root` accepts exactly this).
+fn root_params(common_name: &str) -> CertificateParams {
     let mut p = CertificateParams::default();
     p.distinguished_name.push(DnType::CommonName, common_name);
     p.distinguished_name.push(DnType::OrganizationName, "Konak");
@@ -37,12 +48,7 @@ pub fn generate_root(common_name: &str) -> Result<Root, String> {
     let now = OffsetDateTime::now_utc();
     p.not_before = now - Duration::days(1);
     p.not_after = now + Duration::days(3650);
-    // A serial derived from the new key: unique per root, and it names the cert for `certutil -delstore`.
-    let mut serial = Sha256::digest(key.serialize_der())[..16].to_vec();
-    serial[0] = (serial[0] & 0x7f) | 0x40; // positive, and no leading zero byte to strip in DER
-    p.serial_number = Some(SerialNumber::from_slice(&serial));
-    let cert = p.self_signed(&key).map_err(|e| e.to_string())?;
-    Ok(Root { cert_pem: cert.pem(), key_pem: key.serialize_pem() })
+    p
 }
 
 /// Current user's SID, for ACLs that do not depend on how the account name is spelled.
@@ -106,29 +112,114 @@ fn pem_der(pem: &str) -> Result<Vec<u8>, String> {
     base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| e.to_string())
 }
 
-/// Whether `key_pem` is a private key and `cert_pem` a certificate carrying its public half.
-pub fn pair_matches(cert_pem: &str, key_pem: &str) -> bool {
-    let (Ok(key), Ok(der)) = (KeyPair::from_pem(key_pem), pem_der(cert_pem)) else { return false };
-    let public = key.public_key_raw();
-    cert_pem.starts_with("-----BEGIN CERTIFICATE-----") && der.windows(public.len()).any(|w| w == public)
+/// SHA-256 of a DER certificate as colon-separated upper-case hex.
+fn fingerprint_of(der: &[u8]) -> String {
+    Sha256::digest(der).iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")
 }
 
-/// Installs a root brought back by a restore, the way `ensure` writes a new one (folder and key
-/// locked down to the current user, the certificate renamed into place last). Caddy's intermediate
-/// and the leaves it issued under the old root are deleted, so it derives new ones from this root
-/// at its next start.
-pub fn install_root(paths: &Paths, cert_pem: &str, key_pem: &str) -> Result<(), String> {
-    let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if !pair_matches(cert_pem, key_pem) {
-        return Err("the root certificate and key do not match".into());
+/// The DER of a file that holds exactly one PEM certificate block and nothing else (whitespace
+/// around it aside).
+fn single_pem_der(pem: &str) -> Result<Vec<u8>, String> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let body = pem.trim().strip_prefix(BEGIN).and_then(|r| r.strip_suffix(END)).ok_or("not one PEM certificate block")?;
+    if body.contains("-----") {
+        return Err("more than one PEM block".into());
     }
+    let b64: String = body.split_whitespace().collect();
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| format!("bad base64: {e}"))
+}
+
+/// A root a restore may install: the PEM files as Konak writes them again, and its fingerprint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedRoot {
+    pub cert_pem: String,
+    pub key_pem: String,
+    pub fingerprint: String,
+}
+
+/// The fingerprint of a backup's root certificate, when the file is one PEM certificate block
+/// (whether or not it passes `check_restored_root`).
+pub fn restored_fingerprint(cert_pem: &str) -> Option<String> {
+    single_pem_der(cert_pem).ok().map(|d| fingerprint_of(&d))
+}
+
+/// Accepts a root brought back by a restore only if it is exactly the kind `generate_root` makes:
+/// one PEM block and nothing else; a self-signed CA (subject = issuer, valid signature) with
+/// pathLenConstraint 1; KeyUsage exactly keyCertSign, cRLSign and digitalSignature; EKU exactly
+/// serverAuth; name constraints exactly "permit DNS `local`, exclude every IPv4 and IPv6 address";
+/// no other extensions but the key identifiers; its SubjectPublicKeyInfo byte-equal to the key's;
+/// and valid now. The returned PEM is re-encoded from the parsed DER and the key is re-serialized,
+/// so the archive's bytes are never written as they came.
+pub fn check_restored_root(cert_pem: &str, key_pem: &str) -> Result<CheckedRoot, String> {
+    use rcgen::PublicKeyData;
+    use x509_parser::extensions::{GeneralName, ParsedExtension};
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    let der = single_pem_der(cert_pem)?;
+    let (rest, cert) = X509Certificate::from_der(&der).map_err(|e| format!("not an X.509 certificate: {e}"))?;
+    if !rest.is_empty() {
+        return Err("bytes after the certificate".into());
+    }
+    let key = KeyPair::from_pem(key_pem).map_err(|e| format!("not a private key: {e}"))?;
+    if cert.public_key().raw != key.subject_public_key_info().as_slice() {
+        return Err("the certificate is not for this key".into());
+    }
+    if cert.subject().as_raw() != cert.issuer().as_raw() || cert.verify_signature(None).is_err() {
+        return Err("not self-signed".into());
+    }
+    if !cert.validity().is_valid() {
+        return Err("expired or not yet valid".into());
+    }
+    let (mut bc, mut ku, mut eku, mut nc) = (false, false, false, false);
+    for ext in cert.extensions() {
+        match ext.parsed_extension() {
+            ParsedExtension::BasicConstraints(b) if b.ca && b.path_len_constraint == Some(1) && !bc => bc = true,
+            // digitalSignature (bit 0), keyCertSign (bit 5), cRLSign (bit 6).
+            ParsedExtension::KeyUsage(k) if k.flags == 0b110_0001 && !ku => ku = true,
+            ParsedExtension::ExtendedKeyUsage(e)
+                if e.server_auth && !e.any && !e.client_auth && !e.code_signing && !e.email_protection && !e.time_stamping && !e.ocsp_signing && e.other.is_empty() && !eku =>
+            {
+                eku = true
+            }
+            ParsedExtension::NameConstraints(n) if !nc => {
+                let permitted: Vec<&GeneralName> = n.permitted_subtrees.iter().flatten().map(|s| &s.base).collect();
+                let excluded: Vec<&GeneralName> = n.excluded_subtrees.iter().flatten().map(|s| &s.base).collect();
+                let ok = matches!(permitted[..], [GeneralName::DNSName("local")])
+                    && matches!(excluded[..], [GeneralName::IPAddress(v4), GeneralName::IPAddress(v6)] if *v4 == [0u8; 8] && *v6 == [0u8; 32]);
+                if !ok {
+                    return Err("name constraints are not Konak's".into());
+                }
+                nc = true;
+            }
+            ParsedExtension::SubjectKeyIdentifier(_) | ParsedExtension::AuthorityKeyIdentifier(_) => {}
+            other => return Err(format!("unexpected extension: {other:?}")),
+        }
+    }
+    if !(bc && ku && eku && nc) {
+        return Err("not a Konak root (constraints missing)".into());
+    }
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+    let lines: Vec<&str> = b64.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).unwrap_or_default()).collect();
+    // CRLF, as rcgen (the `pem` crate) writes the roots Konak makes.
+    let cert_pem = format!("-----BEGIN CERTIFICATE-----\r\n{}\r\n-----END CERTIFICATE-----\r\n", lines.join("\r\n"));
+    Ok(CheckedRoot { cert_pem, key_pem: key.serialize_pem(), fingerprint: fingerprint_of(&der) })
+}
+
+/// Installs a root brought back by a restore (checked by `check_restored_root`), the way `ensure`
+/// writes a new one (folder and key locked down to the current user, the certificate renamed into
+/// place last). Caddy's intermediate and the leaves it issued under the old root are deleted, so it
+/// derives new ones from this root at its next start.
+pub fn install_root(paths: &Paths, root: &CheckedRoot) -> Result<(), String> {
+    let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = paths.ca_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     restrict_to_user(&dir, true)?;
     let (key_tmp, cert_tmp) = (dir.join("root.key.tmp"), dir.join("root.crt.tmp"));
-    std::fs::write(&key_tmp, key_pem).map_err(|e| e.to_string())?;
+    std::fs::write(&key_tmp, &root.key_pem).map_err(|e| e.to_string())?;
     restrict_to_user(&key_tmp, false)?;
-    std::fs::write(&cert_tmp, cert_pem).map_err(|e| e.to_string())?;
+    std::fs::write(&cert_tmp, &root.cert_pem).map_err(|e| e.to_string())?;
     std::fs::rename(&key_tmp, paths.ca_key()).map_err(|e| e.to_string())?;
     std::fs::rename(&cert_tmp, paths.ca_cert()).map_err(|e| e.to_string())?;
     let storage = paths.caddy_storage();
@@ -145,7 +236,7 @@ pub fn install_root(paths: &Paths, cert_pem: &str, key_pem: &str) -> Result<(), 
 
 /// SHA-256 fingerprint as colon-separated upper-case hex, the form phones and browsers display.
 pub fn fingerprint(paths: &Paths) -> Result<String, String> {
-    Ok(Sha256::digest(cert_der(paths)?).iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":"))
+    Ok(fingerprint_of(&cert_der(paths)?))
 }
 
 fn serial_hex(paths: &Paths) -> Result<String, String> {
@@ -219,6 +310,60 @@ mod tests {
         assert_eq!(purposes, [1], "serverAuth and nothing else");
         let serial = x509_serial(&der).unwrap();
         assert_eq!(serial.len(), 16);
+    }
+
+    #[test]
+    fn only_a_konak_root_passes_the_restore_check() {
+        let root = generate_root("Konak Test CA").unwrap();
+        let ok = check_restored_root(&root.cert_pem, &root.key_pem).unwrap();
+        // Re-encoded from the DER: the same text for a root Konak wrote.
+        assert_eq!(ok.cert_pem.trim(), root.cert_pem.trim());
+        assert_eq!(Some(ok.fingerprint.clone()), restored_fingerprint(&root.cert_pem));
+        assert_eq!(ok.fingerprint.len(), 32 * 3 - 1);
+        assert!(KeyPair::from_pem(&ok.key_pem).is_ok());
+        // Surrounding whitespace is fine; anything else in the file is not.
+        assert!(check_restored_root(&format!("\n{}\n\n", root.cert_pem), &root.key_pem).is_ok());
+
+        let other = generate_root("Konak Other CA").unwrap();
+        let refused = |cert: &str, key: &str| check_restored_root(cert, key).unwrap_err();
+        assert!(refused(&format!("{}{}", root.cert_pem, other.cert_pem), &root.key_pem).contains("more than one"));
+        assert!(refused(&format!("{}junk", root.cert_pem), &root.key_pem).contains("PEM"));
+        assert!(refused(&format!("junk\n{}", root.cert_pem), &root.key_pem).contains("PEM"));
+        assert!(refused(&root.cert_pem, &other.key_pem).contains("not for this key"));
+        assert!(refused(&root.cert_pem, "not a key").contains("private key"));
+
+        // Certificates that differ from Konak's profile in one point each, all for the same key.
+        let key = KeyPair::generate().unwrap();
+        let make = |f: &dyn Fn(&mut CertificateParams)| {
+            let mut p = root_params("Konak Test CA");
+            f(&mut p);
+            p.self_signed(&key).unwrap().pem()
+        };
+        let key_pem = key.serialize_pem();
+        assert!(check_restored_root(&make(&|_| {}), &key_pem).is_ok());
+        type Change<'a> = &'a dyn Fn(&mut CertificateParams);
+        let cases: [(&str, Change); 8] = [
+            ("no name constraints", &|p| p.name_constraints = None),
+            ("another permitted name", &|p| p.name_constraints.as_mut().unwrap().permitted_subtrees = vec![GeneralSubtree::DnsName("com".into())]),
+            ("IPs allowed", &|p| p.name_constraints.as_mut().unwrap().excluded_subtrees.clear()),
+            ("unlimited path", &|p| p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained)),
+            ("not a CA", &|p| p.is_ca = IsCa::NoCa),
+            ("any EKU", &|p| p.extended_key_usages.push(ExtendedKeyUsagePurpose::Any)),
+            ("more key usage", &|p| p.key_usages.push(KeyUsagePurpose::KeyEncipherment)),
+            ("expired", &|p| {
+                p.not_before = OffsetDateTime::now_utc() - Duration::days(30);
+                p.not_after = OffsetDateTime::now_utc() - Duration::days(1);
+            }),
+        ];
+        for (what, f) in cases {
+            assert!(check_restored_root(&make(f), &key_pem).is_err(), "{what} must be refused");
+        }
+        // Subject = issuer, but signed by another key: not self-signed.
+        let other_key = KeyPair::generate().unwrap();
+        let params = root_params("Konak Test CA");
+        let issuer = rcgen::Issuer::from_params(&params, &other_key);
+        let forged = params.signed_by(&key, &issuer).unwrap().pem();
+        assert!(refused(&forged, &key_pem).contains("self-signed"));
     }
 
     #[test]

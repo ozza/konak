@@ -47,6 +47,8 @@ pub struct Request {
     pub replace: bool,
     pub photos: bool,
     pub media: bool,
+    /// Restore the backup's root CA too (an explicit choice; only on a Konak with no apps).
+    pub ca: bool,
 }
 
 /// `restore-progress` event payload: the contract's fields, plus `summary` on the final event.
@@ -69,8 +71,8 @@ pub struct Summary {
     pub failed: Vec<AppFailure>,
     pub photos: Option<FolderResult>,
     pub media: Option<FolderResult>,
-    /// Codes: `restore_ca_restored`, `restore_ca_kept`, `restore_ca_invalid`, `restore_ca_failed`,
-    /// `restore_settings_kept`.
+    /// Codes: `restore_ca_restored`, `restore_ca_kept` (chosen, but this Konak has apps), `restore_ca_invalid`
+    /// (not a root as Konak makes it), `restore_ca_failed`, `restore_settings_kept`.
     pub notes: Vec<&'static str>,
 }
 
@@ -245,16 +247,15 @@ pub enum CaAction {
     Keep,
 }
 
-/// The CA rule: the backup's root is installed when this Konak has none, or when it is a fresh
-/// install (no apps yet, so no device was asked to trust its root for one). A different root that
-/// is in use is kept: swapping it would silently break every device that trusts it.
-pub fn ca_action(current: Option<(&str, &str)>, backup: Option<(&str, &str)>, fresh: bool) -> CaAction {
-    match (current, backup) {
-        (_, None) => CaAction::Nothing,
-        (None, Some(_)) => CaAction::Install,
-        (Some(c), Some(b)) if c == b => CaAction::Nothing,
-        (Some(_), Some(_)) if fresh => CaAction::Install,
-        _ => CaAction::Keep,
+/// The CA rule: the backup's root is installed only when the user chose it, and only on a Konak
+/// with no apps yet (no device was asked to trust this Konak's root for one). On a Konak with apps
+/// the root in use is kept: swapping it would silently break every device that trusts it. `same`:
+/// this Konak already has the backup's root.
+pub fn ca_action(chosen: bool, same: bool, fresh: bool) -> CaAction {
+    match (chosen, same, fresh) {
+        (false, _, _) | (true, true, _) => CaAction::Nothing,
+        (true, false, true) => CaAction::Install,
+        (true, false, false) => CaAction::Keep,
     }
 }
 
@@ -570,6 +571,10 @@ impl Ctx<'_> {
     }
 }
 
+fn chosen_something(req: &Request) -> bool {
+    !req.apps.is_empty() || req.photos || req.media || req.ca
+}
+
 /// The quick checks `restore_backup` answers at once.
 pub fn precheck(paths: &Paths, req: &Request) -> Result<(), String> {
     if crate::backup::running() {
@@ -578,7 +583,7 @@ pub fn precheck(paths: &Paths, req: &Request) -> Result<(), String> {
     if !State::try_load(paths)?.done {
         return Err("backup_not_set_up".into());
     }
-    if req.apps.is_empty() && !req.photos && !req.media {
+    if !chosen_something(req) {
         return Err("restore_nothing_chosen".into());
     }
     if !fmt::has_magic(Path::new(&req.path)) {
@@ -638,7 +643,7 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
     crate::log(paths, &format!("restore: {} verified ({} apps in it; chosen {:?}, replace {}, photos {}, media {})", file.display(), v.manifest.apps.len(), req.apps, req.replace, req.photos, req.media));
 
     ctx.step("konak", None, 0);
-    restore_ca(paths, ctx.host, &v, state.apps.is_empty(), summary);
+    restore_ca(paths, ctx.host, &v, req.ca, state.apps.is_empty(), summary);
     if v.manifest.konak_files.iter().any(|f| f == "settings.json") {
         summary.notes.push("restore_settings_kept");
     }
@@ -668,30 +673,32 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
     walked.map_err(|e| fail("verify", if e.code == "backup_restore_failed" { "backup_damaged" } else { e.code }))
 }
 
-fn restore_ca(paths: &Paths, host: &dyn Host, v: &Verified, fresh: bool, summary: &mut Summary) {
-    let read = |p: PathBuf| std::fs::read_to_string(p).ok();
-    let current = read(paths.ca_cert()).zip(read(paths.ca_key()));
-    let action = ca_action(current.as_ref().map(|(c, k)| (c.as_str(), k.as_str())), v.ca.as_ref().map(|(c, k)| (c.as_str(), k.as_str())), fresh);
+fn restore_ca(paths: &Paths, host: &dyn Host, v: &Verified, chosen: bool, fresh: bool, summary: &mut Summary) {
     let Some((crt, key)) = &v.ca else { return };
-    match action {
+    let current = std::fs::read_to_string(paths.ca_cert()).ok().filter(|_| paths.ca_key().is_file());
+    let same = current.as_deref().and_then(crate::ca::restored_fingerprint).is_some_and(|f| Some(f) == crate::ca::restored_fingerprint(crt));
+    match ca_action(chosen, same, fresh) {
         CaAction::Nothing => {}
         CaAction::Keep => {
             crate::log(paths, "restore: this Konak's root CA differs from the backup's and is in use; kept");
             summary.notes.push("restore_ca_kept");
         }
-        CaAction::Install if !crate::ca::pair_matches(crt, key) => {
-            crate::log(paths, "restore: the backup's root CA certificate and key do not match; not restored");
-            summary.notes.push("restore_ca_invalid");
-        }
-        CaAction::Install => match crate::ca::install_root(paths, crt, key) {
-            Ok(()) => {
-                summary.notes.push("restore_ca_restored");
-                host.ca_changed();
-            }
+        CaAction::Install => match crate::ca::check_restored_root(crt, key) {
             Err(e) => {
-                crate::log(paths, &format!("restore: the root CA was not restored: {e}"));
-                summary.notes.push("restore_ca_failed");
+                crate::log(paths, &format!("restore: the backup's root CA is not a Konak root ({e}); not restored"));
+                summary.notes.push("restore_ca_invalid");
             }
+            Ok(root) => match crate::ca::install_root(paths, &root) {
+                Ok(()) => {
+                    crate::log(paths, &format!("restore: root CA {} installed", root.fingerprint));
+                    summary.notes.push("restore_ca_restored");
+                    host.ca_changed();
+                }
+                Err(e) => {
+                    crate::log(paths, &format!("restore: the root CA was not restored: {e}"));
+                    summary.notes.push("restore_ca_failed");
+                }
+            },
         },
     }
 }
@@ -1155,7 +1162,7 @@ mod tests {
             apps: apps.to_vec(),
             photos_bytes: (!photos.is_empty()).then_some(photos.iter().map(|p| p.1.len() as u64).sum()),
             media_bytes: None,
-            konak_files: vec!["state.json".into(), "settings.json".into()],
+            konak_files: ca.iter().flat_map(|_| ["ca/root.crt".to_string(), "ca/root.key".to_string()]).chain(["state.json".into(), "settings.json".into()]).collect(),
         };
         let file = io::BufWriter::new(std::fs::File::create(path).unwrap());
         let mut w = fmt::Writer::new(file, &pw("the backup password"), &m, TEST_LOG_N).unwrap();
@@ -1189,17 +1196,12 @@ mod tests {
     }
 
     fn request(file: &Path, apps: &[&str], replace: bool, photos: bool) -> Request {
-        Request { path: file.to_string_lossy().to_string(), password: "the backup password".into(), apps: apps.iter().map(|a| a.to_string()).collect(), replace, photos, media: false }
+        Request { path: file.to_string_lossy().to_string(), password: "the backup password".into(), apps: apps.iter().map(|a| a.to_string()).collect(), replace, photos, media: false, ca: false }
     }
 
     fn restore(paths: &Paths, host: &FakeHost, target: &FakeTarget, req: &Request) -> Result<Summary, Failed> {
-        let guard = loop {
-            // Other tests (backup's) hold the guard for a moment.
-            match Guard::acquire() {
-                Ok(g) => break g,
-                Err(_) => std::thread::sleep(Duration::from_millis(20)),
-            }
-        };
+        // Other tests (backup's) hold the guard for a moment.
+        let guard = crate::backup::tests::test_guard();
         run(paths, host, target, &guard, req)
     }
 
@@ -1443,39 +1445,84 @@ mod tests {
 
     #[test]
     fn the_ca_rule() {
-        let (a, b) = (("crt-a", "key-a"), ("crt-b", "key-b"));
-        assert_eq!(ca_action(None, Some(b), false), CaAction::Install);
-        assert_eq!(ca_action(Some(a), Some(b), true), CaAction::Install);
-        assert_eq!(ca_action(Some(a), Some(b), false), CaAction::Keep);
-        assert_eq!(ca_action(Some(b), Some(b), false), CaAction::Nothing);
-        assert_eq!(ca_action(Some(a), None, true), CaAction::Nothing);
+        // (chosen, same, fresh)
+        assert_eq!(ca_action(true, false, true), CaAction::Install);
+        assert_eq!(ca_action(true, false, false), CaAction::Keep);
+        assert_eq!(ca_action(true, true, true), CaAction::Nothing);
+        assert_eq!(ca_action(false, false, true), CaAction::Nothing, "never without the user's choice");
+        assert_eq!(ca_action(false, false, false), CaAction::Nothing);
     }
 
     #[test]
-    fn a_different_ca_in_use_is_kept_and_a_fresh_install_takes_the_backups() {
+    fn the_ca_is_restored_only_when_chosen_on_an_empty_konak_and_only_a_konak_root() {
         let old = crate::ca::generate_root("Konak Test Old").unwrap();
         let here = crate::ca::generate_root("Konak Test Here").unwrap();
-        for (tag, installed, want_note, want) in [("ca-keep", true, "restore_ca_kept", &here), ("ca-fresh", false, "restore_ca_restored", &old)] {
+        // An unconstrained CA for its own key: what a hostile backup would carry.
+        let hostile_key = rcgen::KeyPair::generate().unwrap();
+        let mut p = rcgen::CertificateParams::default();
+        p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let hostile = (p.self_signed(&hostile_key).unwrap().pem(), hostile_key.serialize_pem());
+        // (tag, apps installed, chosen, the backup's CA, notes, swapped)
+        type Case<'a> = (&'a str, bool, bool, (&'a str, &'a str), &'a [&'a str], bool);
+        let cases: [Case; 5] = [
+            ("ca-keep", true, true, (&old.cert_pem, &old.key_pem), &["restore_ca_kept"], false),
+            ("ca-fresh", false, true, (&old.cert_pem, &old.key_pem), &["restore_ca_restored"], true),
+            ("ca-not-chosen", false, false, (&old.cert_pem, &old.key_pem), &[], false),
+            ("ca-hostile", false, true, (&hostile.0, &hostile.1), &["restore_ca_invalid"], false),
+            ("ca-two-blocks", false, true, (&format!("{}{}", old.cert_pem, hostile.0), &old.key_pem), &["restore_ca_invalid"], false),
+        ];
+        for (tag, installed, chosen, ca, want_notes, swapped) in cases {
             let apps: &[(&str, &str, bool)] = if installed { &[("forgejo", "git-c", false)] } else { &[] };
             let (paths, file) = setup(tag, apps);
             std::fs::create_dir_all(paths.ca_dir()).unwrap();
             std::fs::write(paths.ca_cert(), &here.cert_pem).unwrap();
             std::fs::write(paths.ca_key(), &here.key_pem).unwrap();
             std::fs::create_dir_all(paths.caddy_storage().join("pki").join("authorities").join("local")).unwrap();
-            write_backup(&file, &[], Some((&old.cert_pem, &old.key_pem)), &[("p.jpg", b"p")]);
+            write_backup(&file, &[], Some(ca), &[("p.jpg", b"p")]);
             let host = FakeHost::default();
-            let summary = restore(&paths, &host, &FakeTarget::default(), &request(&file, &[], false, true)).unwrap();
+            let req = Request { ca: chosen, ..request(&file, &[], false, true) };
+            let summary = restore(&paths, &host, &FakeTarget::default(), &req).unwrap();
             let (crt, key) = (std::fs::read_to_string(paths.ca_cert()).unwrap(), std::fs::read_to_string(paths.ca_key()).unwrap());
             let intermediate_left = paths.caddy_storage().join("pki").join("authorities").join("local").exists();
             let _ = std::fs::remove_dir_all(&paths.home);
-            assert_eq!(summary.notes, [want_note, "restore_settings_kept"], "{tag}");
-            assert_eq!((crt.as_str(), key.as_str()), (want.cert_pem.as_str(), want.key_pem.as_str()), "{tag}");
-            assert_eq!(intermediate_left, installed, "{tag}: Caddy's intermediate under the old root is cleared on a swap");
-            assert_eq!(host.ca_changes.get(), u32::from(!installed));
+            let mut want = want_notes.to_vec();
+            want.push("restore_settings_kept");
+            assert_eq!(summary.notes, want, "{tag}");
+            let expect = if swapped { &old } else { &here };
+            assert_eq!((crt.trim(), key.trim()), (expect.cert_pem.trim(), expect.key_pem.trim()), "{tag}");
+            assert_eq!(intermediate_left, !swapped, "{tag}: Caddy's intermediate under the old root is cleared on a swap");
+            assert_eq!(host.ca_changes.get(), u32::from(swapped), "{tag}");
         }
-        // A pair that does not belong together is never installed.
-        assert!(!crate::ca::pair_matches(&old.cert_pem, &here.key_pem));
-        assert!(crate::ca::pair_matches(&old.cert_pem, &old.key_pem));
+    }
+
+    #[test]
+    fn inspect_shows_the_backups_ca_and_whether_it_passes() {
+        let root = crate::ca::generate_root("Konak Test Inspect").unwrap();
+        let other = crate::ca::generate_root("Konak Test Other").unwrap();
+        let (paths, file) = setup("inspect-ca", &[]);
+        let pw = "the backup password";
+        write_backup(&file, &[app("forgejo", "git-i", false, &[])], Some((&root.cert_pem, &root.key_pem)), &[("p.jpg", b"p")]);
+        let good = crate::backup::inspect(&paths, &file.to_string_lossy(), pw).unwrap();
+        write_backup(&file, &[], Some((&root.cert_pem, &other.key_pem)), &[]);
+        let mismatched = crate::backup::inspect(&paths, &file.to_string_lossy(), pw).unwrap();
+        write_backup(&file, &[], None, &[]);
+        let none = crate::backup::inspect(&paths, &file.to_string_lossy(), pw).unwrap();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        let fp = crate::ca::check_restored_root(&root.cert_pem, &root.key_pem).unwrap().fingerprint;
+        assert_eq!((good.ca_fingerprint.as_deref(), good.ca_valid), (Some(fp.as_str()), true));
+        assert_eq!(good.manifest.apps.len(), 1);
+        assert_eq!((mismatched.ca_fingerprint.as_deref(), mismatched.ca_valid), (Some(fp.as_str()), false));
+        assert_eq!((none.ca_fingerprint, none.ca_valid), (None, false));
+        // The contract's field names, next to the manifest's.
+        let json = serde_json::to_value(&good).unwrap();
+        assert!(json["ca_fingerprint"].is_string() && json["ca_valid"] == true && json["format"] == 1);
+    }
+
+    #[test]
+    fn a_ca_only_restore_is_a_choice() {
+        let req = |ca| Request { path: String::new(), password: String::new(), apps: vec![], replace: false, photos: false, media: false, ca };
+        assert!(!chosen_something(&req(false)));
+        assert!(chosen_something(&req(true)));
     }
 
     #[test]

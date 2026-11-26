@@ -355,13 +355,49 @@ pub fn list(paths: &Paths) -> Vec<BackupEntry> {
     out
 }
 
-/// The manifest of a backup file. An empty `password` uses the stored one.
-pub fn inspect(paths: &Paths, path: &str, password: &str) -> Result<Manifest, String> {
+/// `inspect_backup`'s answer (contract `BackupManifest`): the manifest, plus the backup's root CA.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Inspected {
+    #[serde(flatten)]
+    pub manifest: Manifest,
+    /// SHA-256 of the backup's root certificate (as `ca_info` shows it), when it has one.
+    pub ca_fingerprint: Option<String>,
+    /// The root passes the restore's check (`ca::check_restored_root`).
+    pub ca_valid: bool,
+}
+
+/// The manifest of a backup file and its root CA. An empty `password` uses the stored one. The CA
+/// files come after the apps in the file, so this reads (and decrypts) up to them; the rest of the
+/// file is not checked here, a restore verifies all of it first.
+pub fn inspect(paths: &Paths, path: &str, password: &str) -> Result<Inspected, String> {
     let pw = if password.is_empty() { settings::password(paths)?.ok_or("backup_no_password")? } else { SecretString::from(password.to_string()) };
-    fmt::open(Path::new(path), &pw).map(|b| b.manifest).map_err(|e| {
+    let b = fmt::open(Path::new(path), &pw).map_err(|e| {
         crate::log(paths, &format!("inspect backup: {e}"));
         e.code.to_string()
-    })
+    })?;
+    let manifest = b.manifest.clone();
+    let (mut crt, mut key) = (None, None);
+    if manifest.konak_files.iter().any(|f| f == "ca/root.crt") {
+        // Stopped with an error once both are read, or at the first Photos/Media entry.
+        let _ = b.for_each_entry(|e, _, r| {
+            let slot = match e {
+                fmt::Entry::Konak(p) if p == "ca/root.crt" => &mut crt,
+                fmt::Entry::Konak(p) if p == "ca/root.key" => &mut key,
+                fmt::Entry::Photos(_) | fmt::Entry::Media(_) => return Err("past the CA".into()),
+                _ => return Ok(()),
+            };
+            let mut body = String::new();
+            std::io::Read::read_to_string(&mut std::io::Read::take(r, 1 << 20), &mut body).map_err(|e| e.to_string())?;
+            *slot = Some(body);
+            if crt.is_some() && key.is_some() {
+                return Err("both read".into());
+            }
+            Ok(())
+        });
+    }
+    let ca_fingerprint = crt.as_deref().and_then(crate::ca::restored_fingerprint);
+    let ca_valid = matches!((&crt, &key), (Some(c), Some(k)) if crate::ca::check_restored_root(c, k).is_ok());
+    Ok(Inspected { manifest, ca_fingerprint, ca_valid })
 }
 
 // ---- Retention -------------------------------------------------------------------------------------
@@ -836,7 +872,7 @@ fn archive_app<W: Write>(paths: &Paths, ctx: &Ctx, w: &mut Writer<W>, z: &AppSiz
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::cell::RefCell;
     use time::macros::datetime;
@@ -954,6 +990,16 @@ mod tests {
         assert!(parse_sizes("V nextcloud x Bad/Name 1\nend\n", &["nextcloud"]).is_err());
     }
 
+    /// The run guard, once another test (backup's or restore's) has let it go.
+    pub(crate) fn test_guard() -> Guard {
+        loop {
+            match Guard::acquire() {
+                Ok(g) => return g,
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("konak-backup-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -1020,7 +1066,7 @@ mod tests {
         st.done = true;
         st.save(&paths);
         let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]) };
-        let guard = Guard::acquire().unwrap();
+        let guard = test_guard();
         assert_eq!(Guard::acquire().err().as_deref(), Some("backup_running"));
         let r = run(&paths, &host, &FakeApps::new(true), &guard, 10);
         drop(guard);
@@ -1149,7 +1195,7 @@ mod tests {
         // A partial left by an earlier run is cleared.
         std::fs::write(out.join("konak-20200101-000000.konakbackup.partial"), b"").unwrap();
         let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]) };
-        let guard = Guard::acquire().unwrap();
+        let guard = test_guard();
         let r = run(&paths, &host, &FakeApps::new(true), &guard, 10);
         drop(guard);
         let file = r.unwrap();
@@ -1166,7 +1212,8 @@ mod tests {
         assert!(m.apps.is_empty() && m.media_bytes.is_none());
         let paths_in: Vec<&str> = sums.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths_in, ["manifest.json", "konak/state.json", "konak/settings.json", "photos/b.png", "photos/2026/a.jpg"]);
-        assert_eq!(inspected, m);
+        assert_eq!(inspected.manifest, m);
+        assert_eq!((inspected.ca_fingerprint, inspected.ca_valid), (None, false));
         assert_eq!(wrong.unwrap_err(), "backup_wrong_password");
         assert_eq!(listed.len(), 1);
         assert_eq!((listed[0].status, listed[0].error.as_deref()), ("ok", None));
