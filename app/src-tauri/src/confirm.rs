@@ -375,8 +375,8 @@ mod tests {
         connected: Cell<bool>,
         /// The user's answer the moment the dialog is shown; `None`: no answer.
         answer: Option<bool>,
-        /// An approval that arrives just as the client hangs up (after the wait gave up on it).
-        approve_on_hangup: bool,
+        /// An answer that arrives just as the client hangs up, before the wait withdraws the request.
+        answer_on_hangup: Option<bool>,
         panic_on_shown: bool,
         shown: RefCell<Vec<Payload>>,
         closed: RefCell<Vec<String>>,
@@ -401,7 +401,7 @@ mod tests {
             busy: false,
             connected: Cell::new(true),
             answer,
-            approve_on_hangup: false,
+            answer_on_hangup: None,
             panic_on_shown: false,
             shown: RefCell::default(),
             closed: RefCell::default(),
@@ -425,9 +425,9 @@ mod tests {
             NOW
         }
         fn connected(&self) -> bool {
-            if self.approve_on_hangup && self.connected.get() {
+            if let (Some(approve), true) = (self.answer_on_hangup, self.connected.get()) {
                 let id = self.shown.borrow()[0].id.clone();
-                self.slot.lock().unwrap().answer(&id, true, NOW).unwrap();
+                self.slot.lock().unwrap().answer(&id, approve, NOW).unwrap();
                 self.connected.set(false);
             }
             self.connected.get()
@@ -526,10 +526,13 @@ mod tests {
     }
 
     #[test]
-    fn an_approval_that_beats_the_hang_up_still_counts() {
-        let f = Fake { approve_on_hangup: true, ..fake(None) };
+    fn an_answer_that_beats_the_hang_up_still_counts() {
+        let f = Fake { answer_on_hangup: Some(true), ..fake(None) };
         run(&f);
         assert_eq!(f.runs.borrow().as_slice(), [action()]);
+        let f = Fake { answer_on_hangup: Some(false), ..fake(None) };
+        assert_eq!(run(&f).0.outcome, Outcome::Denied);
+        assert!(f.runs.borrow().is_empty());
     }
 
     #[test]
