@@ -501,15 +501,17 @@ fn serve_pipe(app: AppHandle) {
     }
 }
 
-/// One connection: handled, or `busy` past the cap; then the reply and its audit line.
+/// One connection: handled, or `busy` past the cap; then the reply and its audit line. A client
+/// that hangs up without sending anything (e.g. a program that only probes the pipe) made no
+/// request, so it gets neither.
 fn serve_connection(app: &AppHandle, conn: &pipe::Pipe, gate: &pipe::Gate) {
     let requester = conn.client_pid().and_then(requester_image);
     let mut sent = pipe::Sent::default();
     let (reply, id, linger) = match gate.enter() {
-        Some(_pass) => {
-            let (r, id) = pipe_request(app, conn, requester.as_deref(), &mut sent);
-            (r, id, Duration::from_secs(5))
-        }
+        Some(_pass) => match pipe_request(app, conn, requester.as_deref(), &mut sent) {
+            Some((r, id)) => (r, id, Duration::from_secs(5)),
+            None => return,
+        },
         None => (reply(pipe::Outcome::Busy, "Konak is handling other requests; try again shortly"), None, Duration::from_secs(1)),
     };
     log(&app.state::<Konak>().paths, &pipe::audit_line(id.as_deref(), requester.as_deref(), &sent, &reply));
@@ -524,22 +526,24 @@ fn reply(outcome: pipe::Outcome, error: impl Into<String>) -> pipe::Reply {
 }
 
 /// One pipe request: read and parse it, then `confirm::handle` decides. Also returns the
-/// confirmation id once the request got one, and fills `sent` for the audit line.
-fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>, sent: &mut pipe::Sent) -> (pipe::Reply, Option<String>) {
+/// confirmation id once the request got one, and fills `sent` for the audit line. `None` when the
+/// client hung up without sending a byte.
+fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>, sent: &mut pipe::Sent) -> Option<(pipe::Reply, Option<String>)> {
     use pipe::Outcome::Invalid;
     let line = match conn.read_line(pipe::MAX_REQUEST, Some(Instant::now() + pipe::REQUEST_TIMEOUT)) {
         Ok(l) => l,
-        Err(pipe::ReadError::TooLarge) => return (reply(Invalid, "request too large"), None),
-        Err(pipe::ReadError::Timeout) => return (reply(Invalid, "no request received"), None),
-        Err(pipe::ReadError::Closed) => return (reply(Invalid, "connection closed"), None),
+        Err(pipe::ReadError::NothingSent) => return None,
+        Err(pipe::ReadError::TooLarge) => return Some((reply(Invalid, "request too large"), None)),
+        Err(pipe::ReadError::Timeout) => return Some((reply(Invalid, "no request received"), None)),
+        Err(pipe::ReadError::Closed) => return Some((reply(Invalid, "connection closed"), None)),
     };
     *sent = pipe::sent(&line);
     let req = match pipe::parse(&line) {
         Ok(r) => r,
-        Err(e) => return (reply(Invalid, e), None),
+        Err(e) => return Some((reply(Invalid, e), None)),
     };
     let host = PipeHost { app, k: &app.state::<Konak>(), conn, requester };
-    confirm::handle(&host, &req, requester, Duration::from_secs(confirm::ANSWER_TIMEOUT_S))
+    Some(confirm::handle(&host, &req, requester, Duration::from_secs(confirm::ANSWER_TIMEOUT_S)))
 }
 
 /// `confirm::Host` for a pipe request in the running Konak.

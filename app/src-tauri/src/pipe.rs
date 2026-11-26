@@ -361,6 +361,9 @@ impl Drop for Pipe {
 }
 
 pub enum ReadError {
+    /// The other end closed before sending a single byte.
+    NothingSent,
+    /// The other end closed in the middle of a line.
     Closed,
     TooLarge,
     Timeout,
@@ -394,9 +397,10 @@ impl Pipe {
         let mut line = Vec::new();
         let mut buf = [0u8; 1024];
         loop {
+            let closed = if line.is_empty() { ReadError::NothingSent } else { ReadError::Closed };
             let want = match deadline {
                 Some(d) => match self.available() {
-                    None => return Err(ReadError::Closed),
+                    None => return Err(closed),
                     Some(0) if Instant::now() >= d => return Err(ReadError::Timeout),
                     Some(0) => {
                         std::thread::sleep(Duration::from_millis(20));
@@ -406,7 +410,7 @@ impl Pipe {
                 },
                 None => buf.len(),
             };
-            let n = self.read_some(&mut buf[..want]).ok_or(ReadError::Closed)?;
+            let n = self.read_some(&mut buf[..want]).ok_or(closed)?;
             line.extend_from_slice(&buf[..n]);
             if let Some(i) = line.iter().position(|&b| b == b'\n') {
                 line.truncate(i);
@@ -976,6 +980,27 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
         server.disconnect();
         client.join().unwrap();
+
+        // A client that hangs up without sending anything.
+        let n6 = name.clone();
+        let client = std::thread::spawn(move || drop(connect(&n6).unwrap()));
+        assert!(server.accept());
+        client.join().unwrap();
+        assert!(matches!(server.read_line(MAX_REQUEST, Some(Instant::now() + REQUEST_TIMEOUT)), Err(ReadError::NothingSent)));
+        server.disconnect();
+
+        // A client that sends part of a line, then hangs up.
+        let n7 = name.clone();
+        let client = std::thread::spawn(move || {
+            let p = connect(&n7).unwrap();
+            let mut n = 0u32;
+            // SAFETY: a valid buffer and length.
+            unsafe { WriteFile(p.0, b"{\"op\"".as_ptr(), 5, &mut n, std::ptr::null_mut()) };
+        });
+        assert!(server.accept());
+        client.join().unwrap();
+        assert!(matches!(server.read_line(MAX_REQUEST, Some(Instant::now() + REQUEST_TIMEOUT)), Err(ReadError::Closed)));
+        server.disconnect();
 
         // A client that sends nothing hits the deadline.
         let n4 = name.clone();
