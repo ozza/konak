@@ -61,7 +61,35 @@
     "busy": "This app is busy with another operation. Try again when it finishes.",
     "unknown_app": "This app is not in the catalog.",
     "not_installed": "This app is not installed.",
-    "state_unreadable": "Konak's settings file (state.json in the Konak folder) is damaged, so Konak changed nothing. Restore it from a backup, or remove it and run the setup again."
+    "state_unreadable": "Konak's settings file (state.json in the Konak folder) is damaged, so Konak changed nothing. Restore it from a backup, or remove it and run the setup again.",
+    "settings_language": "Choose a language from the list.",
+    "settings_schedule_kind": "Choose how often to back up.",
+    "settings_time": "Enter a time such as 03:00.",
+    "settings_weekday": "Choose a day of the week.",
+    "settings_keep": "Keep between 1 and 100 backups.",
+    "settings_unknown_app": "One of the chosen apps is not installed.",
+    "settings_location_relative": "Choose a full folder path.",
+    "settings_location_missing": "That folder does not exist.",
+    "settings_location_in_konak": "Choose a folder outside Konak's own folder.",
+    "settings_location_in_library": "Choose a folder outside your Media and Photos folders.",
+    "settings_location_not_writable": "Konak cannot write to that folder.",
+    "autostart_failed": "Konak could not change the Windows startup setting.",
+    "password_too_short": "Use at least 12 characters.",
+    "password_too_long": "Use at most 1024 characters.",
+    "password_current_required": "Enter the current password.",
+    "password_current_wrong": "The current password is wrong.",
+    "backup_running": "A backup is already running.",
+    "backup_not_set_up": "Choose a backup folder and set a password first.",
+    "backup_no_location": "Choose a backup folder first.",
+    "backup_no_password": "Set a backup password first.",
+    "backup_no_space": "The backup folder does not have enough free space.",
+    "backup_exists": "A backup with this name already exists. Try again in a minute.",
+    "backup_not_konak": "This file is not a Konak backup.",
+    "backup_wrong_password": "The password does not open this backup.",
+    "backup_newer_format": "This backup was made by a newer Konak. Update Konak, then try again.",
+    "backup_damaged": "This backup file is damaged or incomplete.",
+    "backup_unreadable": "Konak cannot read this file.",
+    "backup_restore_failed": "The restore did not finish."
   },
   "tray": {
     "open": "Open Konak",
@@ -485,7 +513,15 @@
       "status_ok": "Checked",
       "status_failed": "Failed",
       "status_unverified": "Not checked",
-      "step": {}
+      "step": {
+        "prepare": "Preparing",
+        "app": "Copying app",
+        "konak": "Copying Konak's settings",
+        "photos": "Copying the Photos folder",
+        "media": "Copying the Media folder",
+        "verify": "Checking the backup",
+        "finish": "Finishing"
+      }
     },
     "restore": {
       "title": "Restore from a backup",
@@ -502,7 +538,8 @@
       "replace": "These apps are already installed: {apps}. Replace them and their current data with the backup.",
       "start": "Restore",
       "done": "Restore finished.",
-      "failed": "Restore failed."
+      "failed": "Restore failed.",
+      "password_hint": "Leave it empty to use the backup password stored on this PC."
     }
   },
   "apps": {

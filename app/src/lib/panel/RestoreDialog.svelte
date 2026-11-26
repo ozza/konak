@@ -75,10 +75,11 @@
         <button type="button" class="btn" onclick={choose}>{t("panel.restore.choose")}</button>
       </div>
       <label class="flex flex-col gap-1 text-sm" for="{id}-pw">{t("panel.restore.password")}
-        <input id="{id}-pw" type="password" autocomplete="off" bind:value={password} class="h-10 rounded-lg border border-control bg-surface px-3" />
+        <input id="{id}-pw" type="password" autocomplete="off" bind:value={password} aria-describedby="{id}-pw-hint" class="h-10 rounded-lg border border-control bg-surface px-3" />
       </label>
+      <p id="{id}-pw-hint" class="text-xs text-muted">{t("panel.restore.password_hint")}</p>
       {#if error}<p class="text-sm text-error" role="alert">{error}</p>{/if}
-      <button type="submit" class="btn-primary self-start" disabled={!file || !password || busy}>{t("panel.restore.open")}</button>
+      <button type="submit" class="btn-primary self-start" disabled={!file || busy}>{t("panel.restore.open")}</button>
     </form>
   {:else}
     <p class="text-sm">{t("panel.restore.from", { date: new Date(manifest.created_unix * 1000).toLocaleString(locale) })}</p>

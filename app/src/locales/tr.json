@@ -61,7 +61,35 @@
     "busy": "Bu uygulamada başka bir işlem sürüyor. Bittiğinde tekrar deneyin.",
     "unknown_app": "Bu uygulama katalogda yok.",
     "not_installed": "Bu uygulama kurulu değil.",
-    "state_unreadable": "Konak'ın ayar dosyası (Konak klasöründeki state.json) bozuk, bu yüzden Konak hiçbir şeyi değiştirmedi. Dosyayı bir yedekten geri yükleyin ya da silip kurulumu yeniden çalıştırın."
+    "state_unreadable": "Konak'ın ayar dosyası (Konak klasöründeki state.json) bozuk, bu yüzden Konak hiçbir şeyi değiştirmedi. Dosyayı bir yedekten geri yükleyin ya da silip kurulumu yeniden çalıştırın.",
+    "settings_language": "Listeden bir dil seçin.",
+    "settings_schedule_kind": "Ne sıklıkla yedekleneceğini seçin.",
+    "settings_time": "03:00 gibi bir saat girin.",
+    "settings_weekday": "Haftanın bir gününü seçin.",
+    "settings_keep": "1 ile 100 arasında yedek saklayın.",
+    "settings_unknown_app": "Seçilen uygulamalardan biri kurulu değil.",
+    "settings_location_relative": "Tam bir klasör yolu seçin.",
+    "settings_location_missing": "Bu klasör yok.",
+    "settings_location_in_konak": "Konak'ın kendi klasörü dışında bir klasör seçin.",
+    "settings_location_in_library": "Medya ve Fotoğraflar klasörleriniz dışında bir klasör seçin.",
+    "settings_location_not_writable": "Konak bu klasöre yazamıyor.",
+    "autostart_failed": "Konak, Windows başlangıç ayarını değiştiremedi.",
+    "password_too_short": "En az 12 karakter kullanın.",
+    "password_too_long": "En fazla 1024 karakter kullanın.",
+    "password_current_required": "Şu anki parolayı girin.",
+    "password_current_wrong": "Şu anki parola yanlış.",
+    "backup_running": "Zaten bir yedekleme sürüyor.",
+    "backup_not_set_up": "Önce bir yedek klasörü seçin ve parola belirleyin.",
+    "backup_no_location": "Önce bir yedek klasörü seçin.",
+    "backup_no_password": "Önce bir yedek parolası belirleyin.",
+    "backup_no_space": "Yedek klasöründe yeterli boş alan yok.",
+    "backup_exists": "Bu adla bir yedek zaten var. Bir dakika sonra tekrar deneyin.",
+    "backup_not_konak": "Bu dosya bir Konak yedeği değil.",
+    "backup_wrong_password": "Bu parola yedeği açmıyor.",
+    "backup_newer_format": "Bu yedek daha yeni bir Konak sürümüyle yapılmış. Konak'ı güncelleyip tekrar deneyin.",
+    "backup_damaged": "Bu yedek dosyası bozuk ya da eksik.",
+    "backup_unreadable": "Konak bu dosyayı okuyamıyor.",
+    "backup_restore_failed": "Geri yükleme tamamlanmadı."
   },
   "tray": {
     "open": "Konak'ı aç",
@@ -485,7 +513,15 @@
       "status_ok": "Kontrol edildi",
       "status_failed": "Başarısız",
       "status_unverified": "Kontrol edilmedi",
-      "step": {}
+      "step": {
+        "prepare": "Hazırlanıyor",
+        "app": "Uygulama kopyalanıyor",
+        "konak": "Konak'ın ayarları kopyalanıyor",
+        "photos": "Fotoğraflar klasörü kopyalanıyor",
+        "media": "Medya klasörü kopyalanıyor",
+        "verify": "Yedek kontrol ediliyor",
+        "finish": "Tamamlanıyor"
+      }
     },
     "restore": {
       "title": "Yedekten geri yükle",
@@ -502,7 +538,8 @@
       "replace": "Bu uygulamalar zaten kurulu: {apps}. Onları ve şu anki verilerini yedektekilerle değiştir.",
       "start": "Geri yükle",
       "done": "Geri yükleme tamamlandı.",
-      "failed": "Geri yükleme başarısız oldu."
+      "failed": "Geri yükleme başarısız oldu.",
+      "password_hint": "Bu bilgisayarda kayıtlı yedek parolasını kullanmak için boş bırakın."
     }
   },
   "apps": {

@@ -105,7 +105,7 @@ let settings = {
 const day = 86400;
 let backups = [
   { file: "konak-20261125-030000.konakbackup", created_unix: 1795575600, size_bytes: 3.2 * GB, apps: ["jellyfin", "nextcloud", "forgejo"], status: "ok", error: null },
-  { file: "konak-20261124-030000.konakbackup", created_unix: 1795575600 - day, size_bytes: 3.1 * GB, apps: ["jellyfin", "nextcloud"], status: "failed", error: "location_full" },
+  { file: "konak-20261124-030000.konakbackup", created_unix: 1795575600 - day, size_bytes: 3.1 * GB, apps: ["jellyfin", "nextcloud"], status: "failed", error: "backup_no_space" },
 ];
 
 function progress(event: string, steps: [string, string | null][], ms = 600) {
@@ -186,12 +186,12 @@ export function installMock() {
         case "get_settings":
           return settings;
         case "save_settings":
-          if (a.settings.backup.keep < 1 || a.settings.backup.keep > 100) throw "invalid_keep";
+          if (a.settings.backup.keep < 1 || a.settings.backup.keep > 100) throw "settings_keep";
           settings = { ...a.settings, backup: { ...a.settings.backup, password_set: settings.backup.password_set } };
           return settings;
         case "set_backup_password":
           await wait(300);
-          if (settings.backup.password_set && a.current !== "correct horse battery") throw "wrong_password";
+          if (settings.backup.password_set && a.current !== "correct horse battery") throw "password_current_wrong";
           settings = { ...settings, backup: { ...settings.backup, password_set: true } };
           return null;
         case "list_backups":
@@ -202,7 +202,7 @@ export function installMock() {
           return null;
         case "inspect_backup":
           await wait(400);
-          if (a.password !== "correct horse battery") throw "wrong_password";
+          if (a.password && a.password !== "correct horse battery") throw "backup_wrong_password";
           return {
             format: 1,
             konak_version: "0.1.0",
