@@ -253,7 +253,8 @@
       "stale_netavark": "Eski konteyner ağı kuralı yok",
       "keepalive": "Ortam uyanık kalıyor",
       "port80_owner": "80 numaralı port Konak'ta",
-      "lan_adapter": "Doğru ağ bağdaştırıcısı"
+      "lan_adapter": "Doğru ağ bağdaştırıcısı",
+      "wsl_networking": "WSL ağ modu"
     },
     "detail": {
       "recent_logs": "Son kayıtlar",
@@ -344,12 +345,19 @@
         "taken": "80 numaralı portu {owner} tutuyor, bu yüzden Konak'ın web sunucusu başlayamıyor.",
         "returning": "80 numaralı port yeniden boş. Konak yaklaşık iki dakika içinde ona geri döner.",
         "ok": "Konak'ın web sunucusu 80 numaralı portta yanıt veriyor.",
-        "nothing": "80 numaralı portta yanıt veren yok."
+        "nothing": "80 numaralı portta yanıt veren yok.",
+        "wsl_service": "80 numaralı port dolu, büyük olasılıkla bir WSL dağıtımındaki bir servis tarafından; bu yüzden Windows programın adını veremiyor."
       },
       "lan_adapter": {
         "virtual": "Kullanılan bağlantı sanal bir bağdaştırıcı ({adapter}), bu yüzden diğer cihazlar bu bilgisayara ulaşamayabilir.",
         "ip_changed": "Bu bilgisayarın ağ adresi değişti. Konak yeni adrese geçiyor.",
         "ok": "{adapter} üzerinde {ip} ağ adresi."
+      },
+      "wsl_networking": {
+        "nat": "WSL standart (NAT) ağ modunu kullanıyor.",
+        "mirrored": "WSL yansıtılmış (mirrored) ağ modunu kullanıyor. Konak bu modda çalışır.",
+        "fallback_reserved": "WSL bu bilgisayarda {range} portlarını ayırıyor, bu yüzden Konak'ın yedek portları {ports} kullanılamıyor.",
+        "unknown": "Konak, WSL'in ağ modunu okuyamadı."
       }
     },
     "diag_fix": {
@@ -373,11 +381,16 @@
         "net_error": "Tanılamayı yeniden çalıştırın.",
         "fallback": "80 numaralı portu boşaltmak için o programı durdurun ya da ayarını değiştirin. Konak sonra kendiliğinden geri döner.",
         "taken": "80 numaralı portu boşaltmak için o programı durdurun ya da ayarını değiştirin. Konak web sunucusunu birkaç saniye içinde başlatır.",
-        "nothing": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın."
+        "nothing": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın.",
+        "wsl_service": "Diğer WSL dağıtımınızdaki web sunucusunu durdurun ya da başka bir porta taşıyın. Konak sonra 80 numaralı portu kendiliğinden alır."
       },
       "lan_adapter": {
         "virtual": "Bağlantıyı tutan VPN'i ya da sanal ağı kapatın.",
         "ip_changed": "Birkaç saniye bekleyin. Sürerse Konak'ı yeniden başlatın."
+      },
+      "wsl_networking": {
+        "fallback_reserved": "80 numaralı port boş olduğu sürece yapılacak bir şey yok. Başka bir program 80'i alırsa, Konak kullanmaya devam edebilsin diye portu boşaltın.",
+        "unknown": "Tanılamayı yeniden çalıştırın. Sürerse Konak'ı yeniden başlatın."
       }
     },
     "mcp": {

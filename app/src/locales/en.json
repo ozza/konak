@@ -253,7 +253,8 @@
       "stale_netavark": "No stale container network rules",
       "keepalive": "Environment stays awake",
       "port80_owner": "Port 80 belongs to Konak",
-      "lan_adapter": "Right network adapter"
+      "lan_adapter": "Right network adapter",
+      "wsl_networking": "WSL networking"
     },
     "detail": {
       "recent_logs": "Recent logs",
@@ -344,12 +345,19 @@
         "taken": "{owner} holds port 80, so Konak's web server cannot start.",
         "returning": "Port 80 is free again. Konak moves back to it within about two minutes.",
         "ok": "Konak's web server answers on port 80.",
-        "nothing": "Nothing answers on port 80."
+        "nothing": "Nothing answers on port 80.",
+        "wsl_service": "Port 80 is taken, probably by a service in a WSL distribution, so Windows cannot name the program."
       },
       "lan_adapter": {
         "virtual": "The connection in use is a virtual adapter ({adapter}), so other devices may not reach this PC.",
         "ip_changed": "This PC's network address changed. Konak is switching to the new one.",
         "ok": "Network address {ip} on {adapter}."
+      },
+      "wsl_networking": {
+        "nat": "WSL uses its standard (NAT) networking.",
+        "mirrored": "WSL uses mirrored networking. Konak works in this mode.",
+        "fallback_reserved": "WSL reserves ports {range} on this PC, so Konak's backup ports {ports} are not usable.",
+        "unknown": "Konak could not read WSL's networking mode."
       }
     },
     "diag_fix": {
@@ -373,11 +381,16 @@
         "net_error": "Run the diagnostics again.",
         "fallback": "Stop or reconfigure that program to free port 80. Konak then moves back by itself.",
         "taken": "Stop or reconfigure that program to free port 80. Konak then starts its web server within seconds.",
-        "nothing": "Quit Konak from the tray icon and start it again."
+        "nothing": "Quit Konak from the tray icon and start it again.",
+        "wsl_service": "Stop the web server in your other WSL distribution, or move it to another port. Konak then takes port 80 by itself."
       },
       "lan_adapter": {
         "virtual": "Turn off the VPN or virtual network that holds the connection.",
         "ip_changed": "Wait a few seconds. If it stays, restart Konak."
+      },
+      "wsl_networking": {
+        "fallback_reserved": "Nothing to do while port 80 is free. If another program takes port 80, free it so Konak can keep using it.",
+        "unknown": "Run the diagnostics again. If it stays, restart Konak."
       }
     },
     "mcp": {

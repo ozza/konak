@@ -7,7 +7,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import type { AppInfo, Manifest, Op } from "$lib/panel/api";
 
 const q = new URLSearchParams(location.search);
-const port = q.has("port80") ? ":47080" : "";
+const port = q.has("port80") ? ":18080" : "";
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const catalog: Manifest[] = [
@@ -54,7 +54,7 @@ const checks = () => [
 
 function info(id: string, name: string, status: AppInfo["status"], claimed = true): AppInfo {
   const m = catalog.find((c) => c.id === id)!;
-  const url = m.https ? `https://${name}.local${port && ":47443"}` : `http://${name}.local${port}`;
+  const url = m.https ? `https://${name}.local${port && ":18443"}` : `http://${name}.local${port}`;
   const local_url = `http://127.0.0.1:${m.port}`;
   return { id, name, url, local_url, https: m.https, port: m.port, installed_unix: 1763800000, claimed, stopped: status === "stopped", status, containers: status === "stopped" ? [] : (containers[id] ?? []) };
 }
@@ -82,7 +82,7 @@ const status = () => ({
   reboot_needed: false,
   done: !q.has("setup"),
   url: `http://konak.local${port}`,
-  web_ports: port ? { http: 47080, https: 47443, port80_owner: "httpd.exe (pid 4120)" } : { http: 80, https: 443, port80_owner: null },
+  web_ports: port ? { http: 18080, https: 18443, port80_owner: "httpd.exe (pid 4120)" } : { http: 80, https: 443, port80_owner: null },
   network_category: q.has("public") ? "Public" : "Private",
   firewall_missing: firewallMissing,
   repairing,
