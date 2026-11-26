@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { t } from "$lib/i18n";
   import { appDescription, appName, CATEGORY, formatBytes, type AppInfo, type Failure, type HostInfo, type Manifest, type Op } from "./api";
   import AppTile from "./AppTile.svelte";
@@ -35,8 +36,12 @@
   const categories = ["all", ...new Set(Object.values(CATEGORY))];
   let filter = $state("all");
   let picked = $state<string | null>(null);
+  let aside = $state<HTMLElement>();
+  // Show the focused app's install panel, scrolled into view: it wraps below the cards in a narrow window.
   $effect(() => {
-    if (focus) picked = focus;
+    if (!focus) return;
+    picked = focus;
+    tick().then(() => aside?.scrollIntoView({ block: "nearest" }));
   });
 
   const isInstalled = (id: string) => apps.some((a) => a.id === id);
@@ -122,7 +127,7 @@
     </ul>
 
     {#if pick}
-      <aside aria-labelledby="install-title" class="flex min-w-0 flex-[1_1_340px] flex-col gap-[18px] rounded-2xl border border-control bg-chrome p-5 shadow-card">
+      <aside bind:this={aside} aria-labelledby="install-title" class="flex min-w-0 flex-[1_1_340px] flex-col gap-[18px] rounded-2xl border border-control bg-chrome p-5 shadow-card">
         <div class="flex items-center gap-3.5">
           <AppTile id={pick.id} size="lg" />
           <div class="flex min-w-0 flex-col">

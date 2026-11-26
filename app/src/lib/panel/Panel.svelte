@@ -16,6 +16,9 @@
 
   const POLL_MS = 5000;
   const HOST_POLL_MS = 15000;
+  /** Two supervisor ticks (10 s each) after the window opens. */
+  const FIRST_DIAG_MS = 20000;
+  let diagReady = $state(false);
   type Summary = { minutes: number; uac_prompts: number; reboots: number; download_mb: number };
   let {
     networkCategory,
@@ -111,8 +114,9 @@
     invoke<Manifest[]>("list_catalog").then((c) => (catalog = c));
     refresh();
     refreshHost();
-    // The sidebar shows This PC's health from the start, not only once its page is opened.
-    diagnose();
+    // The sidebar shows This PC's health from the start, not only once its page is opened. The first
+    // run waits for the supervisor's first ticks (keepalive, Caddy), or it reports them as down.
+    const diagTimer = setTimeout(() => (diagReady = true), FIRST_DIAG_MS);
     // Network category and firewall rules can change while Konak is not running; both reads are cheap.
     invoke("refresh_network");
     // Poll only while the window is visible; the tray keeps Konak running when it is hidden.
@@ -136,6 +140,7 @@
       select(p.op === "install" ? "add" : p.app);
     });
     return () => {
+      clearTimeout(diagTimer);
       clearInterval(timer);
       clearInterval(hostTimer);
       document.removeEventListener("visibilitychange", onVisible);
@@ -145,7 +150,7 @@
   });
 
   $effect(() => {
-    if (shown === "host" && checks === null && !diagnosing && !diagError) diagnose();
+    if (diagReady && checks === null && !diagnosing && !diagError) diagnose();
   });
 </script>
 

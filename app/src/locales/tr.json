@@ -241,7 +241,7 @@
       "firewall_ok": "Kurallar yerinde",
       "firewall_missing": "Kurallar eksik",
       "diagnostics": "Tanılama",
-      "not_run": "Henüz çalıştırılmadı.",
+      "not_run": "Kontroller Konak açıldıktan kısa süre sonra çalışır.",
       "check_ok": "Geçti",
       "check_warn": "Uyarı",
       "check_fail": "Başarısız",

@@ -241,7 +241,7 @@
       "firewall_ok": "Rules in place",
       "firewall_missing": "Rules missing",
       "diagnostics": "Diagnostics",
-      "not_run": "Not run yet.",
+      "not_run": "Checks run shortly after Konak starts.",
       "check_ok": "Pass",
       "check_warn": "Warning",
       "check_fail": "Fail",
