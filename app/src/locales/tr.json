@@ -89,7 +89,15 @@
     "backup_newer_format": "Bu yedek daha yeni bir Konak sürümüyle yapılmış. Konak'ı güncelleyip tekrar deneyin.",
     "backup_damaged": "Bu yedek dosyası bozuk ya da eksik.",
     "backup_unreadable": "Konak bu dosyayı okuyamıyor.",
-    "backup_restore_failed": "Geri yükleme tamamlanmadı."
+    "backup_restore_failed": "Geri yükleme tamamlanmadı.",
+    "restore_nothing_chosen": "Geri yüklenecek en az bir şey seçin.",
+    "restore_app_exists": "Bu uygulama zaten kurulu. Mevcut olanın üzerine geri yüklemek için 'Değiştir'i işaretleyin.",
+    "restore_app_not_in_backup": "Bu uygulama yedekte yok.",
+    "restore_aside_exists": "Bu uygulamanın önceki bir geri yüklemesi düzgün bitmedi. Eski verileri hâlâ kenarda duruyor; yeniden geri yüklemeden önce onları kaldırın.",
+    "restore_no_free_name": "Bu uygulama için ağınızda boş bir ad bulunamadı.",
+    "restore_path_refused": "Yedekte Konak'ın yazmayacağı bir dosya yolu var.",
+    "restore_file_changed": "Yedek dosyası geri yükleme sırasında değişti.",
+    "restore_some_failed": "Bazı kısımlar geri yüklenemedi."
   },
   "tray": {
     "open": "Konak'ı aç",
@@ -520,7 +528,8 @@
         "photos": "Fotoğraflar klasörü kopyalanıyor",
         "media": "Medya klasörü kopyalanıyor",
         "verify": "Yedek kontrol ediliyor",
-        "finish": "Tamamlanıyor"
+        "finish": "Tamamlanıyor",
+        "done": "Tamamlandı"
       }
     },
     "restore": {
@@ -539,7 +548,18 @@
       "start": "Geri yükle",
       "done": "Geri yükleme tamamlandı.",
       "failed": "Geri yükleme başarısız oldu.",
-      "password_hint": "Bu bilgisayarda kayıtlı yedek parolasını kullanmak için boş bırakın."
+      "password_hint": "Bu bilgisayarda kayıtlı yedek parolasını kullanmak için boş bırakın.",
+      "renamed": "{from}.local adı burada zaten kullanılıyor, bu yüzden artık {to}.local.",
+      "photos_done": "Fotoğraflar klasörü",
+      "media_done": "Medya klasörü",
+      "folder_result": "{written} eklendi, {identical} zaten vardı, {kept} için iki kopya tutuldu, {failed} başarısız",
+      "note": {
+        "restore_ca_restored": "Yedekteki Konak sertifikası geri geldi; ona güvenen cihazlar çalışmaya devam eder.",
+        "restore_ca_kept": "Bu Konak'ın zaten kendi sertifikası vardı, o korundu. Eski sertifikaya güvenen cihazların bu bilgisayarın sertifikasını kurması gerekir.",
+        "restore_ca_invalid": "Yedekteki sertifika geçerli değil, bu yüzden bu bilgisayarın sertifikası korundu.",
+        "restore_ca_failed": "Yedekteki sertifika geri yüklenemedi; bu bilgisayarın sertifikası korundu.",
+        "restore_settings_kept": "Bu bilgisayardaki ayarlarınız korundu; yedekteki ayarlar uygulanmadı."
+      }
     }
   },
   "apps": {

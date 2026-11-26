@@ -89,7 +89,15 @@
     "backup_newer_format": "This backup was made by a newer Konak. Update Konak, then try again.",
     "backup_damaged": "This backup file is damaged or incomplete.",
     "backup_unreadable": "Konak cannot read this file.",
-    "backup_restore_failed": "The restore did not finish."
+    "backup_restore_failed": "The restore did not finish.",
+    "restore_nothing_chosen": "Choose at least one thing to restore.",
+    "restore_app_exists": "This app is already installed. Tick 'Replace' to restore it over the current one.",
+    "restore_app_not_in_backup": "This app is not in the backup.",
+    "restore_aside_exists": "An earlier restore of this app did not finish cleanly. Its previous data is still kept aside; remove it before restoring again.",
+    "restore_no_free_name": "No free name was found for this app on your network.",
+    "restore_path_refused": "The backup contains a file path Konak will not write.",
+    "restore_file_changed": "The backup file changed while it was being restored.",
+    "restore_some_failed": "Some parts could not be restored."
   },
   "tray": {
     "open": "Open Konak",
@@ -520,7 +528,8 @@
         "photos": "Copying the Photos folder",
         "media": "Copying the Media folder",
         "verify": "Checking the backup",
-        "finish": "Finishing"
+        "finish": "Finishing",
+        "done": "Done"
       }
     },
     "restore": {
@@ -539,7 +548,18 @@
       "start": "Restore",
       "done": "Restore finished.",
       "failed": "Restore failed.",
-      "password_hint": "Leave it empty to use the backup password stored on this PC."
+      "password_hint": "Leave it empty to use the backup password stored on this PC.",
+      "renamed": "Its name {from}.local is already used here, so it is now {to}.local.",
+      "photos_done": "Photos folder",
+      "media_done": "Media folder",
+      "folder_result": "{written} added, {identical} already there, {kept} kept both copies, {failed} failed",
+      "note": {
+        "restore_ca_restored": "Konak's certificate from the backup is back, so devices that trusted it keep working.",
+        "restore_ca_kept": "This Konak already has its own certificate, so it was kept. Devices that trusted the old one need this PC's certificate.",
+        "restore_ca_invalid": "The certificate in the backup is not valid, so this PC's certificate was kept.",
+        "restore_ca_failed": "The certificate from the backup could not be restored; this PC's certificate was kept.",
+        "restore_settings_kept": "Your settings on this PC were kept; settings in the backup were not applied."
+      }
     }
   },
   "apps": {

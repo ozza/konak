@@ -72,6 +72,7 @@ export type BackupManifest = {
   photos_bytes: number | null;
   media_bytes: number | null;
 };
+export type FolderResult = { written: number; identical: number; kept_both: number; failed: number; error: string | null };
 export type BackupProgress = {
   state: "running" | "done" | "failed";
   step: string;
@@ -79,6 +80,14 @@ export type BackupProgress = {
   done_bytes: number | null;
   total_bytes: number | null;
   error: string | null;
+  /** Restore only, on the final event. */
+  summary?: {
+    restored: { id: string; name: string; renamed_from: string | null }[];
+    failed: { id: string; error: string }[];
+    photos: FolderResult | null;
+    media: FolderResult | null;
+    notes: string[];
+  };
 };
 
 /** Ports Caddy serves on. `http` is not 80 while another program holds port 80 (`port80_owner`). */

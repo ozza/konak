@@ -5,6 +5,7 @@
   import { has, locale, t } from "$lib/i18n";
   import { appName, errorText, formatBytes, type AppInfo, type BackupManifest, type BackupProgress } from "./api";
   import Dialog from "./Dialog.svelte";
+  import RestoreSummary from "./RestoreSummary.svelte";
 
   // Restore: pick a backup file, unlock it, choose what to bring back, confirm, follow progress.
   let { open, apps, onclose }: { open: boolean; apps: AppInfo[]; onclose: () => void } = $props();
@@ -111,6 +112,7 @@
         {:else if progress.state === "done"}<span class="text-ok">{t("panel.restore.done")}</span>
         {:else}<span class="text-error">{t("panel.restore.failed")} {progress.error ? message(progress.error) : ""}</span>{/if}
       </p>
+      {#if progress.summary}<RestoreSummary summary={progress.summary} />{/if}
     {/if}
     {#if error}<p class="text-sm text-error" role="alert">{error}</p>{/if}
   {/if}
