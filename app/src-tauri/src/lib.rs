@@ -1,4 +1,6 @@
 pub mod apps;
+pub mod backup;
+pub mod backup_format;
 pub mod ca;
 pub mod catalog;
 pub mod confirm;
@@ -9,6 +11,7 @@ pub mod paths;
 pub mod pipe;
 pub mod redact;
 pub mod services;
+pub mod settings;
 pub mod shell;
 pub mod uninstall;
 
@@ -777,6 +780,98 @@ async fn trust_ca_on_this_pc(app: AppHandle) -> Result<(), String> {
     blocking(app, |p| ca::ensure(p).and_then(|_| ca::trust_on_this_pc(p))).await?
 }
 
+// ---- Settings and backup -----------------------------------------------------------------------
+
+#[tauri::command]
+async fn get_settings(app: AppHandle) -> Result<settings::Settings, String> {
+    blocking(app, settings::load).await
+}
+
+/// Validated; errors are `errors.*` locale keys (`settings_time`, ...).
+#[tauri::command]
+async fn save_settings(app: AppHandle, settings: settings::Settings) -> Result<settings::Settings, String> {
+    blocking(app, move |p| settings::save(p, &settings)).await?
+}
+
+/// `current` is required once a password is set. The password is never logged or returned.
+#[tauri::command]
+async fn set_backup_password(app: AppHandle, current: Option<String>, new: String) -> Result<(), String> {
+    blocking(app, move |p| {
+        let r = settings::set_password(p, current.as_deref(), &new);
+        log(p, &format!("backup password {}", if r.is_ok() { "set" } else { "not changed" }));
+        r
+    })
+    .await?
+}
+
+/// `backup::Host` for the running Konak: `backup-progress` events, and the panel's busy set (op
+/// `backup`, reported through `app-progress` like any app operation).
+struct BackupHost(AppHandle);
+
+impl backup::Host for BackupHost {
+    fn progress(&self, p: &backup::Progress) {
+        let _ = self.0.emit("backup-progress", p);
+    }
+    fn try_busy(&self, id: &str) -> bool {
+        let k = self.0.state::<Konak>();
+        if !k.busy.lock().unwrap().insert(id.to_string()) {
+            return false;
+        }
+        let _ = self.0.emit("app-progress", AppProgress { id: id.to_string(), op: "backup", state: "running", error: None });
+        true
+    }
+    fn release(&self, id: &str, result: &Result<(), String>) {
+        let k = self.0.state::<Konak>();
+        k.busy.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
+        let (state, error) = match result {
+            Ok(()) => ("done", None),
+            Err(e) => ("failed", Some(redact::Redactor::new(vec![]).apply(e))),
+        };
+        let _ = self.0.emit("app-progress", AppProgress { id: id.to_string(), op: "backup", state, error });
+    }
+}
+
+/// Starts a backup on its own thread; `why` is for the log (`manual`, `scheduled`).
+fn start_backup(app: AppHandle, why: &'static str) -> Result<(), String> {
+    let paths = app.state::<Konak>().paths.clone();
+    backup::precheck(&paths)?;
+    let guard = backup::Guard::acquire()?;
+    log(&paths, &format!("backup ({why}) starting"));
+    std::thread::spawn(move || {
+        let k = app.state::<Konak>();
+        let host = BackupHost(app.clone());
+        let apps = backup::DistroApps(&k.paths);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| backup::run(&k.paths, &host, &apps, &guard, backup_format::SCRYPT_LOG_N)));
+        if r.is_err() {
+            // The app being archived, if any, is started again and released, as at the next start.
+            log(&k.paths, "backup: the run panicked");
+            if let Some(id) = backup::recover(&k.paths, &apps) {
+                backup::Host::release(&host,&id, &Err("internal error".into()));
+            }
+            let _ = app.emit("backup-progress", backup::Progress { state: "failed", step: "prepare", app: None, done_bytes: None, total_bytes: None, error: Some("internal error".into()) });
+        }
+        drop(guard);
+    });
+    Ok(())
+}
+
+/// Starts a backup; progress arrives as `backup-progress` events.
+#[tauri::command]
+fn backup_now(app: AppHandle) -> Result<(), String> {
+    start_backup(app, "manual")
+}
+
+#[tauri::command]
+async fn list_backups(app: AppHandle) -> Result<Vec<backup::BackupEntry>, String> {
+    blocking(app, backup::list).await
+}
+
+/// The manifest of a backup file; an empty `password` uses the stored one.
+#[tauri::command]
+async fn inspect_backup(app: AppHandle, path: String, password: String) -> Result<backup_format::Manifest, String> {
+    blocking(app, move |p| backup::inspect(p, &path, &password)).await?
+}
+
 extern "system" {
     fn GetUserDefaultUILanguage() -> u16;
 }
@@ -818,6 +913,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // For `call_attention` only; the webview gets no notification permission.
         .plugin(tauri_plugin_notification::init())
+        // Folder and file pickers for the Settings page (capability: `dialog:allow-open` only).
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let paths = Paths::new(app.path().resource_dir()?);
             let sup = Supervisor::new(paths.clone());
@@ -830,6 +927,16 @@ pub fn run() {
             });
             let handle = app.handle().clone();
             sup.set_rerender(move |_, ports| rerender_for_ports(&handle, ports));
+            // The backup schedule, checked every tick; the run itself has a thread of its own.
+            let handle = app.handle().clone();
+            sup.set_after_tick(move || {
+                let Some(k) = handle.try_state::<Konak>() else { return };
+                if backup::scheduled_due(&k.paths) {
+                    if let Err(e) = start_backup(handle.clone(), "scheduled") {
+                        log(&k.paths, &format!("scheduled backup not started: {e}"));
+                    }
+                }
+            });
             // A damaged state.json is left alone: nothing starts, and the window shows the error.
             let mut state = State::try_load(&paths).unwrap_or_default();
 
@@ -844,8 +951,11 @@ pub fn run() {
                 resume = true;
             }
             if state.done {
-                // An uninstall that kept the data removed the Run value; put it back (not in dev runs).
-                installer::register_autostart();
+                // An uninstall that kept the data removed the Run value; put it back (not in dev
+                // runs), unless the user turned "start with Windows" off in Settings.
+                if settings::load(&paths).autostart {
+                    installer::register_autostart();
+                }
                 let (paths, sup) = (paths.clone(), Arc::clone(&sup));
                 std::thread::spawn(move || {
                     // A Caddy left from an earlier run would keep port 80 and serve its old config.
@@ -853,6 +963,8 @@ pub fn run() {
                         Ok(s) if s == "nothing running" => {}
                         r => log(&paths, &format!("leftover processes: {r:?}")),
                     }
+                    // An app a backup stopped before Konak ended is started again.
+                    backup::recover(&paths, &backup::DistroApps(&paths));
                     sup.start();
                 });
             }
@@ -954,7 +1066,13 @@ pub fn run() {
             host_info,
             diagnose,
             ca_info,
-            trust_ca_on_this_pc
+            trust_ca_on_this_pc,
+            get_settings,
+            save_settings,
+            set_backup_password,
+            backup_now,
+            list_backups,
+            inspect_backup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

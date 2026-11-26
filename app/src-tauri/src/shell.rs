@@ -72,6 +72,47 @@ pub fn distro_script(distro: &str, script: &str, args: &[&str]) -> Out {
     }
 }
 
+/// `distro_script`, but stdout is handed to `read` as it arrives (binary-safe: wsl.exe passes the
+/// Linux process's stdout through unchanged), for streams too large to hold. stderr is collected
+/// meanwhile. When `read` fails, the process is killed. A non-zero exit is an error carrying the
+/// end of stderr, even when `read` succeeded (a stream cut short by a failing command).
+pub fn distro_read<T>(distro: &str, script: &str, args: &[&str], read: impl FnOnce(&mut dyn std::io::Read) -> Result<T, String>) -> Result<T, String> {
+    use std::io::Read;
+    let mut full = vec!["-d", distro, "-u", "root", "--exec", "bash", "-s", "--"];
+    full.extend_from_slice(args);
+    let mut child = hidden("wsl.exe")
+        .args(&full)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot start wsl.exe: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(script.replace("\r\n", "\n").as_bytes());
+    }
+    let mut stderr = child.stderr.take();
+    let errors = std::thread::spawn(move || {
+        let mut buf = vec![];
+        if let Some(e) = stderr.as_mut() {
+            let _ = e.read_to_end(&mut buf);
+        }
+        decode(&buf)
+    });
+    let mut stdout = child.stdout.take().ok_or("no stdout")?;
+    let result = read(&mut stdout);
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    drop(stdout);
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let err_text = errors.join().unwrap_or_default();
+    let value = result?;
+    if !status.success() {
+        return Err(format!("exit {:?}: {}", status.code(), tail(&err_text, 4)));
+    }
+    Ok(value)
+}
+
 /// A Windows job object that kills every process in it when its last handle closes.
 pub struct Job(HANDLE);
 

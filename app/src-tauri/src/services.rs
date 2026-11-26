@@ -365,6 +365,8 @@ pub struct Supervisor {
     notify: OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// Runs the re-render for new web ports; `apps::rerender_for_ports` when none is set.
     rerender: OnceLock<Rerender>,
+    /// Called at the end of every tick, off the process lock (the backup schedule).
+    after_tick: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 fn alive(c: &mut Option<Child>) -> bool {
@@ -396,7 +398,14 @@ impl Supervisor {
             job: Mutex::new(RerenderJob::default()),
             notify: OnceLock::new(),
             rerender: OnceLock::new(),
+            after_tick: OnceLock::new(),
         })
+    }
+
+    /// Set once, before `start`: run at the end of every tick. It must return quickly (start long
+    /// work on a thread of its own).
+    pub fn set_after_tick(&self, f: impl Fn() + Send + Sync + 'static) {
+        let _ = self.after_tick.set(Box::new(f));
     }
 
     /// Set once, before `start`: called (on the supervisor's threads) when the web ports or the
@@ -684,6 +693,9 @@ impl Supervisor {
             if s.rendered_ports != ports {
                 self.start_rerender(ports);
             }
+        }
+        if let Some(f) = self.after_tick.get() {
+            f();
         }
     }
 
