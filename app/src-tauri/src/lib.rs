@@ -331,8 +331,11 @@ fn spawn_op_notify(
     let handle = app.clone();
     std::thread::spawn(move || {
         let k = handle.state::<Konak>();
-        let result = f(&k.paths);
-        k.busy.lock().unwrap().remove(&id);
+        let result = {
+            // Released even if `f` panics, so the app does not stay busy until Konak restarts.
+            let _release = ReleaseBusy(&k.busy, &id);
+            f(&k.paths)
+        };
         // Apply a changed app list to Caddy and mDNS now rather than at the next tick.
         k.sup.tick();
         // Panel and MCP operations both get a result line in install.log.
@@ -352,6 +355,15 @@ fn spawn_op_notify(
         let _ = handle.emit("app-progress", AppProgress { id, op, state, error });
     });
     Ok(())
+}
+
+/// Removes an app id from the busy set when dropped.
+struct ReleaseBusy<'a>(&'a Mutex<HashSet<String>>, &'a str);
+
+impl Drop for ReleaseBusy<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(self.1);
+    }
 }
 
 /// The supervisor's re-render for new web ports, run as app operations: every claimed app is busy
@@ -492,7 +504,13 @@ fn serve_pipe(app: AppHandle) {
         let (handle, gate) = (app.clone(), Arc::clone(&gate));
         std::thread::spawn(move || loop {
             if conn.accept() {
-                serve_connection(&handle, &conn, &gate);
+                // No instance can be created after `bind`, so a panic must not end this loop: the
+                // connection is dropped and the instance serves the next one. `confirm::handle`
+                // frees the slot on unwind, and the gate pass is released by its drop.
+                let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serve_connection(&handle, &conn, &gate)));
+                if served.is_err() {
+                    log(&handle.state::<Konak>().paths, "mcp pipe: a request handler panicked; its connection was dropped");
+                }
             } else {
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -945,6 +963,17 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_busy_app_is_released_even_when_its_operation_panics() {
+        let busy = Mutex::new(HashSet::from(["jellyfin".to_string(), "immich".to_string()]));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _release = ReleaseBusy(&busy, "jellyfin");
+            panic!("operation failed");
+        }));
+        assert!(r.is_err());
+        assert_eq!(*busy.lock().unwrap(), HashSet::from(["immich".to_string()]));
+    }
 
     #[test]
     fn attention_text_names_the_action_and_the_app() {
