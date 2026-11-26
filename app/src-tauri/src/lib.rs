@@ -464,10 +464,11 @@ fn start_app(app: AppHandle, id: String) -> Result<(), String> {
 
 // ---- MCP write requests over the pipe ------------------------------------------------------
 //
-// A pipe request reaches an app operation on one path only: `pipe_request` -> `wait_for_answer`
-// returns true -> `execute`. `wait_for_answer` returns true only when the receiver from
-// `confirm::Slot::open` yields `true`, and the only sender on it is `Slot::answer`, called by the
-// `mcp_answer` command with the request's id when the user clicks Approve in the window.
+// A pipe request reaches an app operation on one path only: `pipe_request` -> `confirm::handle`,
+// whose answer wait returns true -> the request is validated again and unchanged -> `execute`. The
+// wait returns true only when the receiver from `confirm::Slot::open` yields `true`, and the only
+// sender on it is `Slot::answer`, called by the `mcp_answer` command with the request's id when the
+// user clicks Approve in the window.
 
 /// How long an approved operation is waited for before the reply says `running`.
 const OP_WAIT: Duration = Duration::from_secs(15 * 60);
@@ -522,11 +523,10 @@ fn reply(outcome: pipe::Outcome, error: impl Into<String>) -> pipe::Reply {
     pipe::Reply::new(outcome, Some(error.into()))
 }
 
-/// One pipe request: read, validate, ask the user, and run it only if approved. Also returns the
+/// One pipe request: read and parse it, then `confirm::handle` decides. Also returns the
 /// confirmation id once the request got one, and fills `sent` for the audit line.
 fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>, sent: &mut pipe::Sent) -> (pipe::Reply, Option<String>) {
-    use pipe::Outcome::{Busy, Denied, Failed, Invalid};
-    let k = app.state::<Konak>();
+    use pipe::Outcome::Invalid;
     let line = match conn.read_line(pipe::MAX_REQUEST, Some(Instant::now() + pipe::REQUEST_TIMEOUT)) {
         Ok(l) => l,
         Err(pipe::ReadError::TooLarge) => return (reply(Invalid, "request too large"), None),
@@ -538,50 +538,60 @@ fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>, sen
         Ok(r) => r,
         Err(e) => return (reply(Invalid, e), None),
     };
-    let action = match State::try_load(&k.paths).and_then(|s| pipe::validate(&s, &req)) {
-        Ok(a) => a,
-        Err(e) => return (reply(Invalid, e), None),
-    };
-    if k.busy.lock().unwrap().contains(&action.id) {
-        return (reply(Busy, format!("{} has an operation in progress", action.id)), None);
-    }
-    let id = match confirm::new_id() {
-        Ok(id) => id,
-        Err(e) => return (reply(Failed, e), None),
-    };
-    let now = installer::now();
-    let payload = confirm::Payload {
-        id: id.clone(),
-        requester: requester.and_then(|p| std::path::Path::new(p).file_name()).map(|f| f.to_string_lossy().into_owned()),
-        op: action.op.as_str(),
-        app: action.id.clone(),
-        name: action.name.clone(),
-        delete_data: action.delete_data,
-        expires_unix: now + confirm::ANSWER_TIMEOUT_S,
-    };
-    let answer = match k.confirm.lock().unwrap().open(payload.clone(), now) {
-        Ok(rx) => rx,
-        Err(e) if e == confirm::DECLINED_RECENTLY => {
-            let msg = format!("the person declined this same request in the Konak window less than {} minutes ago; nothing was changed. Ask them before trying again", confirm::COOLDOWN_S / 60);
-            return (reply(Denied, msg), None);
-        }
-        Err(_) => return (reply(Busy, "another request is waiting for an answer in the Konak window"), None),
-    };
-    log(&k.paths, &format!("mcp request {id}: {} {} (delete_data={}, name={:?}) from {}", payload.op, payload.app, payload.delete_data, payload.name, requester.unwrap_or("unknown")));
-    call_attention(app, &payload);
-    let _ = app.emit("mcp-confirm", &payload);
+    let host = PipeHost { app, k: &app.state::<Konak>(), conn, requester };
+    confirm::handle(&host, &req, requester, Duration::from_secs(confirm::ANSWER_TIMEOUT_S))
+}
 
-    let approved = wait_for_answer(&k, conn, &id, &answer);
-    if !approved {
-        // `serve_connection`'s audit line is the denial's only line.
-        let _ = app.emit("mcp-confirm-closed", serde_json::json!({ "id": id }));
-        return (reply(Denied, "the person did not approve this in the Konak window (or did not answer within 5 minutes); nothing was changed"), Some(id));
+/// `confirm::Host` for a pipe request in the running Konak.
+struct PipeHost<'a> {
+    app: &'a AppHandle,
+    k: &'a Konak,
+    conn: &'a pipe::Pipe,
+    requester: Option<&'a str>,
+}
+
+impl confirm::Host for PipeHost<'_> {
+    fn validate(&self, req: &pipe::Request) -> Result<pipe::Action, String> {
+        State::try_load(&self.k.paths).and_then(|s| pipe::validate(&s, req))
     }
-    // Logged now: the operation may run for minutes before the audit line is written.
-    log(&k.paths, &format!("mcp request {id}: approved"));
-    // Lets the panel open the app's page before the operation starts.
-    let _ = app.emit("mcp-approved", serde_json::json!({ "id": id, "op": payload.op, "app": payload.app }));
-    (execute(app, &req, &action), Some(id))
+
+    fn busy(&self, id: &str) -> bool {
+        self.k.busy.lock().unwrap().contains(id)
+    }
+
+    fn slot(&self) -> &Mutex<confirm::Slot> {
+        &self.k.confirm
+    }
+
+    fn now(&self) -> u64 {
+        installer::now()
+    }
+
+    fn connected(&self) -> bool {
+        self.conn.connected()
+    }
+
+    fn shown(&self, payload: &confirm::Payload) {
+        log(&self.k.paths, &format!("mcp request {}: {} {} (delete_data={}, name={:?}) from {}", payload.id, payload.op, payload.app, payload.delete_data, payload.name, self.requester.unwrap_or("unknown")));
+        call_attention(self.app, payload);
+        let _ = self.app.emit("mcp-confirm", payload);
+    }
+
+    fn closed(&self, id: &str) {
+        // `serve_connection`'s audit line is the denial's only line.
+        let _ = self.app.emit("mcp-confirm-closed", serde_json::json!({ "id": id }));
+    }
+
+    fn approved(&self, payload: &confirm::Payload) {
+        // Logged now: the operation may run for minutes before the audit line is written.
+        log(&self.k.paths, &format!("mcp request {}: approved", payload.id));
+        // Lets the panel open the app's page before the operation starts.
+        let _ = self.app.emit("mcp-approved", serde_json::json!({ "id": payload.id, "op": payload.op, "app": payload.app }));
+    }
+
+    fn run(&self, action: &pipe::Action) -> pipe::Reply {
+        execute(self.app, action)
+    }
 }
 
 /// Makes a request that waits for an answer hard to miss. Showing and focusing the window is not
@@ -627,8 +637,6 @@ fn flash_taskbar(hwnd: windows_sys::Win32::Foundation::HWND) {
     unsafe { FlashWindowEx(&info) };
 }
 
-/// True only when the user approved request `id` in the window. A denial, no answer within the
-/// timeout, and the client hanging up all give false.
 /// Who to name in the dialog. The pipe client is normally Konak's own `--mcp` process, which the AI
 /// client (claude.exe, node.exe, ...) started, so that parent is named instead. Display only.
 fn requester_image(pid: u32) -> Option<String> {
@@ -643,37 +651,11 @@ fn requester_image(pid: u32) -> Option<String> {
     Some(image)
 }
 
-fn wait_for_answer(k: &Konak, conn: &pipe::Pipe, id: &str, answer: &mpsc::Receiver<bool>) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(confirm::ANSWER_TIMEOUT_S);
-    loop {
-        match answer.recv_timeout(Duration::from_millis(250)) {
-            Ok(approve) => return approve,
-            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
-            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline && conn.connected() => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Give up, unless an answer took the request first: it was sent under this lock.
-                // Only the timeout counts as a denial for the cooldown, not a client that left.
-                let mut slot = k.confirm.lock().unwrap();
-                if slot.withdraw(id, installer::now(), Instant::now() >= deadline) {
-                    return false;
-                }
-                drop(slot);
-                return answer.try_recv().unwrap_or(false);
-            }
-        }
-    }
-}
-
-/// Runs an approved action through the panel's operation path and waits for its result. The
-/// request is checked again first: the apps may have changed while the dialog was open.
-fn execute(app: &AppHandle, req: &pipe::Request, action: &pipe::Action) -> pipe::Reply {
+/// Runs an approved action, which `confirm::handle` has just checked again, through the panel's
+/// operation path and waits for its result.
+fn execute(app: &AppHandle, action: &pipe::Action) -> pipe::Reply {
     use pipe::Outcome::{Busy, Done, Failed, Running};
     let k = app.state::<Konak>();
-    match State::try_load(&k.paths).and_then(|s| pipe::validate(&s, req)) {
-        Ok(current) if current == *action => {}
-        Ok(_) => return reply(Failed, "the app changed while the request waited; nothing was done"),
-        Err(e) => return reply(Failed, format!("{e}; nothing was done")),
-    }
     let (tx, rx) = mpsc::channel();
     if let Err(e) = start_action(app.clone(), action, tx) {
         return if e == "busy" { reply(Busy, format!("{} has an operation in progress", action.id)) } else { reply(Failed, e) };
