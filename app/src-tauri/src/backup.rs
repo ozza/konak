@@ -1036,6 +1036,100 @@ mod tests {
         assert!(host.busy.borrow().is_empty());
     }
 
+    /// A real backup in a throwaway distro. Env: `KONAK_TEST_DISTRO=konak-<name>`, `KONAK_TEST_HOME`,
+    /// `KONAK_TEST_OUT` (backup folder), `KONAK_TEST_PHOTOS`. Provisions the distro with the setup's
+    /// distro/systemd/engine steps when it is missing, installs Vaultwarden and Nextcloud (already
+    /// listed in state.json, so no LAN name check runs), backs up, verifies and lists the archive.
+    #[test]
+    #[ignore]
+    fn live_backup() {
+        use std::io::Read;
+        let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
+        let distro = env("KONAK_TEST_DISTRO");
+        assert!(distro.starts_with("konak-") && distro != "konak", "only a throwaway Konak distro");
+        let home = PathBuf::from(env("KONAK_TEST_HOME"));
+        let out = PathBuf::from(env("KONAK_TEST_OUT"));
+        let photos = PathBuf::from(env("KONAK_TEST_PHOTOS"));
+        let res = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+        let paths = Paths { home: home.clone(), distro: distro.clone(), bin: res.join("bin"), media: photos.with_file_name("media"), photos: photos.clone() };
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::create_dir_all(&photos).unwrap();
+        std::fs::write(photos.join("p1.jpg"), vec![7u8; 300_000]).unwrap();
+        let t = Instant::now();
+        if !crate::installer::distro_exists(&distro).unwrap() {
+            let sup = crate::services::Supervisor::new(paths.clone());
+            let mut st = State::default();
+            for step in ["distro", "systemd", "engine"] {
+                crate::installer::run_step(step, &paths, &mut st, &crate::installer::Preflight::default(), false, &sup).unwrap();
+                println!("{step} done at {:.0} s", t.elapsed().as_secs_f64());
+            }
+        }
+        let mut st = State::try_load(&paths).unwrap();
+        st.done = true;
+        for id in ["vaultwarden", "nextcloud"] {
+            if !st.apps.iter().any(|a| a.id == id) {
+                st.apps.push(InstalledApp { id: id.into(), name: id.into(), installed_unix: now(), claimed: false, stopped: false });
+            }
+        }
+        st.save(&paths);
+        for id in ["vaultwarden", "nextcloud"] {
+            crate::apps::install(&paths, id).unwrap();
+            println!("{id} installed at {:.0} s", t.elapsed().as_secs_f64());
+        }
+        let mut s = settings::load(&paths);
+        s.backup.location = Some(out.to_string_lossy().to_string());
+        s.backup.schedule.kind = "off".into();
+        settings::save(&paths, &s).unwrap();
+        if !settings::password_set(&paths) {
+            settings::set_password(&paths, None, "live test password 1").unwrap();
+        }
+        struct Print;
+        impl Host for Print {
+            fn progress(&self, p: &Progress) {
+                println!("progress {} {} {:?} {:?}/{:?} {:?}", p.state, p.step, p.app, p.done_bytes, p.total_bytes, p.error);
+            }
+            fn try_busy(&self, _: &str) -> bool {
+                true
+            }
+            fn release(&self, id: &str, r: &Result<(), String>) {
+                println!("release {id}: {r:?}");
+            }
+        }
+        let apps = DistroApps(&paths);
+        let before: Vec<bool> = ["vaultwarden", "nextcloud"].iter().map(|id| apps.running(id).unwrap()).collect();
+        let t1 = Instant::now();
+        let guard = Guard::acquire().unwrap();
+        let file = run(&paths, &Print, &apps, &guard, fmt::SCRYPT_LOG_N).unwrap();
+        println!("backup took {:.1} s, {} bytes: {}", t1.elapsed().as_secs_f64(), std::fs::metadata(&file).unwrap().len(), file.display());
+        let after: Vec<bool> = ["vaultwarden", "nextcloud"].iter().map(|id| apps.running(id).unwrap()).collect();
+        assert_eq!(before, after, "apps back in their previous state");
+        // The folder chunks concatenate to a tar of the app folder, .env included.
+        let pw = SecretString::from("live test password 1".to_string());
+        let b = fmt::open(&file, &pw).unwrap();
+        println!("manifest: {}", serde_json::to_string(&b.manifest).unwrap());
+        let mut streams: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
+        let sums = b
+            .for_each_entry(|e, p, r| {
+                if let fmt::Entry::AppFolder { .. } | fmt::Entry::AppVolume { .. } = e {
+                    let key = p.rsplit_once('/').unwrap().0.to_string();
+                    r.read_to_end(streams.entry(key).or_default()).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        println!("{} entries, skipped {:?}", sums.entries.len(), sums.skipped);
+        for (k, v) in &streams {
+            let mut a = tar::Archive::new(v.as_slice());
+            let names: Vec<String> = a.entries().unwrap().map(|e| e.unwrap().path().unwrap().to_string_lossy().to_string()).collect();
+            println!("{k}: {} bytes, {} members, e.g. {:?}", v.len(), names.len(), &names[..names.len().min(3)]);
+            if k.ends_with("/folder") {
+                assert!(names.iter().any(|n| n.ends_with("/.env")), "{k}");
+            }
+        }
+        assert!(streams.contains_key("apps/nextcloud/volumes/db") && streams.contains_key("apps/nextcloud/volumes/nextcloud"));
+        println!("list: {:?}", list(&paths));
+    }
+
     /// The whole run without a distro: no apps, the Konak files and a Photos folder, into a real
     /// folder; then verified, listed and pruned.
     #[test]
