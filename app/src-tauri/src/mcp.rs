@@ -256,7 +256,7 @@ impl Server {
         self.run(|p, d| Ok(resources(p, d))).await
     }
 
-    #[tool(description = "Runs the known failure checks and reports ok/warn/fail with evidence and a one-line suggested fix each: shared-namespace FORWARD policy, stale netavark rules, distro keepalive, port 80 owner, LAN adapter choice. Never fixes anything.")]
+    #[tool(description = "Runs the known failure checks and reports ok/warn/fail with evidence and a one-line suggested fix each: shared-namespace FORWARD policy, stale netavark rules, distro keepalive, port 80 owner, LAN adapter choice, WSL networking mode (nat or mirrored) and its reserved port range. Never fixes anything.")]
     async fn diagnose(&self) -> Result<String, String> {
         self.run(|p, _| Ok(json!({"checks": diag::diagnose(&diag::gather(p))}))).await
     }
