@@ -71,7 +71,8 @@ pub struct Summary {
     pub failed: Vec<AppFailure>,
     pub photos: Option<FolderResult>,
     pub media: Option<FolderResult>,
-    /// Codes: `restore_ca_restored`, `restore_ca_kept` (chosen, but this Konak has apps), `restore_ca_invalid`
+    /// Codes: `restore_volume_ignored` (a volume the catalog's compose does not declare for that
+    /// app), `restore_ca_restored`, `restore_ca_kept` (chosen, but this Konak has apps), `restore_ca_invalid`
     /// (not a root as Konak makes it), `restore_ca_failed`, `restore_settings_kept`.
     pub notes: Vec<&'static str>,
 }
@@ -725,6 +726,8 @@ struct Turn {
     next_index: u32,
     folder_done: bool,
     volumes_done: Vec<String>,
+    /// Volumes of the manifest the catalog does not declare: their entries are read past.
+    ignored_volumes: Vec<String>,
 }
 
 enum Current {
@@ -812,13 +815,26 @@ impl Walk<'_> {
         if !self.req.apps.iter().any(|a| a == id) {
             return skip;
         }
-        let Some(am) = self.manifest.apps.iter().find(|a| a.id == id).cloned() else {
+        let Some(mut am) = self.manifest.apps.iter().find(|a| a.id == id).cloned() else {
             self.record_failure(id, "backup_damaged: the app is not in the manifest".into());
             return skip;
         };
-        if catalog::get(id).is_none() {
+        let Some(m) = catalog::get(id) else {
             self.record_failure(id, "unknown_app".into());
             return skip;
+        };
+        let ignored_volumes = match catalog_volumes(m, &mut am) {
+            Ok(ignored) => ignored,
+            Err(e) => {
+                self.record_failure(id, e);
+                return skip;
+            }
+        };
+        if !ignored_volumes.is_empty() {
+            crate::log(self.ctx.paths, &format!("restore {id}: volumes {ignored_volumes:?} of the backup are not the catalog's; ignored"));
+            if !self.summary.notes.contains(&"restore_volume_ignored") {
+                self.summary.notes.push("restore_volume_ignored");
+            }
         }
         if !self.ctx.host.try_busy(id) {
             self.record_failure(id, "busy".into());
@@ -852,7 +868,7 @@ impl Walk<'_> {
         if let Some(from) = &renamed_from {
             crate::log(self.ctx.paths, &format!("restore {id}: {from}.local is taken; restoring it as {name}.local"));
         }
-        self.current = Current::Turn(Box::new(Turn { am, name, renamed_from, _reservation: reservation, old, had_old, sink: None, next_index: 0, folder_done: false, volumes_done: vec![] }));
+        self.current = Current::Turn(Box::new(Turn { am, name, renamed_from, _reservation: reservation, old, had_old, sink: None, next_index: 0, folder_done: false, volumes_done: vec![], ignored_volumes }));
         if had_old {
             if let Err(e) = self.target.set_aside(id) {
                 self.fail_current(e);
@@ -865,6 +881,9 @@ impl Walk<'_> {
     /// Streams one chunk into the app's folder or one of its volumes.
     fn feed(&mut self, volume: Option<&str>, index: u32, data: &mut Tracked) -> Result<(), String> {
         let Current::Turn(t) = &mut self.current else { return Ok(()) };
+        if volume.is_some_and(|v| t.ignored_volumes.iter().any(|i| i == v)) {
+            return Ok(());
+        }
         let id = t.am.id.clone();
         let stage = match volume {
             None => Stage::Folder,
@@ -968,6 +987,28 @@ fn stage_name(s: &Stage) -> String {
         Stage::Folder => "the folder".into(),
         Stage::Volume(v) => format!("volume {v}"),
     }
+}
+
+/// Sets the app's volumes to those the catalog's compose declares for it (less `SKIP_VOLUMES`),
+/// with the Podman names docker-compose gives them (`<id>_<name>`), never the manifest's names.
+/// Returns the manifest's other volumes (ignored); every declared one must be in the backup.
+fn catalog_volumes(m: &catalog::Manifest, am: &mut AppManifest) -> Result<Vec<String>, String> {
+    let id = am.id.clone();
+    let declared: Vec<String> = m.named_volumes().into_iter().filter(|v| !crate::backup::SKIP_VOLUMES.contains(&(id.as_str(), v.as_str()))).collect();
+    let mut ignored = vec![];
+    let mut kept: Vec<VolumeManifest> = vec![];
+    for v in std::mem::take(&mut am.volumes) {
+        if !declared.contains(&v.name) {
+            ignored.push(v.name);
+        } else if !kept.iter().any(|k| k.name == v.name) {
+            kept.push(VolumeManifest { podman_name: format!("{id}_{}", v.name), name: v.name });
+        }
+    }
+    if let Some(missing) = declared.iter().find(|d| !kept.iter().any(|k| &k.name == *d)) {
+        return Err(format!("backup_damaged: volume {missing} is missing"));
+    }
+    am.volumes = kept;
+    Ok(ignored)
 }
 
 /// The app's data is all in: render, start, check, and record it.
@@ -1304,7 +1345,7 @@ mod tests {
     #[test]
     fn a_replaced_app_is_moved_aside_and_put_back_when_the_restore_fails() {
         let (paths, file) = setup("aside", &[("vaultwarden", "vault-a", false), ("nextcloud", "cloud-a", false)]);
-        let apps = [app("vaultwarden", "vault-a", false, &[]), app("nextcloud", "files-a", false, &["db"])];
+        let apps = [app("vaultwarden", "vault-a", false, &[]), app("nextcloud", "files-a", false, &["db", "nextcloud"])];
         write_backup(&file, &apps, None, &[]);
         let host = FakeHost::default();
         let target = FakeTarget { fail_up: vec!["vaultwarden".into()], ..Default::default() };
@@ -1326,6 +1367,7 @@ mod tests {
                 "aside nextcloud",
                 "folder nextcloud",
                 "volume nextcloud nextcloud_db",
+                "volume nextcloud nextcloud_nextcloud",
                 "up nextcloud files-a claimed=true up=true",
                 "commit nextcloud",
             ]
@@ -1335,6 +1377,35 @@ mod tests {
         let names: Vec<(&str, &str, u64)> = state.apps.iter().map(|a| (a.id.as_str(), a.name.as_str(), a.installed_unix)).collect();
         assert_eq!(names, [("vaultwarden", "vault-a", 7), ("nextcloud", "files-a", 7)], "the failed one unchanged, the replaced one renamed");
         assert_eq!(*host.released.borrow(), [("vaultwarden".to_string(), false), ("nextcloud".to_string(), true)]);
+    }
+
+    #[test]
+    fn volume_names_come_from_the_catalog_not_the_manifest() {
+        let (paths, file) = setup("volumes", &[]);
+        // The manifest points nextcloud's db at Immich's volume and adds a volume of its own.
+        let mut nc = app("nextcloud", "cloud-v", false, &["db", "nextcloud", "pgdata"]);
+        nc.volumes[0].podman_name = "immich_pgdata".into();
+        // Forgejo declares no volumes; one in the backup is ignored too.
+        let fj = app("forgejo", "git-v", false, &["extra"]);
+        // Nextcloud without its file volume: incomplete, refused before anything changes.
+        let short = app("nextcloud", "cloud-s", false, &["db"]);
+        write_backup(&file, &[nc, fj], None, &[]);
+        let (host, target) = (FakeHost::default(), FakeTarget::default());
+        let summary = restore(&paths, &host, &target, &request(&file, &["nextcloud", "forgejo"], false, false)).unwrap();
+        let calls = target.calls.borrow().clone();
+        let (paths2, file2) = setup("volumes-short", &[]);
+        write_backup(&file2, &[short], None, &[]);
+        let target2 = FakeTarget::default();
+        let summary2 = restore(&paths2, &FakeHost::default(), &target2, &request(&file2, &["nextcloud"], false, false)).unwrap();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        let _ = std::fs::remove_dir_all(&paths2.home);
+        assert!(summary.failed.is_empty(), "{:?}", summary.failed);
+        assert_eq!(summary.notes, ["restore_settings_kept", "restore_volume_ignored"]);
+        let volumes: Vec<&String> = calls.iter().filter(|c| c.starts_with("volume ")).collect();
+        assert_eq!(volumes, ["volume nextcloud nextcloud_db", "volume nextcloud nextcloud_nextcloud"]);
+        assert!(!calls.iter().any(|c| c.contains("immich") || c.contains("pgdata") || c.contains("extra")), "{calls:?}");
+        assert_eq!(summary2.failed, [AppFailure { id: "nextcloud".into(), error: "backup_damaged: volume nextcloud is missing".into() }]);
+        assert!(target2.calls.borrow().is_empty(), "{:?}", target2.calls.borrow());
     }
 
     #[test]

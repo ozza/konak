@@ -124,6 +124,26 @@ pub fn get(id: &str) -> Option<&'static Manifest> {
 }
 
 impl Manifest {
+    /// The named volumes compose.yml declares at its top level (`volumes:` / `  db:`).
+    pub fn named_volumes(&self) -> Vec<String> {
+        let mut out = vec![];
+        let mut inside = false;
+        for line in self.compose.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if !line.starts_with(' ') {
+                inside = line.trim_end() == "volumes:";
+            } else if inside && line.starts_with("  ") && !line.starts_with("   ") {
+                if let Some((name, _)) = t.split_once(':') {
+                    out.push(name.trim().to_string());
+                }
+            }
+        }
+        out
+    }
+
     /// The app-folder entries its containers bind-mount (`./forgejo:/data`, `DB_DATA_LOCATION:
     /// ./postgres`): the first path component of every `./...` bind source in compose.yml and of
     /// every `./...` env value.
@@ -194,6 +214,16 @@ mod tests {
         for m in all {
             assert!(m.compose.contains("@sha256:"), "{} has no pinned image", m.id);
             assert!(PORT_RANGE.contains(&m.port));
+        }
+    }
+
+    #[test]
+    fn named_volumes_of_the_catalog() {
+        let vols = |id: &str| get(id).unwrap().named_volumes();
+        assert_eq!(vols("nextcloud"), ["db", "nextcloud"]);
+        assert_eq!(vols("immich"), ["model-cache"]);
+        for id in ["forgejo", "jellyfin", "vaultwarden"] {
+            assert!(vols(id).is_empty(), "{id}");
         }
     }
 

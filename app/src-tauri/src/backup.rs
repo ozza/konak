@@ -33,7 +33,7 @@ const SPACE_MARGIN: u64 = 64 << 20;
 const BUSY_WAIT: Duration = Duration::from_secs(10 * 60);
 const HISTORY_MAX: usize = 30;
 /// Named volumes that are not backed up (re-downloadable).
-const SKIP_VOLUMES: &[(&str, &str)] = &[("immich", "model-cache")];
+pub(crate) const SKIP_VOLUMES: &[(&str, &str)] = &[("immich", "model-cache")];
 
 // ---- One run at a time ---------------------------------------------------------------------------
 
