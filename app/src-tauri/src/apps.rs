@@ -272,7 +272,7 @@ pub fn validate_name(state: &State, id: &str, name: &str) -> Result<(), String> 
 pub fn name_free_on_lan(paths: &Paths, name: &str) -> Result<bool, String> {
     let ip = lan_ip().ok_or("no_lan_ip")?;
     let out = shell::run(&paths.mdns().to_string_lossy(), &[&ip, "1", name, "--check-only"]);
-    crate::log(paths, &format!("name check {name}: {}", tail(&out.text, 1)));
+    crate::log(paths, &format!("name check {name}: {}", Redactor::new(vec![]).apply(&tail(&out.text, 1))));
     Ok(out.ok)
 }
 
@@ -385,7 +385,33 @@ fn run_install(paths: &Paths, m: &Manifest, name: &str, claimed: bool, hook: Opt
     if !out.ok {
         return Err(redacted(paths, &format!("install of {} failed: {}", m.id, tail(&out.text, 6))));
     }
+    if up {
+        windows_side_check(&m.id, m.port, PORT_WINDOW)?;
+    }
     Ok(())
+}
+
+/// How long the published port may take to answer from Windows once the app itself answered.
+const PORT_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The install script's health probe goes to the container's own address, which proves the app is
+/// up but not that Caddy can reach it. Caddy connects to `127.0.0.1:<port>` on Windows, which reaches
+/// the published port through WSL (localhost forwarding in NAT mode, the mirrored loopback in
+/// mirrored mode) and netavark's port forward; a stale forward rule or a FORWARD DROP set by another
+/// distro breaks only that leg. So the same path is probed from here, for up to `window`.
+fn windows_side_check(id: &str, port: u16, window: std::time::Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + window;
+    loop {
+        if crate::diag::port_answers(port, std::time::Duration::from_secs(3)) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "{id} runs, but its published port 127.0.0.1:{port} does not answer from Windows, so Caddy cannot reach it (stale port forward rules, or another WSL distro's FORWARD policy; run diagnostics)"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
 
 fn manifest(id: &str) -> Result<&'static Manifest, String> {
@@ -413,7 +439,7 @@ pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
             // The containers may already run, holding the port and RAM, while the panel shows the app
             // as not installed. Stop them; the data stays, so a retry reuses its secrets.
             let out = shell::distro_script(&paths.distro, REMOVE_SH, &[id, "keep"]);
-            crate::log(paths, &format!("install of {id} failed; containers removed, data kept: {}", tail(&out.text, 1)));
+            crate::log(paths, &format!("install of {id} failed; containers removed, data kept: {}", redacted(paths, &tail(&out.text, 1))));
         }
         return Err(e);
     }
@@ -445,7 +471,7 @@ pub fn remove(paths: &Paths, id: &str, delete_data: bool) -> Result<(), String> 
     manifest(id)?;
     let mode = if delete_data { "--delete-data" } else { "keep" };
     let out = shell::distro_script(&paths.distro, REMOVE_SH, &[id, mode]);
-    crate::log(paths, &format!("remove {id} ({mode}): {}", tail(&out.text, 2)));
+    crate::log(paths, &format!("remove {id} ({mode}): {}", redacted(paths, &tail(&out.text, 2))));
     if !out.ok {
         return Err(redacted(paths, &format!("remove of {id} failed: {}", tail(&out.text, 6))));
     }
@@ -590,7 +616,7 @@ fn set_stopped(paths: &Paths, id: &str, stopped: bool) -> Result<(), String> {
 pub fn stop(paths: &Paths, id: &str) -> Result<(), String> {
     installed(paths, id)?;
     let out = shell::distro_script(&paths.distro, REMOVE_SH, &[id, "keep"]);
-    crate::log(paths, &format!("stop {id}: {}", tail(&out.text, 2)));
+    crate::log(paths, &format!("stop {id}: {}", redacted(paths, &tail(&out.text, 2))));
     if !out.ok {
         return Err(redacted(paths, &format!("stop of {id} failed: {}", tail(&out.text, 6))));
     }
@@ -754,6 +780,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!(r, Ok(()));
         assert_eq!(after.rendered_ports, WebPorts::FALLBACKS[1]);
+    }
+
+    #[test]
+    fn an_install_needs_its_published_port_to_answer_from_windows() {
+        use std::io::{Read, Write};
+        // Loopback only: nothing on the LAN, no firewall prompt.
+        let answering = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = answering.local_addr().unwrap().port();
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = answering.accept().unwrap();
+            let _ = c.read(&mut [0u8; 64]);
+            c.write_all(b"HTTP/1.0 200 OK\r\n\r\n").unwrap();
+        });
+        assert_eq!(windows_side_check("jellyfin", port, std::time::Duration::from_secs(5)), Ok(()));
+        server.join().unwrap();
+        let e = windows_side_check("jellyfin", closed, std::time::Duration::from_millis(1)).unwrap_err();
+        assert!(e.contains("runs, but its published port") && e.contains(&format!("127.0.0.1:{closed}")) && e.contains("from Windows"), "{e}");
     }
 
     #[test]
