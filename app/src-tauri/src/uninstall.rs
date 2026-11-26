@@ -260,7 +260,8 @@ pub fn run_value_owned(reg_query: &str, exe: &Path) -> bool {
         .any(|v| v.trim().strip_prefix('"').and_then(|v| v.split_once('"')).is_some_and(|(p, rest)| same_path(Path::new(p), exe) && rest.trim() == "--autostart"))
 }
 
-fn remove_run_value(exe: &Path) -> Result<String, String> {
+/// Also used by the Settings page's "start with Windows" switch.
+pub(crate) fn remove_run_value(exe: &Path) -> Result<String, String> {
     let out = shell::run("reg.exe", &["query", RUN_KEY, "/v", "Konak"]);
     if !out.ok {
         return Ok("no Run value".into());
