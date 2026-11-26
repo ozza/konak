@@ -162,6 +162,32 @@ pub fn process_image(pid: u32) -> Option<String> {
     }
 }
 
+/// Parent process id of `pid`, from a ToolHelp snapshot. The parent may have exited or its id been
+/// reused, so this only ever names who asked; it never decides anything.
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    // SAFETY: a snapshot handle we own and close; the entry's dwSize is set before the first call.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = None;
+        let mut more = Process32FirstW(snap, &mut e) != 0;
+        while more {
+            if e.th32ProcessID == pid {
+                found = Some(e.th32ParentProcessID);
+                break;
+            }
+            more = Process32NextW(snap, &mut e) != 0;
+        }
+        windows_sys::Win32::Foundation::CloseHandle(snap);
+        found
+    }
+}
+
 const MB: u64 = 1_048_576;
 
 /// (free, total) bytes of the drive holding `dir` (or its nearest existing parent).
@@ -701,6 +727,14 @@ pub fn diagnose(f: &Facts) -> Vec<Check> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_this_process_parent() {
+        let me = std::process::id();
+        let parent = parent_pid(me).expect("the test runner has a parent");
+        assert_ne!(parent, me);
+        assert_eq!(parent_pid(u32::MAX), None);
+    }
 
     #[test]
     fn decodes_utf16_and_utf8() {

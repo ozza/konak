@@ -514,7 +514,7 @@ fn pipe_request(app: &AppHandle, conn: &pipe::Pipe) -> pipe::Reply {
     if k.busy.lock().unwrap().contains(&action.id) {
         return reply(Busy, format!("{} has an operation in progress", action.id));
     }
-    let requester = conn.client_pid().and_then(diag::process_image);
+    let requester = conn.client_pid().and_then(requester_image);
     let id = match confirm::new_id() {
         Ok(id) => id,
         Err(e) => return reply(Failed, e),
@@ -552,6 +552,20 @@ fn pipe_request(app: &AppHandle, conn: &pipe::Pipe) -> pipe::Reply {
 
 /// True only when the user approved request `id` in the window. A denial, no answer within the
 /// timeout, and the client hanging up all give false.
+/// Who to name in the dialog. The pipe client is normally Konak's own `--mcp` process, which the AI
+/// client (claude.exe, node.exe, ...) started, so that parent is named instead. Display only.
+fn requester_image(pid: u32) -> Option<String> {
+    let image = diag::process_image(pid)?;
+    let own = std::env::current_exe().ok().and_then(|e| e.file_name().map(|f| f.to_os_string()));
+    let is_konak = own.is_some_and(|own| std::path::Path::new(&image).file_name().is_some_and(|f| f.eq_ignore_ascii_case(&own)));
+    if is_konak {
+        if let Some(parent) = diag::parent_pid(pid).and_then(diag::process_image) {
+            return Some(parent);
+        }
+    }
+    Some(image)
+}
+
 fn wait_for_answer(k: &Konak, conn: &pipe::Pipe, id: &str, answer: &mpsc::Receiver<bool>) -> bool {
     let deadline = Instant::now() + Duration::from_secs(confirm::ANSWER_TIMEOUT_S);
     loop {
