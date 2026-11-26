@@ -37,18 +37,21 @@ pub struct NameArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AppArgs {
     /// Installed app: its catalog id (e.g. `jellyfin`) or its `.local` name without the suffix.
     pub app: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InstallArgs {
     /// Catalog id of an app that is not installed yet: jellyfin, immich, nextcloud, vaultwarden or forgejo.
     pub app: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RemoveArgs {
     /// Installed app: its catalog id or its `.local` name without the suffix.
     pub app: String,
@@ -59,6 +62,7 @@ pub struct RemoveArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RenameArgs {
     /// Installed app: its catalog id or its current `.local` name without the suffix.
     pub app: String,
@@ -73,7 +77,8 @@ fn forward(paths: &Paths, req: Request) -> Result<Value, String> {
     match reply.outcome {
         Outcome::Done => Ok(json!({"outcome": "done", "request": what})),
         Outcome::Running => Ok(json!({"outcome": "running", "request": what, "note": "approved and still running after 15 minutes; konak_status shows the result"})),
-        Outcome::Denied => Err("denied: the person did not approve this in the Konak window (or did not answer within 5 minutes); nothing was changed".into()),
+        // Konak says why: not approved, or declined moments ago (the cooldown).
+        Outcome::Denied => Err(format!("denied: {}", reply.error.as_deref().unwrap_or("the person did not approve this in the Konak window; nothing was changed"))),
         o => Err(format!("{}: {}", format!("{o:?}").to_lowercase(), reply.error.unwrap_or_default())),
     }
 }
@@ -354,6 +359,25 @@ mod tests {
             assert!(d.contains("A person must approve this in the Konak window") && d.contains("waits"), "{w}: {d}");
         }
         assert_eq!(tools.len(), 13, "{names:?}");
+    }
+
+    /// rmcp deserializes tool arguments with serde before the tool runs, so an unknown argument
+    /// fails the call before any pipe request; the schema says so too.
+    #[test]
+    fn write_tools_reject_unknown_arguments() {
+        let parse = |v: Value| serde_json::from_value::<AppArgs>(v).map(|a| a.app);
+        assert_eq!(parse(json!({"app": "movies"})).unwrap(), "movies");
+        assert!(parse(json!({"app": "movies", "delete_data": true})).unwrap_err().to_string().contains("unknown field"));
+        assert!(serde_json::from_value::<InstallArgs>(json!({"app": "immich", "force": true})).is_err());
+        assert!(serde_json::from_value::<RemoveArgs>(json!({"app": "x", "delete_data": true, "name": "y"})).is_err());
+        assert!(serde_json::from_value::<RenameArgs>(json!({"app": "x", "name": "y", "delete_data": false})).is_err());
+        let tools = Server::tool_router().list_all();
+        for w in ["install_app", "remove_app", "start_app", "stop_app", "restart_app", "rename_app", "claim_app"] {
+            let schema = &tools.iter().find(|t| t.name == w).unwrap().input_schema;
+            assert_eq!(schema.get("additionalProperties"), Some(&json!(false)), "{w}: {schema:?}");
+            assert_eq!(schema.get("type"), Some(&json!("object")), "{w}");
+            assert!(schema["properties"].get("app").is_some(), "{w}: {schema:?}");
+        }
     }
 
     #[test]
