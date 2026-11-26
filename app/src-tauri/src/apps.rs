@@ -596,7 +596,7 @@ pub fn rerender_for_ports(paths: &Paths, ports: WebPorts, on_app: &dyn Fn(&str, 
 }
 
 /// Runs a docker-compose command for an installed app in its directory.
-fn compose(paths: &Paths, id: &str, args: &str) -> shell::Out {
+pub(crate) fn compose(paths: &Paths, id: &str, args: &str) -> shell::Out {
     let script = format!("set -e\ncd /var/lib/konak/apps/\"$1\"\nexport DOCKER_HOST=unix:///run/podman/podman.sock\ndocker-compose -p \"$1\" {args}\n");
     shell::distro_script(&paths.distro, &script, &[id])
 }
