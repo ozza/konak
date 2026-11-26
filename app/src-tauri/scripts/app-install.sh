@@ -46,11 +46,27 @@ if [ "$mode" = render ]; then echo rendered; exit 0; fi
 
 export DOCKER_HOST=unix:///run/podman/podman.sock
 docker-compose -p "$id" up -d --quiet-pull --remove-orphans
+
+# "<container IP>:<container port>" of the app's container that publishes host port $port, or
+# nothing yet (container not created or not running). The probe goes to the container directly:
+# under WSL mirrored networking, traffic the distro sends to its own 127.0.0.1:<port> never gets
+# netavark's masquerade (WSL's WSLOUTPUT chain overwrites the packet mark), so the container answers
+# its own loopback and the connection hangs. The container address works in NAT and mirrored mode.
+probe_target() {
+  local c
+  for c in $(podman ps -q --filter "label=com.docker.compose.project=$id" 2>/dev/null); do
+    podman inspect "$c" --format '{{range $p, $b := .NetworkSettings.Ports}}{{range $b}}P {{.HostPort}} {{$p}}{{println}}{{end}}{{end}}{{range .NetworkSettings.Networks}}I {{.IPAddress}}{{println}}{{end}}' 2>/dev/null |
+      awk -v hp="$port" '$1 == "P" && $2 == hp && $3 ~ /\/tcp$/ { split($3, a, "/"); cp = a[1] } $1 == "I" && $2 != "" && ip == "" { ip = $2 } END { if (cp != "" && ip != "") print ip ":" cp }'
+  done | head -1
+}
+
 # A wall-clock deadline: a black-holed port makes every curl hang until its own timeout.
+# The Host header stays what the app saw when it was probed on 127.0.0.1:<port>.
 healthy=0
 deadline=$((SECONDS + 300))
 while [ "$SECONDS" -lt "$deadline" ]; do
-  if curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$port$health"; then healthy=1; break; fi
+  target=$(probe_target || true)
+  if curl -fsS -o /dev/null --max-time 3 -H "Host: 127.0.0.1:$port" "http://${target:-127.0.0.1:$port}$health"; then healthy=1; break; fi
   sleep 2
 done
 [ "$healthy" = 1 ] || { echo "$id did not answer on $health within 5 minutes" >&2; exit 1; }
