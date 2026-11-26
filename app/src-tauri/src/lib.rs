@@ -930,6 +930,8 @@ fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<Stri
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| restore::run(&k.paths, &host, &target, &guard, &req)));
         if r.is_err() {
             log(&k.paths, "restore: the run panicked");
+            // The app whose turn was cut short goes back to its previous data, as at the next start.
+            restore::recover(&k.paths, &target);
             let held = host.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             for id in held {
                 restore::Host::release(&host, &id, &Err("internal error".into()));
@@ -1033,8 +1035,10 @@ pub fn run() {
                         Ok(s) if s == "nothing running" => {}
                         r => log(&paths, &format!("leftover processes: {r:?}")),
                     }
-                    // An app a backup stopped before Konak ended is started again.
+                    // An app a backup stopped before Konak ended is started again, and one a restore
+                    // left half done goes back to its previous data.
                     backup::recover(&paths, &backup::DistroApps(&paths));
+                    restore::recover(&paths, &restore::DistroTarget(&paths));
                     sup.start();
                 });
             }

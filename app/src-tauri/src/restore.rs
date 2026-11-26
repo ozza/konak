@@ -15,6 +15,10 @@
 //!    overwriting a file (`merge_file`).
 //!
 //! Errors the panel explains are short codes (`restore_app_exists`, ...); `Summary` lists the result.
+//!
+//! An app's turn is recorded in `restore-inflight.json` before anything of it changes. A Konak that
+//! ends mid-turn (closed, crashed, a panic) finds it at its next start (`recover`): the turn is
+//! rolled back to the app's previous data, or, if it had reached the commit, the commit is redone.
 
 use crate::apps;
 use crate::backup::Guard;
@@ -26,7 +30,7 @@ use crate::services::HOME_NAME;
 use crate::settings;
 use crate::shell;
 use age::secrecy::SecretString;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -262,6 +266,79 @@ impl Target for DistroTarget<'_> {
         }
         text.lines().last().and_then(|l| l.trim().parse().ok()).ok_or_else(|| format!("cannot read the distro's free space: {text}"))
     }
+}
+
+// ---- An app's turn in progress, across a crash -----------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+struct Inflight {
+    app: String,
+    had_old: bool,
+    /// The app's `state.json` entry before the restore, put back by a rollback.
+    old: Option<InstalledApp>,
+    /// `restore` (roll back after a crash) or `commit` (restored and recorded; redo the commit).
+    phase: String,
+}
+
+fn inflight_file(paths: &Paths) -> PathBuf {
+    paths.home.join("restore-inflight.json")
+}
+
+fn mark(paths: &Paths, m: &Inflight) -> Result<(), String> {
+    settings::write_atomic(&inflight_file(paths), &serde_json::to_vec(m).unwrap()).map_err(|e| format!("cannot record the restore in progress: {e}"))
+}
+
+fn unmark(paths: &Paths) {
+    if let Err(e) = std::fs::remove_file(inflight_file(paths)) {
+        if e.kind() != io::ErrorKind::NotFound {
+            crate::log(paths, &format!("restore: cannot remove {}: {e}", inflight_file(paths).display()));
+        }
+    }
+}
+
+/// At start (before the supervisor), and after a restore run panicked: an app whose turn did not
+/// finish is rolled back to its previous data and `state.json` entry, and started again if it was
+/// running; a turn that had reached its commit is committed. The marker stays when that fails, so
+/// the next start tries again (and a new restore of the app meets `restore_aside_exists`). Returns
+/// the app's id.
+pub fn recover(paths: &Paths, target: &dyn Target) -> Option<String> {
+    let body = std::fs::read(inflight_file(paths)).ok()?;
+    let Ok(m) = serde_json::from_slice::<Inflight>(&body) else {
+        crate::log(paths, "restore: the record of an unfinished restore is unreadable; removed");
+        unmark(paths);
+        return None;
+    };
+    let id = m.app.clone();
+    if m.phase == "commit" {
+        match target.commit(&id) {
+            Ok(()) => {
+                crate::log(paths, &format!("restore {id}: an unfinished restore had been recorded; its set-aside copy is deleted now"));
+                unmark(paths);
+            }
+            Err(e) => crate::log(paths, &format!("restore {id}: deleting the set-aside copy failed again: {e}")),
+        }
+        return Some(id);
+    }
+    if let Err(e) = target.roll_back(&id, m.had_old) {
+        crate::log(paths, &format!("restore {id}: rolling back an unfinished restore failed, the set-aside data stays in the distro: {e}"));
+        return Some(id);
+    }
+    let old = m.old.clone();
+    let put_back = apps::update_state(paths, |s| match (s.apps.iter().position(|a| a.id == id), old) {
+        (Some(i), Some(o)) => s.apps[i] = o,
+        (Some(i), None) => {
+            s.apps.remove(i);
+        }
+        (None, Some(o)) => s.apps.push(o),
+        (None, None) => {}
+    });
+    let started = match &m.old {
+        Some(o) if !o.stopped => Some(target.start_old(&id)),
+        _ => None,
+    };
+    crate::log(paths, &format!("restore {id}: an unfinished restore was rolled back to the previous data (state.json: {put_back:?}, started again: {started:?})"));
+    unmark(paths);
+    Some(id)
 }
 
 // ---- Rules ---------------------------------------------------------------------------------------
@@ -935,6 +1012,12 @@ impl Walk<'_> {
         if let Some(from) = &renamed_from {
             crate::log(self.ctx.paths, &format!("restore {id}: {from}.local is taken; restoring it as {name}.local"));
         }
+        // Recorded before anything changes, so a Konak that ends mid-turn rolls it back at its next start.
+        if let Err(e) = mark(self.ctx.paths, &Inflight { app: id.to_string(), had_old, old: old.clone(), phase: "restore".into() }) {
+            self.ctx.host.release(id, &Err(e.clone()));
+            self.record_failure(id, e);
+            return skip;
+        }
         self.current = Current::Turn(Box::new(Turn { am, name, renamed_from, _reservation: reservation, old, had_old, sink: None, next_index: 0, folder_done: false, volumes_done: vec![], ignored_volumes }));
         if had_old {
             if let Err(e) = self.target.set_aside(id) {
@@ -1001,10 +1084,19 @@ impl Walk<'_> {
         let result = complete(self.ctx, self.target, &mut t);
         match result {
             Ok(()) => {
+                let paths = self.ctx.paths;
                 if t.had_old {
-                    if let Err(e) = self.target.commit(&id) {
-                        crate::log(self.ctx.paths, &format!("restore {id}: the set-aside copy was not deleted: {e}"));
+                    // From here a crash redoes the commit instead of rolling back.
+                    if let Err(e) = mark(paths, &Inflight { app: id.clone(), had_old: true, old: t.old.clone(), phase: "commit".into() }) {
+                        crate::log(paths, &format!("restore {id}: {e}"));
                     }
+                    match self.target.commit(&id) {
+                        Ok(()) => unmark(paths),
+                        // The marker stays: the next start deletes the set-aside copy.
+                        Err(e) => crate::log(paths, &format!("restore {id}: the set-aside copy was not deleted: {e}")),
+                    }
+                } else {
+                    unmark(paths);
                 }
                 self.ctx.host.release(&id, &Ok(()));
                 self.ctx.host.apps_changed();
@@ -1032,11 +1124,15 @@ impl Walk<'_> {
             }
         }
         if let Err(e) = self.target.roll_back(&id, t.had_old) {
+            // The marker stays: the next start tries the rollback again.
             crate::log(self.ctx.paths, &format!("restore {id}: rolling back failed, the set-aside data stays in the distro: {e}"));
             error = format!("{error}; rolling back failed: {e}");
-        } else if t.old.as_ref().is_some_and(|a| !a.stopped) {
-            if let Err(e) = self.target.start_old(&id) {
-                error = format!("{error}; the previous {id} did not start again: {e}");
+        } else {
+            unmark(self.ctx.paths);
+            if t.old.as_ref().is_some_and(|a| !a.stopped) {
+                if let Err(e) = self.target.start_old(&id) {
+                    error = format!("{error}; the previous {id} did not start again: {e}");
+                }
             }
         }
         crate::log(self.ctx.paths, &format!("restore {id} failed: {error}"));
@@ -1149,6 +1245,8 @@ mod tests {
         /// Free bytes in the distro and on Windows; `None`: plenty.
         distro_free: Option<u64>,
         windows_free: Option<u64>,
+        fail_rollback: bool,
+        panic_up: bool,
     }
 
     struct FakeSink {
@@ -1197,6 +1295,9 @@ mod tests {
         }
         fn roll_back(&self, id: &str, had_old: bool) -> Result<(), String> {
             self.call(format!("rollback {id} {had_old}"));
+            if self.fail_rollback {
+                return Err("rollback failed".into());
+            }
             Ok(())
         }
         fn commit(&self, id: &str) -> Result<(), String> {
@@ -1213,6 +1314,7 @@ mod tests {
         }
         fn bring_up(&self, id: &str, name: &str, claimed: bool, up: bool) -> Result<(), String> {
             self.call(format!("up {id} {name} claimed={claimed} up={up}"));
+            assert!(!self.panic_up, "a bug in the middle of a restore");
             if self.fail_up.iter().any(|f| f == id) {
                 return Err(format!("{id} did not answer on /health within 5 minutes"));
             }
@@ -1504,6 +1606,76 @@ mod tests {
         assert!(ok.unwrap().failed.is_empty());
         assert_eq!(no_photos.unwrap_err(), fail("verify", "restore_no_space"));
         assert!(!photos_written);
+    }
+
+    #[test]
+    fn a_restore_that_panics_mid_app_is_rolled_back_at_the_next_start() {
+        let (paths, file) = setup("crash", &[("vaultwarden", "vault-x", false)]);
+        write_backup(&file, &[app("vaultwarden", "vault-new", true, &[])], None, &[]);
+        let target = FakeTarget { panic_up: true, ..Default::default() };
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| restore(&paths, &FakeHost::default(), &target, &request(&file, &["vaultwarden"], true, false))));
+        let marker = std::fs::read(inflight_file(&paths)).ok().and_then(|b| serde_json::from_slice::<Inflight>(&b).ok());
+        let calls_at_crash = target.calls.borrow().len();
+        // The next start.
+        let recovered = recover(&paths, &target);
+        let again = recover(&paths, &target);
+        let state = State::load(&paths);
+        let calls = target.calls.borrow()[calls_at_crash..].to_vec();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert!(r.is_err());
+        let m = marker.unwrap();
+        assert_eq!((m.app.as_str(), m.had_old, m.phase.as_str()), ("vaultwarden", true, "restore"));
+        assert_eq!(recovered.as_deref(), Some("vaultwarden"));
+        assert_eq!(again, None, "the marker is gone once rolled back");
+        assert_eq!(calls, ["rollback vaultwarden true", "start_old vaultwarden"]);
+        assert_eq!(state.apps[0].name, "vault-x");
+    }
+
+    #[test]
+    fn recovery_puts_the_state_entry_back_commits_a_recorded_commit_and_keeps_a_failed_rollback() {
+        let (paths, _) = setup("recover", &[("forgejo", "git-restored", true), ("nextcloud", "cloud-restored", false)]);
+        let old = InstalledApp { id: "forgejo".into(), name: "git-old".into(), installed_unix: 3, claimed: true, stopped: true };
+        // A new app (no old data): its entry, which a crash left behind, is removed again.
+        mark(&paths, &Inflight { app: "nextcloud".into(), had_old: false, old: None, phase: "restore".into() }).unwrap();
+        let t = FakeTarget::default();
+        recover(&paths, &t);
+        let after_new = State::load(&paths).apps.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+        // A replaced, stopped app: its old entry comes back, it is not started.
+        mark(&paths, &Inflight { app: "forgejo".into(), had_old: true, old: Some(old.clone()), phase: "restore".into() }).unwrap();
+        recover(&paths, &t);
+        let after_old = State::load(&paths).apps;
+        mark(&paths, &Inflight { app: "forgejo".into(), had_old: true, old: Some(old.clone()), phase: "commit".into() }).unwrap();
+        recover(&paths, &t);
+        let commit_marker_left = inflight_file(&paths).exists();
+        let failing = FakeTarget { fail_rollback: true, ..Default::default() };
+        mark(&paths, &Inflight { app: "forgejo".into(), had_old: true, old: Some(old.clone()), phase: "restore".into() }).unwrap();
+        recover(&paths, &failing);
+        let failed_marker_left = inflight_file(&paths).exists();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(*t.calls.borrow(), ["rollback nextcloud false", "rollback forgejo true", "commit forgejo"]);
+        assert_eq!(after_new, ["forgejo"]);
+        assert_eq!(after_old, [old]);
+        assert!(!commit_marker_left);
+        assert!(failed_marker_left, "a failed rollback is tried again at the next start");
+    }
+
+    #[test]
+    fn a_turn_is_recorded_before_anything_changes_and_cleared_after() {
+        let (paths, file) = setup("marker", &[("vaultwarden", "vault-m", false)]);
+        write_backup(&file, &[app("vaultwarden", "vault-m", false, &[]), app("forgejo", "git-m", false, &[])], None, &[]);
+        let target = FakeTarget { fail_up: vec!["forgejo".into()], ..Default::default() };
+        let summary = restore(&paths, &FakeHost::default(), &target, &request(&file, &["vaultwarden", "forgejo"], true, false)).unwrap();
+        let marker_left = inflight_file(&paths).exists();
+        // The record cannot be written: the app fails before its data is touched.
+        std::fs::create_dir_all(inflight_file(&paths)).unwrap();
+        let blocked = FakeTarget::default();
+        let summary2 = restore(&paths, &FakeHost::default(), &blocked, &request(&file, &["vaultwarden"], true, false)).unwrap();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(summary.restored.len(), 1);
+        assert_eq!(summary.failed.len(), 1);
+        assert!(!marker_left, "cleared after a commit and after a rollback");
+        assert!(summary2.failed[0].error.contains("cannot record the restore in progress"), "{:?}", summary2.failed);
+        assert_eq!(*blocked.calls.borrow(), ["probe vaultwarden"], "nothing set aside");
     }
 
     #[test]
