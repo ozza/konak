@@ -494,7 +494,9 @@ impl Supervisor {
         let me = Arc::clone(self);
         std::thread::spawn(move || {
             let caddy = me.paths.caddy().to_string_lossy().to_string();
-            let owner = crate::diag::net_facts(&me.paths, Some(&ip)).ok().and_then(|n| crate::diag::port80_owner(&n, &ip, &caddy));
+            let hb = crate::diag::heartbeat(&me.paths);
+            let konak = crate::diag::KonakCaddy::new(hb.as_ref(), crate::installer::now(), &caddy);
+            let owner = crate::diag::net_facts(&me.paths, Some(&ip)).ok().and_then(|n| crate::diag::port80_owner(&n, &ip, konak));
             let mut w = me.web.lock().unwrap();
             // Back on port 80 meanwhile: there is no owner to show.
             if w.http == WebPorts::STANDARD.http || w.port80_owner == owner {

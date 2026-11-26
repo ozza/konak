@@ -552,11 +552,31 @@ impl Drop for Pass<'_> {
     }
 }
 
+/// The op and app a request line names, as sent, for the audit line. Read loosely, so a request
+/// that `parse` or `validate` refuses is still described; a field that is missing stays `None`.
+#[derive(Default, Debug, PartialEq)]
+pub struct Sent {
+    pub op: Option<String>,
+    pub app: Option<String>,
+}
+
+pub fn sent(line: &[u8]) -> Sent {
+    let v: serde_json::Value = serde_json::from_slice(line).unwrap_or_default();
+    let field = |k: &str| v.get(k).map(|x| x.as_str().map_or_else(|| x.to_string(), String::from));
+    Sent { op: field("op"), app: field("app") }
+}
+
 /// The `install.log` line for a finished pipe request: its confirmation id when it got one, who
-/// sent it, the outcome and the reason. The reason is debug-quoted, so a client cannot start a new
-/// log line.
-pub fn audit_line(id: Option<&str>, requester: Option<&str>, reply: &Reply) -> String {
+/// sent it, the outcome, the op and app it named, and the reason. The op, app and reason are
+/// debug-quoted, so a client cannot start a new log line.
+pub fn audit_line(id: Option<&str>, requester: Option<&str>, sent: &Sent, reply: &Reply) -> String {
     let mut line = format!("mcp request {} from {}: {}", id.unwrap_or("-"), requester.unwrap_or("unknown"), reply.outcome.as_str());
+    if let Some(op) = &sent.op {
+        line.push_str(&format!(" op={op:?}"));
+    }
+    if let Some(app) = &sent.app {
+        line.push_str(&format!(" app={app:?}"));
+    }
     if let Some(e) = &reply.error {
         line.push_str(&format!(" {e:?}"));
     }
@@ -766,8 +786,14 @@ mod tests {
     #[test]
     fn audit_lines() {
         let r = Reply::new(Outcome::Invalid, Some("unknown_app: x\nfake line".into()));
-        assert_eq!(audit_line(None, Some(r"C:\a\node.exe"), &r), r#"mcp request - from C:\a\node.exe: invalid "unknown_app: x\nfake line""#);
-        assert_eq!(audit_line(Some("ab12"), None, &Reply::new(Outcome::Done, None)), "mcp request ab12 from unknown: done");
+        let s = sent(br#"{"op":"install","app":"x\nfake line"}"#);
+        assert_eq!(audit_line(None, Some(r"C:\a\node.exe"), &s, &r), r#"mcp request - from C:\a\node.exe: invalid op="install" app="x\nfake line" "unknown_app: x\nfake line""#);
+        assert_eq!(audit_line(Some("ab12"), None, &Sent::default(), &Reply::new(Outcome::Done, None)), "mcp request ab12 from unknown: done");
+        // Refused before parsing: whatever the line named is still shown; a non-string as its JSON.
+        let busy = Reply::new(Outcome::Busy, Some("jellyfin has an operation in progress".into()));
+        assert_eq!(audit_line(None, None, &sent(br#"{"op":"zap","app":7,"extra":1}"#), &busy), r#"mcp request - from unknown: busy op="zap" app="7" "jellyfin has an operation in progress""#);
+        assert_eq!(sent(b"not json"), Sent::default());
+        assert_eq!(sent(br#"{"op":"stop"}"#), Sent { op: Some("stop".into()), app: None });
     }
 
     fn test_name(tag: &str) -> String {

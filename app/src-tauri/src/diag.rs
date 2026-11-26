@@ -315,16 +315,50 @@ pub fn net_facts(paths: &Paths, ip: Option<&str>) -> Result<NetFacts, String> {
     Ok(facts)
 }
 
-/// Whether a listener on `ip` (or on all addresses) is Konak's Caddy: the heartbeat's pid, or the
-/// bundled caddy.exe.
-fn konak_listener(l: &Listener, ip: &str, caddy_pid: Option<u32>, caddy: &str) -> bool {
-    (l.address == ip || l.address == "0.0.0.0" || l.address == "::") && (Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(caddy)))
+/// How Konak's own Caddy is told from other programs on a port. A fresh heartbeat names Caddy's
+/// pid, and then only that process counts: another program can run the same bundled caddy.exe
+/// (integration run 6 blocked port 80 that way). Without a fresh heartbeat there is no pid to
+/// trust, so any process of the bundled caddy.exe counts.
+#[derive(Clone, Copy, Debug)]
+pub enum KonakCaddy<'a> {
+    /// The fresh heartbeat's Caddy pid; `None` while the supervisor has no Caddy running.
+    Pid(Option<u32>),
+    /// The bundled caddy.exe path.
+    Image(&'a str),
+}
+
+impl<'a> KonakCaddy<'a> {
+    pub fn new(hb: Option<&Heartbeat>, now: u64, caddy: &'a str) -> Self {
+        match hb.filter(|h| !h.stale(now)) {
+            Some(h) => KonakCaddy::Pid(h.pids.caddy),
+            None => KonakCaddy::Image(caddy),
+        }
+    }
+
+    fn is(&self, l: &Listener) -> bool {
+        match *self {
+            KonakCaddy::Pid(pid) => Some(l.pid) == pid,
+            KonakCaddy::Image(caddy) => l.image.as_deref().is_some_and(|i| norm_image(i) == norm_image(caddy)),
+        }
+    }
+}
+
+/// An image path for comparison: case and `/` versus `\` do not matter on Windows, and Tauri's
+/// resource dir carries the `\\?\` prefix that process image paths do not.
+fn norm_image(p: &str) -> String {
+    let p = p.replace('/', "\\");
+    p.strip_prefix(r"\\?\").unwrap_or(&p).to_lowercase()
+}
+
+/// Whether a listener on `ip` (or on all addresses) is Konak's Caddy.
+fn konak_listener(l: &Listener, ip: &str, konak: KonakCaddy) -> bool {
+    (l.address == ip || l.address == "0.0.0.0" || l.address == "::") && konak.is(l)
 }
 
 /// The other program holding port 80 on `ip`, as `httpd.exe (pid 1234)`. `None` when there is none
 /// or its image cannot be read (pid 4 is always the System process: http.sys, e.g. IIS).
-pub fn port80_owner(net: &NetFacts, ip: &str, caddy: &str) -> Option<String> {
-    let other = net.port80.iter().find(|l| (l.address == ip || l.address == "0.0.0.0" || l.address == "::") && !konak_listener(l, ip, None, caddy))?;
+pub fn port80_owner(net: &NetFacts, ip: &str, konak: KonakCaddy) -> Option<String> {
+    let other = net.port80.iter().find(|l| (l.address == ip || l.address == "0.0.0.0" || l.address == "::") && !konak_listener(l, ip, konak))?;
     let image = match (&other.image, other.pid) {
         (Some(path), _) => path.rsplit(['\\', '/']).next().unwrap_or(path).to_string(),
         (None, 4) => "System".to_string(),
@@ -333,12 +367,9 @@ pub fn port80_owner(net: &NetFacts, ip: &str, caddy: &str) -> Option<String> {
     Some(format!("{image} (pid {})", other.pid))
 }
 
-/// Whether Konak's Caddy (the heartbeat's pid, or the bundled caddy.exe) listens on port 80 of the
-/// LAN IP or on all addresses.
-pub fn konak_owns_port80(net: &NetFacts, ip: Option<&str>, caddy_pid: Option<u32>, caddy: &str) -> bool {
-    ip.is_some_and(|ip| {
-        net.port80.iter().any(|l| (l.address == ip || l.address == "0.0.0.0") && (Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(caddy))))
-    })
+/// Whether Konak's Caddy listens on port 80 of the LAN IP or on all addresses.
+pub fn konak_owns_port80(net: &NetFacts, ip: Option<&str>, konak: KonakCaddy) -> bool {
+    ip.is_some_and(|ip| net.port80.iter().any(|l| (l.address == ip || l.address == "0.0.0.0") && konak.is(l)))
 }
 
 /// LAN networking: the MCP `network_check` tool and the panel's host view.
@@ -355,8 +386,8 @@ pub fn network(paths: &Paths) -> Result<Network, String> {
     let lan_ip = crate::services::lan_ip();
     let facts = net_facts(paths, lan_ip.as_deref())?;
     let hb = heartbeat(paths);
-    let caddy_pid = hb.as_ref().and_then(|h| h.pids.caddy);
-    let konak_owns_port80 = konak_owns_port80(&facts, lan_ip.as_deref(), caddy_pid, &paths.caddy().to_string_lossy());
+    let caddy = paths.caddy().to_string_lossy().to_string();
+    let konak_owns_port80 = konak_owns_port80(&facts, lan_ip.as_deref(), KonakCaddy::new(hb.as_ref(), now(), &caddy));
     let (web_ports, port80_owner) = hb.map(|h| (h.web_ports, h.port80_owner)).unwrap_or_default();
     Ok(Network { lan_ip, facts, konak_owns_port80, web_ports, port80_owner })
 }
@@ -723,9 +754,9 @@ pub fn port80(f: &Facts) -> Check {
         Err(e) => return check("port80_owner", "warn", e.clone(), "Run the check again; PowerShell's NetTCPIP module must be available.").msg("port80_owner.net_error", &[]),
     };
     let Some(ip) = &f.lan_ip else { return check("port80_owner", "warn", "no LAN IP", "Connect the PC to the home network.").msg("no_network", &[]) };
-    let caddy_pid = f.heartbeat.as_ref().and_then(|h| h.pids.caddy);
+    let caddy = KonakCaddy::new(f.heartbeat.as_ref(), f.now, &f.caddy);
     let relevant: Vec<&Listener> = net.port80.iter().filter(|l| l.address == *ip || l.address == "0.0.0.0" || l.address == "::").collect();
-    let konak = |l: &Listener| Some(l.pid) == caddy_pid || l.image.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(&f.caddy));
+    let konak = |l: &Listener| caddy.is(l);
     // The first other program, as "httpd.exe (pid 4120)", for the panel's message.
     let owner = relevant.iter().find(|l| !konak(l)).map(|l| {
         let image = l.image.as_deref().map(|i| i.rsplit(['\\', '/']).next().unwrap_or(i).to_string()).unwrap_or_else(|| "?".into());
@@ -734,7 +765,7 @@ pub fn port80(f: &Facts) -> Check {
     let others: Vec<String> = relevant.iter().filter(|l| !konak(l)).map(|l| format!("{} pid {} {}", l.address, l.pid, l.image.as_deref().unwrap_or("(image unknown)"))).collect();
     // Konak's Caddy on the fallback port: apps stay reachable there, so a warning, not a failure.
     let fallback = f.heartbeat.as_ref().map(|h| h.web_ports).unwrap_or_default();
-    let on_fallback = f.heartbeat.as_ref().is_some_and(|h| !h.stale(f.now) && h.web_ports.is_fallback()) && net.fallback_http.iter().any(|l| konak_listener(l, ip, caddy_pid, &f.caddy));
+    let on_fallback = f.heartbeat.as_ref().is_some_and(|h| !h.stale(f.now) && h.web_ports.is_fallback()) && net.fallback_http.iter().any(|l| konak_listener(l, ip, caddy));
     let serving = format!("Konak serves its apps on the fallback ports instead: {} (HTTPS port {})", fallback.url(false, "<name>"), fallback.https);
     if !others.is_empty() {
         let evidence = format!("port 80 on {ip} held by another program: {}", others.join("; "));
@@ -1024,11 +1055,42 @@ mod tests {
         let caddy = r"C:\Konak\bin\caddy.exe";
         let net = |address: &str, pid: u32, image: Option<&str>| NetFacts { port80: vec![Listener { address: address.into(), pid, image: image.map(String::from) }], ..Default::default() };
         let ip = Some("192.168.1.5");
-        assert!(konak_owns_port80(&net("192.168.1.5", 22, None), ip, Some(22), caddy));
-        assert!(konak_owns_port80(&net("0.0.0.0", 9, Some(r"c:\konak\bin\CADDY.exe")), ip, None, caddy));
-        assert!(!konak_owns_port80(&net("192.168.1.5", 4, Some(r"C:\Windows\System32\httpd.exe")), ip, Some(22), caddy));
-        assert!(!konak_owns_port80(&net("10.0.0.2", 22, None), ip, Some(22), caddy), "another address");
-        assert!(!konak_owns_port80(&net("192.168.1.5", 22, None), None, Some(22), caddy), "no LAN IP");
+        let (pid, image) = (KonakCaddy::Pid(Some(22)), KonakCaddy::Image(caddy));
+        assert!(konak_owns_port80(&net("192.168.1.5", 22, None), ip, pid));
+        assert!(konak_owns_port80(&net("0.0.0.0", 9, Some(r"c:\konak\bin\CADDY.exe")), ip, image));
+        assert!(konak_owns_port80(&net("0.0.0.0", 9, Some(r"C:\Konak\bin\caddy.exe")), ip, KonakCaddy::Image(r"\\?\C:\Konak\bin\caddy.exe")), "Tauri's \\\\?\\ prefix");
+        assert!(!konak_owns_port80(&net("0.0.0.0", 9, Some(caddy)), ip, pid), "same caddy.exe, another pid");
+        assert!(!konak_owns_port80(&net("0.0.0.0", 9, Some(caddy)), ip, KonakCaddy::Pid(None)), "fresh heartbeat, no Caddy running");
+        assert!(!konak_owns_port80(&net("192.168.1.5", 4, Some(r"C:\Windows\System32\httpd.exe")), ip, pid));
+        assert!(!konak_owns_port80(&net("10.0.0.2", 22, None), ip, pid), "another address");
+        assert!(!konak_owns_port80(&net("192.168.1.5", 22, None), None, pid), "no LAN IP");
+    }
+
+    #[test]
+    fn konak_caddy_is_the_fresh_heartbeats_pid_else_the_image() {
+        let mut f = facts();
+        let caddy = f.caddy.clone();
+        assert!(matches!(KonakCaddy::new(f.heartbeat.as_ref(), f.now, &caddy), KonakCaddy::Pid(Some(22))));
+        f.heartbeat.as_mut().unwrap().last_tick_unix = 0;
+        assert!(matches!(KonakCaddy::new(f.heartbeat.as_ref(), f.now, &caddy), KonakCaddy::Image(_)), "stale heartbeat");
+        assert!(matches!(KonakCaddy::new(None, f.now, &caddy), KonakCaddy::Image(_)), "no heartbeat");
+    }
+
+    #[test]
+    fn another_process_of_the_bundled_caddy_on_port_80_is_another_program() {
+        // Konak's Caddy (pid 22) serves on the fallback; a second process of the same caddy.exe holds 80.
+        let mut f = facts();
+        let blocker = Listener { address: "0.0.0.0".into(), pid: 5150, image: Some(r"C:\Konak\bin\caddy.exe".into()) };
+        let net = f.net.as_mut().unwrap();
+        net.port80 = vec![blocker];
+        net.fallback_http = vec![Listener { address: "192.168.1.5".into(), pid: 22, image: Some(r"C:\Konak\bin\caddy.exe".into()) }];
+        f.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACKS[0];
+        let konak = KonakCaddy::new(f.heartbeat.as_ref(), f.now, r"\\?\C:\Konak\bin\caddy.exe");
+        assert_eq!(port80_owner(f.net.as_ref().unwrap(), "192.168.1.5", konak).as_deref(), Some("caddy.exe (pid 5150)"));
+        let c = port80(&f);
+        assert_eq!((c.status, c.code), ("warn", "port80_owner.fallback"), "{c:?}");
+        assert!(c.evidence.contains("pid 5150"), "{c:?}");
+        assert_eq!(c.args.get("owner").map(String::as_str), Some("caddy.exe (pid 5150)"));
     }
 
     #[test]
@@ -1043,7 +1105,7 @@ mod tests {
         assert_eq!(c.status, "warn", "{c:?}");
         assert!(c.evidence.contains("httpd.exe") && c.evidence.contains("pid 4242") && c.evidence.contains(":28080") && c.evidence.contains("HTTPS port 28443"), "{c:?}");
         assert!(c.fix.contains("returns to port 80 by itself"), "{c:?}");
-        assert_eq!(port80_owner(f.net.as_ref().unwrap(), "192.168.1.5", &f.caddy).as_deref(), Some("httpd.exe (pid 4242)"));
+        assert_eq!(port80_owner(f.net.as_ref().unwrap(), "192.168.1.5", KonakCaddy::new(f.heartbeat.as_ref(), f.now, &f.caddy)).as_deref(), Some("httpd.exe (pid 4242)"));
 
         // Caddy runs on neither port: still a failure.
         f.net.as_mut().unwrap().fallback_http.clear();
@@ -1059,7 +1121,8 @@ mod tests {
         // Port 80 free again, switch-back pending: a warning that needs nothing.
         let mut h = facts();
         h.net.as_mut().unwrap().port80.clear();
-        h.net.as_mut().unwrap().fallback_http = vec![Listener { address: "0.0.0.0".into(), pid: 9, image: Some(r"c:\konak\bin\CADDY.EXE".into()) }];
+        // The heartbeat's Caddy pid; with a fresh heartbeat the image alone no longer counts.
+        h.net.as_mut().unwrap().fallback_http = vec![Listener { address: "0.0.0.0".into(), pid: 22, image: Some(r"c:\konak\bin\CADDY.EXE".into()) }];
         h.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACKS[1];
         h.port80_bindable = Some(true);
         let c = port80(&h);
@@ -1179,13 +1242,13 @@ mod tests {
 
     #[test]
     fn port80_owner_names_the_program() {
-        let caddy = r"C:\Konak\bin\caddy.exe";
+        let caddy = KonakCaddy::Image(r"C:\Konak\bin\caddy.exe");
         let net = |l: Vec<Listener>| NetFacts { port80: l, ..Default::default() };
         let l = |address: &str, pid: u32, image: Option<&str>| Listener { address: address.into(), pid, image: image.map(String::from) };
         assert_eq!(port80_owner(&net(vec![l("0.0.0.0", 4, None)]), "10.0.0.2", caddy).as_deref(), Some("System (pid 4)"));
         assert_eq!(port80_owner(&net(vec![l("10.0.0.2", 77, None)]), "10.0.0.2", caddy), None, "image unknown");
         assert_eq!(port80_owner(&net(vec![l("10.0.0.9", 77, Some(r"C:\x\iis.exe"))]), "10.0.0.2", caddy), None, "another address");
-        assert_eq!(port80_owner(&net(vec![l("10.0.0.2", 22, Some(caddy))]), "10.0.0.2", caddy), None, "Konak's own Caddy");
+        assert_eq!(port80_owner(&net(vec![l("10.0.0.2", 22, Some(r"C:\Konak\bin\caddy.exe"))]), "10.0.0.2", caddy), None, "Konak's own Caddy");
         assert_eq!(port80_owner(&net(vec![]), "10.0.0.2", caddy), None);
     }
 

@@ -335,8 +335,12 @@ fn spawn_op_notify(
         k.busy.lock().unwrap().remove(&id);
         // Apply a changed app list to Caddy and mDNS now rather than at the next tick.
         k.sup.tick();
+        // Panel and MCP operations both get a result line in install.log.
         let (state, error) = match result {
-            Ok(()) => ("done", None),
+            Ok(()) => {
+                log(&k.paths, &format!("{op} {id} done"));
+                ("done", None)
+            }
             Err(e) => {
                 log(&k.paths, &format!("{op} {id} failed: {e}"));
                 ("failed", Some(e))
@@ -499,14 +503,15 @@ fn serve_pipe(app: AppHandle) {
 /// One connection: handled, or `busy` past the cap; then the reply and its audit line.
 fn serve_connection(app: &AppHandle, conn: &pipe::Pipe, gate: &pipe::Gate) {
     let requester = conn.client_pid().and_then(requester_image);
+    let mut sent = pipe::Sent::default();
     let (reply, id, linger) = match gate.enter() {
         Some(_pass) => {
-            let (r, id) = pipe_request(app, conn, requester.as_deref());
+            let (r, id) = pipe_request(app, conn, requester.as_deref(), &mut sent);
             (r, id, Duration::from_secs(5))
         }
         None => (reply(pipe::Outcome::Busy, "Konak is handling other requests; try again shortly"), None, Duration::from_secs(1)),
     };
-    log(&app.state::<Konak>().paths, &pipe::audit_line(id.as_deref(), requester.as_deref(), &reply));
+    log(&app.state::<Konak>().paths, &pipe::audit_line(id.as_deref(), requester.as_deref(), &sent, &reply));
     if let Ok(line) = serde_json::to_vec(&reply) {
         let _ = conn.write_line(&line);
     }
@@ -518,8 +523,8 @@ fn reply(outcome: pipe::Outcome, error: impl Into<String>) -> pipe::Reply {
 }
 
 /// One pipe request: read, validate, ask the user, and run it only if approved. Also returns the
-/// confirmation id once the request got one.
-fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>) -> (pipe::Reply, Option<String>) {
+/// confirmation id once the request got one, and fills `sent` for the audit line.
+fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>, sent: &mut pipe::Sent) -> (pipe::Reply, Option<String>) {
     use pipe::Outcome::{Busy, Denied, Failed, Invalid};
     let k = app.state::<Konak>();
     let line = match conn.read_line(pipe::MAX_REQUEST, Some(Instant::now() + pipe::REQUEST_TIMEOUT)) {
@@ -528,6 +533,7 @@ fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>) -> 
         Err(pipe::ReadError::Timeout) => return (reply(Invalid, "no request received"), None),
         Err(pipe::ReadError::Closed) => return (reply(Invalid, "connection closed"), None),
     };
+    *sent = pipe::sent(&line);
     let req = match pipe::parse(&line) {
         Ok(r) => r,
         Err(e) => return (reply(Invalid, e), None),
@@ -562,26 +568,63 @@ fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>) -> 
         Err(_) => return (reply(Busy, "another request is waiting for an answer in the Konak window"), None),
     };
     log(&k.paths, &format!("mcp request {id}: {} {} (delete_data={}, name={:?}) from {}", payload.op, payload.app, payload.delete_data, payload.name, requester.unwrap_or("unknown")));
+    call_attention(app, &payload);
+    let _ = app.emit("mcp-confirm", &payload);
+
+    let approved = wait_for_answer(&k, conn, &id, &answer);
+    if !approved {
+        // `serve_connection`'s audit line is the denial's only line.
+        let _ = app.emit("mcp-confirm-closed", serde_json::json!({ "id": id }));
+        return (reply(Denied, "the person did not approve this in the Konak window (or did not answer within 5 minutes); nothing was changed"), Some(id));
+    }
+    // Logged now: the operation may run for minutes before the audit line is written.
+    log(&k.paths, &format!("mcp request {id}: approved"));
+    // Lets the panel open the app's page before the operation starts.
+    let _ = app.emit("mcp-approved", serde_json::json!({ "id": id, "op": payload.op, "app": payload.app }));
+    (execute(app, &req, &action), Some(id))
+}
+
+/// Makes a request that waits for an answer hard to miss. Showing and focusing the window is not
+/// enough: Windows' foreground lock lets a background process (Konak, while the user works in the
+/// AI client) take the foreground only in narrow cases, so the window is restored but stays behind
+/// the client's (integration runs 5 and 6), and Tauri's `request_user_attention` did not visibly
+/// flash in run 6. Hence two more signals, neither of which the foreground lock blocks:
+/// - the taskbar button flashes (`FlashWindowEx`) until the window comes to the foreground, for a
+///   user who is looking at the screen;
+/// - a Windows notification names the action and the app, and stays in the notification centre,
+///   for a user who looks elsewhere or whose taskbar is hidden.
+fn call_attention(app: &AppHandle, payload: &confirm::Payload) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
-        // Windows' foreground lock lets a background process take the foreground only in some
-        // cases, so `set_focus` may leave the window behind the AI client's. Flashing the taskbar
-        // button until the window is activated is the fallback when that happens.
-        let _ = w.request_user_attention(Some(tauri::UserAttentionType::Critical));
+        if let Ok(hwnd) = w.hwnd() {
+            // Queued behind the calls above, on the thread that owns the window, so the flash
+            // starts once the window has a taskbar button again.
+            let hwnd = hwnd.0 as isize;
+            let _ = app.run_on_main_thread(move || flash_taskbar(hwnd as _));
+        }
     }
-    let _ = app.emit("mcp-confirm", &payload);
+    use tauri_plugin_notification::NotificationExt;
+    let (title, body) = attention_text(payload.op, &payload.app);
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        log(&app.state::<Konak>().paths, &format!("mcp request {}: notification not shown: {e}", payload.id));
+    }
+}
 
-    let approved = wait_for_answer(&k, conn, &id, &answer);
-    log(&k.paths, &format!("mcp request {id}: {}", if approved { "approved" } else { "denied" }));
-    if !approved {
-        let _ = app.emit("mcp-confirm-closed", serde_json::json!({ "id": id }));
-        return (reply(Denied, "the person did not approve this in the Konak window (or did not answer within 5 minutes); nothing was changed"), Some(id));
-    }
-    // Lets the panel open the app's page before the operation starts.
-    let _ = app.emit("mcp-approved", serde_json::json!({ "id": id, "op": payload.op, "app": payload.app }));
-    (execute(app, &req, &action), Some(id))
+/// The notification's title and body: the dialog's own title ("Install Jellyfin?") and intro.
+fn attention_text(op: &str, app: &str) -> (String, String) {
+    let key = format!("apps.{app}.name");
+    let name = Some(ui_text(&key)).filter(|n| *n != key).unwrap_or_else(|| app.to_string());
+    (ui_text(&format!("panel.mcp.title.{op}")).replace("{app}", &name), ui_text("panel.mcp.intro"))
+}
+
+/// Flashes the window's caption and taskbar button until the window comes to the foreground.
+fn flash_taskbar(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FlashWindowEx, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG};
+    let info = FLASHWINFO { cbSize: std::mem::size_of::<FLASHWINFO>() as u32, hwnd, dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG, uCount: 0, dwTimeout: 0 };
+    // SAFETY: a plain Win32 call with a struct of its own size; an invalid handle only fails it.
+    unsafe { FlashWindowEx(&info) };
 }
 
 /// True only when the user approved request `id` in the window. A denial, no answer within the
@@ -769,6 +812,8 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        // For `call_attention` only; the webview gets no notification permission.
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let paths = Paths::new(app.path().resource_dir()?);
             let sup = Supervisor::new(paths.clone());
@@ -909,4 +954,20 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attention_text_names_the_action_and_the_app() {
+        for op in [pipe::Op::Install, pipe::Op::Remove, pipe::Op::Start, pipe::Op::Stop, pipe::Op::Restart, pipe::Op::Rename, pipe::Op::Claim] {
+            let (title, body) = attention_text(op.as_str(), "jellyfin");
+            assert!(title.contains("Jellyfin") && !title.contains('{') && !title.starts_with("panel."), "{op:?}: {title}");
+            assert!(!body.is_empty() && !body.starts_with("panel."), "{body}");
+        }
+        // An id without a display name is shown as it is.
+        assert!(attention_text("install", "nosuchapp").0.contains("nosuchapp"));
+    }
 }

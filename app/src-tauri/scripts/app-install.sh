@@ -45,7 +45,9 @@ printf '%s\n' "$compose" > compose.yml
 if [ "$mode" = render ]; then echo rendered; exit 0; fi
 
 export DOCKER_HOST=unix:///run/podman/podman.sock
-docker-compose -p "$id" up -d --quiet-pull --remove-orphans
+# Progress goes to stdout with the rest, so the success line at the end is the output's last line
+# (Konak reads stdout, then stderr).
+docker-compose -p "$id" up -d --quiet-pull --remove-orphans 2>&1
 
 # "<container IP>:<container port>" of the app's container that publishes host port $port, or
 # nothing yet (container not created or not running). The probe goes to the container directly:
@@ -62,18 +64,20 @@ probe_target() {
 
 # A wall-clock deadline: a black-holed port makes every curl hang until its own timeout.
 # The Host header stays what the app saw when it was probed on 127.0.0.1:<port>.
-healthy=0
+# Failed probes are expected while the app starts: only the last one's error is kept, and it is
+# printed only when the app never answers.
+healthy=0 err="" start=$SECONDS
 deadline=$((SECONDS + 300))
 while [ "$SECONDS" -lt "$deadline" ]; do
   target=$(probe_target || true)
-  if curl -fsS -o /dev/null --max-time 3 -H "Host: 127.0.0.1:$port" "http://${target:-127.0.0.1:$port}$health"; then healthy=1; break; fi
+  if err=$(curl -fsS -o /dev/null --max-time 3 -H "Host: 127.0.0.1:$port" "http://${target:-127.0.0.1:$port}$health" 2>&1); then healthy=1; break; fi
   sleep 2
 done
-[ "$healthy" = 1 ] || { echo "$id did not answer on $health within 5 minutes" >&2; exit 1; }
+[ "$healthy" = 1 ] || { [ -z "$err" ] || echo "$err" >&2; echo "$id did not answer on $health within 5 minutes" >&2; exit 1; }
 
 if [ -n "$hook" ]; then
   # .env is exported line by line instead of sourced, so values are never run as shell code.
   while IFS= read -r line; do if [ -n "$line" ]; then export "$line"; fi; done < .env
-  bash -euo pipefail -c "$hook"
+  bash -euo pipefail -c "$hook" 2>&1
 fi
-echo healthy
+echo "healthy after $((SECONDS - start)) s"
