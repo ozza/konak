@@ -649,6 +649,20 @@ mod tests {
         assert!(!server.connected());
     }
 
+    /// `call` end to end: the server here is this same executable, so the identity check passes.
+    #[test]
+    fn call_checks_the_server_and_returns_its_reply() {
+        let distro = format!("test-call-{}-{}", std::process::id(), crate::confirm::new_id().unwrap());
+        let mut l = Listener::bind(&name(&distro)).unwrap();
+        let client = std::thread::spawn(move || call(&distro, &Request { op: Op::Remove, app: "git".into(), name: None, delete_data: Some(true) }));
+        let server = l.accept();
+        let got = parse(&server.read_line(MAX_REQUEST, Some(Instant::now() + REQUEST_TIMEOUT)).ok().unwrap()).unwrap();
+        assert_eq!(got.delete_data, Some(true));
+        server.write_line(br#"{"outcome":"failed","error":"remove of forgejo failed"}"#).unwrap();
+        server.linger(Duration::from_secs(5));
+        assert_eq!(client.join().unwrap().unwrap(), Reply::new(Outcome::Failed, Some("remove of forgejo failed".into())));
+    }
+
     #[test]
     fn missing_pipe_means_not_running() {
         assert_eq!(connect(&test_name("none")).err().unwrap(), NOT_RUNNING);
