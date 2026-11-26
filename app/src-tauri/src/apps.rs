@@ -24,7 +24,7 @@ pub const MAX_LOG_LINES: u32 = 1000;
 static STATE_LOCK: Mutex<()> = Mutex::new(());
 
 /// A `state.json` that cannot be read is never overwritten: the change fails with `state_unreadable`.
-fn update_state(paths: &Paths, f: impl FnOnce(&mut State)) -> Result<(), String> {
+pub(crate) fn update_state(paths: &Paths, f: impl FnOnce(&mut State)) -> Result<(), String> {
     let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut s = State::try_load(paths)?;
     f(&mut s);
@@ -278,10 +278,10 @@ pub fn name_free_on_lan(paths: &Paths, name: &str) -> Result<bool, String> {
 
 /// Names held by install and rename operations in progress (app id, name), so two of them cannot
 /// pick the same name before either one is saved in `state.json`.
-static RESERVED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+pub(crate) static RESERVED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 /// Holds a reserved name until the operation ends.
-struct Reservation(String);
+pub(crate) struct Reservation(String);
 
 impl Drop for Reservation {
     fn drop(&mut self) {
@@ -289,13 +289,13 @@ impl Drop for Reservation {
     }
 }
 
-fn reserved_by_other(reserved: &[(String, String)], id: &str, name: &str) -> bool {
+pub(crate) fn reserved_by_other(reserved: &[(String, String)], id: &str, name: &str) -> bool {
     reserved.iter().any(|(i, n)| i != id && n == name)
 }
 
 /// Checks `name` for app `id` against the saved apps and the names other operations hold, and
 /// reserves it, all under the state lock.
-fn reserve(paths: &Paths, id: &str, name: &str) -> Result<Reservation, String> {
+pub(crate) fn reserve(paths: &Paths, id: &str, name: &str) -> Result<Reservation, String> {
     let _guard = STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     validate_name(&State::try_load(paths)?, id, name)?;
     let mut reserved = RESERVED.lock().unwrap_or_else(|e| e.into_inner());
@@ -390,6 +390,15 @@ fn run_install(paths: &Paths, m: &Manifest, name: &str, claimed: bool, hook: Opt
         crate::log(paths, &format!("install {}: 127.0.0.1:{} answers from Windows", m.id, m.port));
     }
     Ok(())
+}
+
+/// Renders a restored app (its folder and volumes are in place) under `name` for the web ports Caddy
+/// serves on now, so the settings that embed the app's own address follow this PC. With `up` it is
+/// started with the install's health checks and the `post_rename` hook, which points settings the
+/// app stored itself (Nextcloud's trusted domain) at `name`; without, only the files are written.
+pub(crate) fn render_restored(paths: &Paths, id: &str, name: &str, claimed: bool, up: bool) -> Result<(), String> {
+    let m = manifest(id)?;
+    run_install(paths, m, name, claimed, m.post_rename.as_deref(), render_ports(paths)?, up)
 }
 
 /// How long the published port may take to answer from Windows once the app itself answered.

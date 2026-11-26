@@ -97,10 +97,50 @@ pub fn ensure(paths: &Paths) -> Result<(), String> {
 }
 
 fn cert_der(paths: &Paths) -> Result<Vec<u8>, String> {
-    let pem = std::fs::read_to_string(paths.ca_cert()).map_err(|e| format!("no root certificate: {e}"))?;
+    pem_der(&std::fs::read_to_string(paths.ca_cert()).map_err(|e| format!("no root certificate: {e}"))?)
+}
+
+fn pem_der(pem: &str) -> Result<Vec<u8>, String> {
     let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| e.to_string())
+}
+
+/// Whether `key_pem` is a private key and `cert_pem` a certificate carrying its public half.
+pub fn pair_matches(cert_pem: &str, key_pem: &str) -> bool {
+    let (Ok(key), Ok(der)) = (KeyPair::from_pem(key_pem), pem_der(cert_pem)) else { return false };
+    let public = key.public_key_raw();
+    cert_pem.starts_with("-----BEGIN CERTIFICATE-----") && der.windows(public.len()).any(|w| w == public)
+}
+
+/// Installs a root brought back by a restore, the way `ensure` writes a new one (folder and key
+/// locked down to the current user, the certificate renamed into place last). Caddy's intermediate
+/// and the leaves it issued under the old root are deleted, so it derives new ones from this root
+/// at its next start.
+pub fn install_root(paths: &Paths, cert_pem: &str, key_pem: &str) -> Result<(), String> {
+    let _guard = ENSURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !pair_matches(cert_pem, key_pem) {
+        return Err("the root certificate and key do not match".into());
+    }
+    let dir = paths.ca_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    restrict_to_user(&dir, true)?;
+    let (key_tmp, cert_tmp) = (dir.join("root.key.tmp"), dir.join("root.crt.tmp"));
+    std::fs::write(&key_tmp, key_pem).map_err(|e| e.to_string())?;
+    restrict_to_user(&key_tmp, false)?;
+    std::fs::write(&cert_tmp, cert_pem).map_err(|e| e.to_string())?;
+    std::fs::rename(&key_tmp, paths.ca_key()).map_err(|e| e.to_string())?;
+    std::fs::rename(&cert_tmp, paths.ca_cert()).map_err(|e| e.to_string())?;
+    let storage = paths.caddy_storage();
+    for p in [storage.join("pki").join("authorities").join("local"), storage.join("certificates").join("local")] {
+        if let Err(e) = std::fs::remove_dir_all(&p) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("cannot clear {}: {e}", p.display()));
+            }
+        }
+    }
+    crate::log(paths, "ca: root restored from a backup");
+    Ok(())
 }
 
 /// SHA-256 fingerprint as colon-separated upper-case hex, the form phones and browsers display.

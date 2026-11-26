@@ -699,6 +699,13 @@ impl Supervisor {
         }
     }
 
+    /// Restarts Caddy and the mDNS responder with a freshly written config at once, e.g. after the
+    /// root CA files were replaced (Caddy reads them only when it starts).
+    pub fn restart_web(self: &Arc<Self>) {
+        self.procs.lock().unwrap().config = None;
+        self.tick();
+    }
+
     /// Stops the children for good: later ticks (the loop, an op thread) do nothing.
     pub fn stop_all(&self) {
         *self.started.lock().unwrap() = false;
