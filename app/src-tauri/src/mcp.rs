@@ -1,10 +1,15 @@
 //! `konak.exe --mcp`: a headless MCP server on stdio (official Rust SDK `rmcp`) for AI agents doing
-//! troubleshooting. Local stdio only, read-only tools only; every string in every reply passes
+//! troubleshooting and app management. Local stdio only; every string in every reply passes
 //! through the redactor. Stdout carries protocol messages only: nothing else may print to it.
+//!
+//! The read-only tools work here directly. The write tools (install, remove, start, stop,
+//! restart, rename, claim) never act here: they forward the request over the pipe to the running
+//! Konak window (`pipe`), where a person approves or denies each one, and the call waits for that.
 
 use crate::diag::{self, Distro};
 use crate::installer::{now, State, STEPS};
 use crate::paths::Paths;
+use crate::pipe::{self, Op, Outcome, Request};
 use crate::redact::Redactor;
 use crate::services::{active_ports, lan_ip, HOME_NAME};
 use crate::shell::{self, tail};
@@ -29,6 +34,48 @@ pub struct LogsArgs {
 pub struct NameArgs {
     /// A `.local` name without the suffix, e.g. `movies`.
     pub name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct AppArgs {
+    /// Installed app: its catalog id (e.g. `jellyfin`) or its `.local` name without the suffix.
+    pub app: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct InstallArgs {
+    /// Catalog id of an app that is not installed yet: jellyfin, immich, nextcloud, vaultwarden or forgejo.
+    pub app: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RemoveArgs {
+    /// Installed app: its catalog id or its `.local` name without the suffix.
+    pub app: String,
+    /// Also delete the app's data (its database, settings and uploads inside Konak) for good.
+    /// Default false: the data is kept and a later install reuses it. Windows media and photo folders
+    /// are never deleted.
+    pub delete_data: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RenameArgs {
+    /// Installed app: its catalog id or its current `.local` name without the suffix.
+    pub app: String,
+    /// New `.local` name without the suffix: lowercase letters, digits and inner hyphens, at most 63.
+    pub name: String,
+}
+
+/// Forwards a write request to the running Konak and turns its reply into a tool result.
+fn forward(paths: &Paths, req: Request) -> Result<Value, String> {
+    let reply = pipe::call(&paths.distro, &req)?;
+    let what = json!({"op": req.op.as_str(), "app": req.app});
+    match reply.outcome {
+        Outcome::Done => Ok(json!({"outcome": "done", "request": what})),
+        Outcome::Running => Ok(json!({"outcome": "running", "request": what, "note": "approved and still running after 15 minutes; konak_status shows the result"})),
+        Outcome::Denied => Err("denied: the person did not approve this in the Konak window (or did not answer within 5 minutes); nothing was changed".into()),
+        o => Err(format!("{}: {}", format!("{o:?}").to_lowercase(), reply.error.unwrap_or_default())),
+    }
 }
 
 pub fn log_lines(lines: Option<u32>) -> u32 {
@@ -208,6 +255,47 @@ impl Server {
     async fn diagnose(&self) -> Result<String, String> {
         self.run(|p, _| Ok(json!({"checks": diag::diagnose(&diag::gather(p))}))).await
     }
+
+    /// Sends a write request to the Konak window and waits for the person's answer and the result.
+    async fn write(&self, op: Op, app: String, name: Option<String>, delete_data: Option<bool>) -> Result<String, String> {
+        let req = Request { op, app, name, delete_data };
+        self.run(move |p, _| forward(p, req)).await
+    }
+
+    #[tool(description = "Installs an app from Konak's catalog (jellyfin, immich, nextcloud, vaultwarden, forgejo). A person must approve this in the Konak window; the call waits for that answer (up to 5 minutes) and then for the install (up to 15 minutes). New apps stay reachable only from this PC until their admin account exists (see claim_app). Fails if Konak is not running.")]
+    async fn install_app(&self, Parameters(args): Parameters<InstallArgs>) -> Result<String, String> {
+        self.write(Op::Install, args.app, None, None).await
+    }
+
+    #[tool(description = "Removes an installed app's containers. With delete_data true its data inside Konak is deleted for good; by default it is kept. A person must approve this in the Konak window; the call waits for that answer (up to 5 minutes) and then for the removal. Fails if Konak is not running.")]
+    async fn remove_app(&self, Parameters(args): Parameters<RemoveArgs>) -> Result<String, String> {
+        self.write(Op::Remove, args.app, None, args.delete_data).await
+    }
+
+    #[tool(description = "Starts an installed app that was stopped. A person must approve this in the Konak window; the call waits for that answer (up to 5 minutes) and then for the start. Fails if Konak is not running.")]
+    async fn start_app(&self, Parameters(args): Parameters<AppArgs>) -> Result<String, String> {
+        self.write(Op::Start, args.app, None, None).await
+    }
+
+    #[tool(description = "Stops an installed app; its data is kept and it stays stopped until started again. A person must approve this in the Konak window; the call waits for that answer (up to 5 minutes) and then for the stop. Fails if Konak is not running.")]
+    async fn stop_app(&self, Parameters(args): Parameters<AppArgs>) -> Result<String, String> {
+        self.write(Op::Stop, args.app, None, None).await
+    }
+
+    #[tool(description = "Restarts an installed app's containers. A person must approve this in the Konak window; the call waits for that answer (up to 5 minutes) and then for the restart. Fails if Konak is not running.")]
+    async fn restart_app(&self, Parameters(args): Parameters<AppArgs>) -> Result<String, String> {
+        self.write(Op::Restart, args.app, None, None).await
+    }
+
+    #[tool(description = "Changes an installed app's .local name (checked for conflicts on the LAN first). A person must approve this in the Konak window; the call waits for that answer (up to 5 minutes) and then for the change. Fails if Konak is not running.")]
+    async fn rename_app(&self, Parameters(args): Parameters<RenameArgs>) -> Result<String, String> {
+        self.write(Op::Rename, args.app, Some(args.name), None).await
+    }
+
+    #[tool(description = "Marks an installed app as claimed: its admin account exists, so Konak publishes its .local name and makes it reachable from the LAN. Only do this after the admin account was created. A person must approve this in the Konak window; the call waits for that answer (up to 5 minutes) and then for the change. Fails if Konak is not running.")]
+    async fn claim_app(&self, Parameters(args): Parameters<AppArgs>) -> Result<String, String> {
+        self.write(Op::Claim, args.app, None, None).await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -215,7 +303,7 @@ impl ServerHandler for Server {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("konak", env!("CARGO_PKG_VERSION")))
-            .with_instructions("Read-only tools for inspecting a Konak home server on this Windows PC. Tools never start the Konak distro; when it is stopped they say so.")
+            .with_instructions("Tools for a Konak home server on this Windows PC. The read-only tools (konak_status, app_logs, network_check, mdns_check, resources, diagnose) never start the Konak distro; when it is stopped they say so. The write tools (install_app, remove_app, start_app, stop_app, restart_app, rename_app, claim_app) need the Konak app running: a person approves or denies each request in the Konak window, and the call waits for that answer (up to 5 minutes) and for the operation (up to 15 minutes). A denied request changes nothing; do not retry it without asking the person.")
     }
 }
 
@@ -254,6 +342,26 @@ mod tests {
         assert_eq!(resolve_app(&s, "movies.local").unwrap(), "jellyfin");
         assert!(resolve_app(&State::default(), "jellyfin").unwrap_err().starts_with("not_installed"));
         assert!(resolve_app(&s, "nope; rm -rf /").unwrap_err().starts_with("unknown_app"));
+    }
+
+    #[test]
+    fn write_tools_say_a_person_confirms() {
+        let tools = Server::tool_router().list_all();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        for w in ["install_app", "remove_app", "start_app", "stop_app", "restart_app", "rename_app", "claim_app"] {
+            let t = tools.iter().find(|t| t.name == w).unwrap_or_else(|| panic!("{w} missing from {names:?}"));
+            let d = t.description.as_deref().unwrap_or_default();
+            assert!(d.contains("A person must approve this in the Konak window") && d.contains("waits"), "{w}: {d}");
+        }
+        assert_eq!(tools.len(), 13, "{names:?}");
+    }
+
+    #[test]
+    fn write_without_konak_running_says_so() {
+        let home = std::env::temp_dir().join("konak-mcp-nopipe");
+        let paths = Paths { home: home.clone(), distro: format!("konak-nopipe-{}", std::process::id()), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let err = forward(&paths, Request { op: Op::Start, app: "jellyfin".into(), name: None, delete_data: None }).unwrap_err();
+        assert_eq!(err, pipe::NOT_RUNNING);
     }
 
     #[test]

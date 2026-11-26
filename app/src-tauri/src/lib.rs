@@ -1,10 +1,12 @@
 pub mod apps;
 pub mod ca;
 pub mod catalog;
+pub mod confirm;
 pub mod diag;
 pub mod installer;
 pub mod mcp;
 pub mod paths;
+pub mod pipe;
 pub mod redact;
 pub mod services;
 pub mod shell;
@@ -16,7 +18,8 @@ use serde::Serialize;
 use services::Supervisor;
 use std::collections::HashSet;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
@@ -50,6 +53,8 @@ struct Konak {
     rt: Mutex<Runtime>,
     /// App ids with an operation in progress; one operation per app at a time.
     busy: Mutex<HashSet<String>>,
+    /// The MCP write request waiting for the user's answer, if any.
+    confirm: Mutex<confirm::Slot>,
 }
 
 #[derive(Serialize, Clone)]
@@ -307,6 +312,17 @@ struct AppProgress {
 /// Runs an app operation on its own thread and reports through `app-progress` events. Returns
 /// `busy` at once when another operation on the same app is still running.
 fn spawn_op(app: AppHandle, id: String, op: &'static str, f: impl FnOnce(&Paths) -> Result<(), String> + Send + 'static) -> Result<(), String> {
+    spawn_op_notify(app, id, op, None, f)
+}
+
+/// `spawn_op`, and `done` receives the result when the operation ends.
+fn spawn_op_notify(
+    app: AppHandle,
+    id: String,
+    op: &'static str,
+    done: Option<mpsc::Sender<Result<(), String>>>,
+    f: impl FnOnce(&Paths) -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
     let k = app.state::<Konak>();
     if !k.busy.lock().unwrap().insert(id.clone()) {
         return Err("busy".into());
@@ -326,6 +342,9 @@ fn spawn_op(app: AppHandle, id: String, op: &'static str, f: impl FnOnce(&Paths)
                 ("failed", Some(e))
             }
         };
+        if let Some(done) = done {
+            let _ = done.send(error.clone().map_or(Ok(()), Err));
+        }
         let _ = handle.emit("app-progress", AppProgress { id, op, state, error });
     });
     Ok(())
@@ -437,6 +456,178 @@ fn stop_app(app: AppHandle, id: String) -> Result<(), String> {
 fn start_app(app: AppHandle, id: String) -> Result<(), String> {
     let id2 = id.clone();
     spawn_op(app, id, "start", move |p| apps::start(p, &id2))
+}
+
+// ---- MCP write requests over the pipe ------------------------------------------------------
+//
+// A pipe request reaches an app operation on one path only: `pipe_request` -> `wait_for_answer`
+// returns true -> `execute`. `wait_for_answer` returns true only when the receiver from
+// `confirm::Slot::open` yields `true`, and the only sender on it is `Slot::answer`, called by the
+// `mcp_answer` command with the request's id when the user clicks Approve in the window.
+
+/// How long an approved operation is waited for before the reply says `running`.
+const OP_WAIT: Duration = Duration::from_secs(15 * 60);
+
+/// Serves the MCP pipe for the life of the process; without it the MCP write tools report that
+/// Konak is not running.
+fn serve_pipe(app: AppHandle) {
+    let paths = app.state::<Konak>().paths.clone();
+    let mut listener = match pipe::Listener::bind(&pipe::name(&paths.distro)) {
+        Ok(l) => l,
+        Err(e) => return log(&paths, &format!("mcp pipe: {e}; the MCP write tools are off")),
+    };
+    loop {
+        let conn = listener.accept();
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            let reply = pipe_request(&handle, &conn);
+            if let Ok(line) = serde_json::to_vec(&reply) {
+                let _ = conn.write_line(&line);
+            }
+            conn.linger(Duration::from_secs(5));
+        });
+    }
+}
+
+fn reply(outcome: pipe::Outcome, error: impl Into<String>) -> pipe::Reply {
+    pipe::Reply::new(outcome, Some(error.into()))
+}
+
+/// One pipe request: read, validate, ask the user, and run it only if approved.
+fn pipe_request(app: &AppHandle, conn: &pipe::Pipe) -> pipe::Reply {
+    use pipe::Outcome::{Busy, Denied, Failed, Invalid};
+    let k = app.state::<Konak>();
+    let line = match conn.read_line(pipe::MAX_REQUEST, Some(Instant::now() + pipe::REQUEST_TIMEOUT)) {
+        Ok(l) => l,
+        Err(pipe::ReadError::TooLarge) => return reply(Invalid, "request too large"),
+        Err(pipe::ReadError::Timeout) => return reply(Invalid, "no request received"),
+        Err(pipe::ReadError::Closed) => return reply(Invalid, "connection closed"),
+    };
+    let req = match pipe::parse(&line) {
+        Ok(r) => r,
+        Err(e) => return reply(Invalid, e),
+    };
+    let action = match State::try_load(&k.paths).and_then(|s| pipe::validate(&s, &req)) {
+        Ok(a) => a,
+        Err(e) => return reply(Invalid, e),
+    };
+    if k.busy.lock().unwrap().contains(&action.id) {
+        return reply(Busy, format!("{} has an operation in progress", action.id));
+    }
+    let requester = conn.client_pid().and_then(diag::process_image);
+    let id = match confirm::new_id() {
+        Ok(id) => id,
+        Err(e) => return reply(Failed, e),
+    };
+    let now = installer::now();
+    let payload = confirm::Payload {
+        id: id.clone(),
+        requester: requester.as_deref().and_then(|p| std::path::Path::new(p).file_name()).map(|f| f.to_string_lossy().into_owned()),
+        op: action.op.as_str(),
+        app: action.id.clone(),
+        name: action.name.clone(),
+        delete_data: action.delete_data,
+        expires_unix: now + confirm::ANSWER_TIMEOUT_S,
+    };
+    let answer = match k.confirm.lock().unwrap().open(payload.clone(), now) {
+        Ok(rx) => rx,
+        Err(_) => return reply(Busy, "another request is waiting for an answer in the Konak window"),
+    };
+    log(&k.paths, &format!("mcp request {id}: {} {} (delete_data={}, name={:?}) from {}", payload.op, payload.app, payload.delete_data, payload.name, requester.as_deref().unwrap_or("unknown")));
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+    let _ = app.emit("mcp-confirm", &payload);
+
+    let approved = wait_for_answer(&k, conn, &id, &answer);
+    log(&k.paths, &format!("mcp request {id}: {}", if approved { "approved" } else { "denied" }));
+    if !approved {
+        let _ = app.emit("mcp-confirm-closed", serde_json::json!({ "id": id }));
+        return reply(Denied, "not approved in the Konak window");
+    }
+    execute(app, &req, &action)
+}
+
+/// True only when the user approved request `id` in the window. A denial, no answer within the
+/// timeout, and the client hanging up all give false.
+fn wait_for_answer(k: &Konak, conn: &pipe::Pipe, id: &str, answer: &mpsc::Receiver<bool>) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(confirm::ANSWER_TIMEOUT_S);
+    loop {
+        match answer.recv_timeout(Duration::from_millis(250)) {
+            Ok(approve) => return approve,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline && conn.connected() => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Give up, unless an answer took the request first: it was sent under this lock.
+                let mut slot = k.confirm.lock().unwrap();
+                if slot.withdraw(id) {
+                    return false;
+                }
+                drop(slot);
+                return answer.try_recv().unwrap_or(false);
+            }
+        }
+    }
+}
+
+/// Runs an approved action through the panel's operation path and waits for its result. The
+/// request is checked again first: the apps may have changed while the dialog was open.
+fn execute(app: &AppHandle, req: &pipe::Request, action: &pipe::Action) -> pipe::Reply {
+    use pipe::Outcome::{Busy, Done, Failed, Running};
+    let k = app.state::<Konak>();
+    match State::try_load(&k.paths).and_then(|s| pipe::validate(&s, req)) {
+        Ok(current) if current == *action => {}
+        Ok(_) => return reply(Failed, "the app changed while the request waited; nothing was done"),
+        Err(e) => return reply(Failed, format!("{e}; nothing was done")),
+    }
+    let (tx, rx) = mpsc::channel();
+    if let Err(e) = start_action(app.clone(), action, tx) {
+        return if e == "busy" { reply(Busy, format!("{} has an operation in progress", action.id)) } else { reply(Failed, e) };
+    }
+    match rx.recv_timeout(OP_WAIT) {
+        Ok(Ok(())) => pipe::Reply::new(Done, None),
+        Ok(Err(e)) => {
+            // Secret values are read only from a running distro, as the MCP server does.
+            let r = if diag::distro(&k.paths).running { redact::Redactor::load(&k.paths) } else { redact::Redactor::new(vec![]) };
+            reply(Failed, r.apply(&e))
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => pipe::Reply::new(Running, None),
+        Err(mpsc::RecvTimeoutError::Disconnected) => reply(Failed, "the operation ended without a result"),
+    }
+}
+
+/// Starts an approved action with the same `apps` calls the panel commands make.
+fn start_action(app: AppHandle, a: &pipe::Action, done: mpsc::Sender<Result<(), String>>) -> Result<(), String> {
+    let (id, id2, op, done) = (a.id.clone(), a.id.clone(), a.op.as_str(), Some(done));
+    match a.op {
+        pipe::Op::Install => spawn_op_notify(app, id, op, done, move |p| apps::install(p, &id2).map(|_| ())),
+        pipe::Op::Remove => {
+            let delete_data = a.delete_data;
+            spawn_op_notify(app, id, op, done, move |p| apps::remove(p, &id2, delete_data))
+        }
+        pipe::Op::Rename => {
+            let name = a.name.clone().ok_or("rename needs a name")?;
+            spawn_op_notify(app, id, op, done, move |p| apps::rename(p, &id2, &name))
+        }
+        pipe::Op::Claim => spawn_op_notify(app, id, op, done, move |p| apps::claim(p, &id2)),
+        pipe::Op::Restart => spawn_op_notify(app, id, op, done, move |p| apps::restart(p, &id2)),
+        pipe::Op::Stop => spawn_op_notify(app, id, op, done, move |p| apps::stop(p, &id2)),
+        pipe::Op::Start => spawn_op_notify(app, id, op, done, move |p| apps::start(p, &id2)),
+    }
+}
+
+/// The MCP write request awaiting an answer, for a window that missed the `mcp-confirm` event.
+#[tauri::command]
+fn mcp_pending(k: tauri::State<Konak>) -> Option<confirm::Payload> {
+    k.confirm.lock().unwrap().current(installer::now())
+}
+
+/// The user's answer to MCP write request `id`. Only the current request's id is accepted.
+#[tauri::command]
+fn mcp_answer(k: tauri::State<Konak>, id: String, approve: bool) -> Result<(), String> {
+    k.confirm.lock().unwrap().answer(&id, approve, installer::now())
 }
 
 #[tauri::command]
@@ -567,7 +758,16 @@ pub fn run() {
                     sup.start();
                 });
             }
-            app.manage(Konak { paths: paths.clone(), sup, rt: Mutex::new(Runtime::default()), busy: Mutex::new(HashSet::new()) });
+            app.manage(Konak {
+                paths: paths.clone(),
+                sup,
+                rt: Mutex::new(Runtime::default()),
+                busy: Mutex::new(HashSet::new()),
+                confirm: Mutex::new(confirm::Slot::default()),
+            });
+            // MCP write requests; each one waits for the user's answer in the window.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || serve_pipe(handle));
             // Apps from before the catalog layout are re-rendered once (new port, env), as ordinary
             // operations: the panel sees them as busy and cannot start another one on the same app.
             if state.done {
@@ -645,6 +845,8 @@ pub fn run() {
             restart_app,
             stop_app,
             start_app,
+            mcp_pending,
+            mcp_answer,
             app_logs,
             host_info,
             diagnose,
