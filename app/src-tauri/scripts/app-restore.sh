@@ -2,8 +2,10 @@
 #   probe id [podman volume names]   what exists: the folder, set-aside copies, the app's volumes
 #   aside id                         removes the containers, moves the folder to <id>.before-restore
 #                                    and every volume's content to <id>.before-restore-volumes/<vol>
-#   extract id                       stdin: GNU tar of the app folder (members <id>/...), unpacked in
-#                                    a staging folder and moved into place
+#   extract id [bind sources]        stdin: GNU tar of the app folder (members <id>/...), unpacked in
+#                                    a staging folder, checked (files and folders only; compose.yml
+#                                    and .env files, the catalog's bind sources folders) and moved
+#                                    into place
 #   import id compose_name podman_name   stdin: `podman volume export` output for that volume
 #   rollback id had_old              removes what the restore made; with had_old=1 moves the set-aside
 #                                    folder and volume content back
@@ -13,9 +15,11 @@ set -euo pipefail
 shopt -s nullglob
 cmd="$1" id="$2"
 [[ "$id" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { echo "bad app id: $id" >&2; exit 2; }
-apps=/var/lib/konak/apps
+# KONAK_ROOT only exists so the script can be tested outside the distro.
+root=${KONAK_ROOT:-/var/lib/konak}
+apps=$root/apps
 dir=$apps/$id aside=$apps/$id.before-restore vaside=$apps/$id.before-restore-volumes
-staging=/var/lib/konak/restore-staging/$id
+staging=$root/restore-staging/$id
 export DOCKER_HOST=unix:///run/podman/podman.sock
 label="label=com.docker.compose.project=$id"
 
@@ -60,18 +64,39 @@ case "$cmd" in
     echo aside
     ;;
   extract)
+    shift 2
+    for b in "$@"; do [[ "$b" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "bad bind source: $b" >&2; exit 2; }; done
     [ ! -e "$dir" ] || { echo "$dir exists" >&2; exit 3; }
     rm -rf --one-file-system "$staging"
     # A fresh install has no app folder yet.
     mkdir -p "$staging" "$apps"
     # GNU tar refuses members with "..", strips leading "/", and creates symlinks only at the end, so
-    # nothing is written outside the staging folder.
-    tar -C "$staging" --numeric-owner --xattrs --xattrs-include='*' --acls -xpf -
+    # nothing is written outside the staging folder. Only user.* xattrs (and POSIX ACLs) come back:
+    # trusted.* and security.* (file capabilities) are not taken from a backup file.
+    tar -C "$staging" --numeric-owner --xattrs --xattrs-include='user.*' --acls -xpf -
     top=("$staging"/* "$staging"/.[!.]* "$staging"/..?*)
     if [ "${#top[@]}" != 1 ] || [ "${top[0]}" != "$staging/$id" ] || [ -L "${top[0]}" ] || [ ! -d "${top[0]}" ]; then
       echo "the archive does not hold just the folder $id/" >&2
       exit 4
     fi
+    # Files and folders only. A symlink would turn a catalog bind mount (./forgejo:/data) into a
+    # mount of anything in the distro, /mnt/c included, or send app-install.sh's root writes to its
+    # target; device nodes, fifos and sockets have no place in an app folder either.
+    bad=$(find "$staging/$id" \( -type l -o ! \( -type f -o -type d \) \) -print -quit </dev/null)
+    [ -z "$bad" ] || { echo "the archive holds something other than files and folders: ${bad#"$staging/"}" >&2; exit 4; }
+    # Hard links only between files of the folder itself: every link of a multiply linked file is in it.
+    bad=$(find "$staging/$id" -type f -links +1 -printf '%i %n\n' </dev/null | sort | uniq -c | awk '$1 != $3 { print $2; exit }')
+    [ -z "$bad" ] || { echo "the archive holds a hard link to a file outside the folder" >&2; exit 4; }
+    # No setuid or setgid programs from a backup file.
+    find "$staging/$id" -type f -perm /6000 -exec chmod ug-s {} + </dev/null
+    for f in compose.yml .env .env.new; do
+      p="$staging/$id/$f"
+      [ ! -e "$p" ] || [ -f "$p" ] || { echo "$f is not a regular file" >&2; exit 4; }
+    done
+    for b in "$@"; do
+      p="$staging/$id/$b"
+      [ ! -e "$p" ] || [ -d "$p" ] || { echo "$b is not a folder" >&2; exit 4; }
+    done
     mv "$staging/$id" "$dir"
     rmdir "$staging"
     echo extracted

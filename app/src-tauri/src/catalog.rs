@@ -123,6 +123,23 @@ pub fn get(id: &str) -> Option<&'static Manifest> {
     all().iter().find(|m| m.id == id)
 }
 
+impl Manifest {
+    /// The app-folder entries its containers bind-mount (`./forgejo:/data`, `DB_DATA_LOCATION:
+    /// ./postgres`): the first path component of every `./...` bind source in compose.yml and of
+    /// every `./...` env value.
+    pub fn bind_sources(&self) -> Vec<String> {
+        let from_compose = self.compose.lines().filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("- ./").or_else(|| l.strip_prefix("source: ./")).map(|r| r.split([':', '/']).next().unwrap_or_default())
+        });
+        let from_env = self.env.values().filter_map(|v| v.strip_prefix("./").map(|r| r.split('/').next().unwrap_or_default()));
+        let mut out: Vec<String> = from_compose.chain(from_env).filter(|s| !s.is_empty()).map(String::from).collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +195,16 @@ mod tests {
             assert!(m.compose.contains("@sha256:"), "{} has no pinned image", m.id);
             assert!(PORT_RANGE.contains(&m.port));
         }
+    }
+
+    #[test]
+    fn bind_sources_of_the_catalog() {
+        let binds = |id: &str| get(id).unwrap().bind_sources();
+        assert_eq!(binds("forgejo"), ["forgejo"]);
+        assert_eq!(binds("jellyfin"), ["cache", "config"]);
+        assert_eq!(binds("vaultwarden"), ["vw-data"]);
+        assert_eq!(binds("immich"), ["postgres"]);
+        assert!(binds("nextcloud").is_empty());
     }
 
     #[test]

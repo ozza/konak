@@ -221,7 +221,11 @@ impl Target for DistroTarget<'_> {
         self.script(&["commit", id]).map(|_| ())
     }
     fn folder(&self, id: &str) -> Result<Box<dyn Sink>, String> {
-        Ok(Box::new(shell::DistroWriter::start(&self.0.distro, RESTORE_SH, &["extract", id])?))
+        // The catalog's bind sources must come back as real folders (or not at all).
+        let binds = catalog::get(id).map(|m| m.bind_sources()).unwrap_or_default();
+        let mut args = vec!["extract", id];
+        args.extend(binds.iter().map(String::as_str));
+        Ok(Box::new(shell::DistroWriter::start(&self.0.distro, RESTORE_SH, &args)?))
     }
     fn volume(&self, id: &str, v: &VolumeManifest) -> Result<Box<dyn Sink>, String> {
         Ok(Box::new(shell::DistroWriter::start(&self.0.distro, RESTORE_SH, &["import", id, &v.name, &v.podman_name])?))
@@ -1533,3 +1537,7 @@ mod tests {
         assert!(parse_probe("folder 0\n").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "restore_script_tests.rs"]
+mod script_tests;
