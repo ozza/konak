@@ -56,13 +56,14 @@ kill_tree() {
 }
 
 # Ends a running extract or import of this app and waits for its lock, then keeps it (fd 8) for
-# the rest of this command. The pid file is trusted only while the lock is taken.
+# the rest of this command. The pid in the pid file is signalled only while the lock is taken and
+# only if that process holds the lock file open as its fd 9 (a stale pid may belong to another).
 stop_running() {
   exec 8>"$lockf"
   flock -n 8 && return 0
   local p
   p=$(cat "$pidf" 2>/dev/null || true)
-  if [[ "$p" =~ ^[0-9]+$ ]]; then kill_tree "$p"; fi
+  if [[ "$p" =~ ^[0-9]+$ ]] && [ "$(readlink "/proc/$p/fd/9" 2>/dev/null)" = "$lockf" ]; then kill_tree "$p"; fi
   flock -w 120 8 || { echo "the running restore step of $id did not end" >&2; exit 6; }
 }
 
