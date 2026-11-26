@@ -9,6 +9,7 @@
   import Header from "./Header.svelte";
   import HostDetail from "./HostDetail.svelte";
   import LogsDrawer from "./LogsDrawer.svelte";
+  import McpConfirm from "./McpConfirm.svelte";
   import Notices from "./Notices.svelte";
   import RemoveDialog from "./RemoveDialog.svelte";
   import Sidebar from "./Sidebar.svelte";
@@ -183,6 +184,7 @@
   </div>
 </div>
 
+<McpConfirm />
 <LogsDrawer app={logsFor} name={logsFor ? appName(logsFor.id) : ""} onclose={() => (logsFor = null)} />
 <RemoveDialog
   app={removeFor}

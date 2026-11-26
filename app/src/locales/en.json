@@ -379,6 +379,33 @@
         "virtual": "Turn off the VPN or virtual network that holds the connection.",
         "ip_changed": "Wait a few seconds. If it stays, restart Konak."
       }
+    },
+    "mcp": {
+      "title": {
+        "install": "Install {app}?",
+        "remove": "Remove {app}?",
+        "start": "Start {app}?",
+        "stop": "Stop {app}?",
+        "restart": "Restart {app}?",
+        "rename": "Rename {app}?",
+        "claim": "Make {app} available on your network?"
+      },
+      "intro": "An AI agent asks Konak to do this through its MCP connection.",
+      "requester": "The request comes from {requester}.",
+      "effect": {
+        "install": "Konak downloads {app} and starts it. Only this PC can open it until you finish its setup.",
+        "remove": "{app} stops and disappears from your network. Its settings and data are kept.",
+        "remove_delete": "{app} is removed and its data is deleted for good: settings, accounts and database. This cannot be undone.",
+        "start": "{app} starts again and becomes reachable.",
+        "stop": "{app} stops. Nobody can use it until it is started again. Its data is kept.",
+        "restart": "{app} restarts and is unavailable for a short time.",
+        "rename": "{app} moves to the new address {name}.local. Bookmarks and phone apps that use the old address stop working.",
+        "claim": "{app} becomes reachable from every device on your home network. Do this only after you have created its admin account."
+      },
+      "check": "Approve only if you asked an AI agent for this.",
+      "countdown": "Denied automatically in {time}.",
+      "approve": "Approve",
+      "deny": "Deny"
     }
   },
   "apps": {
