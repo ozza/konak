@@ -616,7 +616,7 @@ fn call_attention(app: &AppHandle, payload: &confirm::Payload) {
 fn attention_text(op: &str, app: &str) -> (String, String) {
     let key = format!("apps.{app}.name");
     let name = Some(ui_text(&key)).filter(|n| *n != key).unwrap_or_else(|| app.to_string());
-    (ui_text(&format!("panel.mcp.title.{op}")).replace("{app}", &name), ui_text("panel.mcp.intro"))
+    (ui_text(&format!("panel.mcp.title.{op}")).replace("{app}", &name), ui_text("panel.mcp.notify"))
 }
 
 /// Flashes the window's caption and taskbar button until the window comes to the foreground.

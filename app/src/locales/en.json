@@ -419,7 +419,8 @@
       "countdown": "Denied automatically in {time}.",
       "approve": "Approve",
       "deny": "Deny",
-      "too_late": "Your approval arrived too late: the request had already expired or been withdrawn, so nothing was done."
+      "too_late": "Your approval arrived too late: the request had already expired or been withdrawn, so nothing was done.",
+      "notify": "An AI agent is waiting for your approval in the Konak window."
     }
   },
   "apps": {

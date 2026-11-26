@@ -419,7 +419,8 @@
       "countdown": "{time} içinde otomatik olarak reddedilir.",
       "approve": "Onayla",
       "deny": "Reddet",
-      "too_late": "Onayınız geç kaldı: istek zaten süresi dolmuş ya da geri çekilmişti, bu yüzden hiçbir şey yapılmadı."
+      "too_late": "Onayınız geç kaldı: istek zaten süresi dolmuş ya da geri çekilmişti, bu yüzden hiçbir şey yapılmadı.",
+      "notify": "Bir yapay zekâ ajanı Konak penceresinde onayınızı bekliyor."
     }
   },
   "apps": {
