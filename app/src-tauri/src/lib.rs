@@ -468,61 +468,85 @@ fn start_app(app: AppHandle, id: String) -> Result<(), String> {
 /// How long an approved operation is waited for before the reply says `running`.
 const OP_WAIT: Duration = Duration::from_secs(15 * 60);
 
-/// Serves the MCP pipe for the life of the process; without it the MCP write tools report that
-/// Konak is not running.
+/// Pipe connections handled at once; one more gets `busy` (only one request can wait for an
+/// answer anyway, so this only bounds the threads clients can tie up).
+const PIPE_HANDLERS: usize = 4;
+/// Instances beyond the handlers, so a listening instance is there to answer `busy`.
+const PIPE_SPARE: u32 = 2;
+
+/// Serves the MCP pipe for the life of the process, one thread per instance; without it the MCP
+/// write tools report that Konak is not running.
 fn serve_pipe(app: AppHandle) {
     let paths = app.state::<Konak>().paths.clone();
-    let mut listener = match pipe::Listener::bind(&pipe::name(&paths.distro)) {
+    let listener = match pipe::name_for(&paths.distro).and_then(|n| pipe::Listener::bind(&n, PIPE_HANDLERS as u32 + PIPE_SPARE)) {
         Ok(l) => l,
         Err(e) => return log(&paths, &format!("mcp pipe: {e}; the MCP write tools are off")),
     };
-    loop {
-        let conn = listener.accept();
-        let handle = app.clone();
-        std::thread::spawn(move || {
-            let reply = pipe_request(&handle, &conn);
-            if let Ok(line) = serde_json::to_vec(&reply) {
-                let _ = conn.write_line(&line);
+    let gate = Arc::new(pipe::Gate::new(PIPE_HANDLERS));
+    for conn in listener.instances {
+        let (handle, gate) = (app.clone(), Arc::clone(&gate));
+        std::thread::spawn(move || loop {
+            if conn.accept() {
+                serve_connection(&handle, &conn, &gate);
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
             }
-            conn.linger(Duration::from_secs(5));
+            conn.disconnect();
         });
     }
+}
+
+/// One connection: handled, or `busy` past the cap; then the reply and its audit line.
+fn serve_connection(app: &AppHandle, conn: &pipe::Pipe, gate: &pipe::Gate) {
+    let requester = conn.client_pid().and_then(requester_image);
+    let (reply, id, linger) = match gate.enter() {
+        Some(_pass) => {
+            let (r, id) = pipe_request(app, conn, requester.as_deref());
+            (r, id, Duration::from_secs(5))
+        }
+        None => (reply(pipe::Outcome::Busy, "Konak is handling other requests; try again shortly"), None, Duration::from_secs(1)),
+    };
+    log(&app.state::<Konak>().paths, &pipe::audit_line(id.as_deref(), requester.as_deref(), &reply));
+    if let Ok(line) = serde_json::to_vec(&reply) {
+        let _ = conn.write_line(&line);
+    }
+    conn.linger(linger);
 }
 
 fn reply(outcome: pipe::Outcome, error: impl Into<String>) -> pipe::Reply {
     pipe::Reply::new(outcome, Some(error.into()))
 }
 
-/// One pipe request: read, validate, ask the user, and run it only if approved.
-fn pipe_request(app: &AppHandle, conn: &pipe::Pipe) -> pipe::Reply {
+/// One pipe request: read, validate, ask the user, and run it only if approved. Also returns the
+/// confirmation id once the request got one.
+fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>) -> (pipe::Reply, Option<String>) {
     use pipe::Outcome::{Busy, Denied, Failed, Invalid};
     let k = app.state::<Konak>();
     let line = match conn.read_line(pipe::MAX_REQUEST, Some(Instant::now() + pipe::REQUEST_TIMEOUT)) {
         Ok(l) => l,
-        Err(pipe::ReadError::TooLarge) => return reply(Invalid, "request too large"),
-        Err(pipe::ReadError::Timeout) => return reply(Invalid, "no request received"),
-        Err(pipe::ReadError::Closed) => return reply(Invalid, "connection closed"),
+        Err(pipe::ReadError::TooLarge) => return (reply(Invalid, "request too large"), None),
+        Err(pipe::ReadError::Timeout) => return (reply(Invalid, "no request received"), None),
+        Err(pipe::ReadError::Closed) => return (reply(Invalid, "connection closed"), None),
     };
     let req = match pipe::parse(&line) {
         Ok(r) => r,
-        Err(e) => return reply(Invalid, e),
+        Err(e) => return (reply(Invalid, e), None),
     };
     let action = match State::try_load(&k.paths).and_then(|s| pipe::validate(&s, &req)) {
         Ok(a) => a,
-        Err(e) => return reply(Invalid, e),
+        Err(e) => return (reply(Invalid, e), None),
     };
     if k.busy.lock().unwrap().contains(&action.id) {
-        return reply(Busy, format!("{} has an operation in progress", action.id));
+        return (reply(Busy, format!("{} has an operation in progress", action.id)), None);
     }
-    let requester = conn.client_pid().and_then(requester_image);
     let id = match confirm::new_id() {
         Ok(id) => id,
-        Err(e) => return reply(Failed, e),
+        Err(e) => return (reply(Failed, e), None),
     };
     let now = installer::now();
     let payload = confirm::Payload {
         id: id.clone(),
-        requester: requester.as_deref().and_then(|p| std::path::Path::new(p).file_name()).map(|f| f.to_string_lossy().into_owned()),
+        requester: requester.and_then(|p| std::path::Path::new(p).file_name()).map(|f| f.to_string_lossy().into_owned()),
         op: action.op.as_str(),
         app: action.id.clone(),
         name: action.name.clone(),
@@ -531,13 +555,21 @@ fn pipe_request(app: &AppHandle, conn: &pipe::Pipe) -> pipe::Reply {
     };
     let answer = match k.confirm.lock().unwrap().open(payload.clone(), now) {
         Ok(rx) => rx,
-        Err(_) => return reply(Busy, "another request is waiting for an answer in the Konak window"),
+        Err(e) if e == confirm::DECLINED_RECENTLY => {
+            let msg = format!("the person declined this same request in the Konak window less than {} minutes ago; nothing was changed. Ask them before trying again", confirm::COOLDOWN_S / 60);
+            return (reply(Denied, msg), None);
+        }
+        Err(_) => return (reply(Busy, "another request is waiting for an answer in the Konak window"), None),
     };
-    log(&k.paths, &format!("mcp request {id}: {} {} (delete_data={}, name={:?}) from {}", payload.op, payload.app, payload.delete_data, payload.name, requester.as_deref().unwrap_or("unknown")));
+    log(&k.paths, &format!("mcp request {id}: {} {} (delete_data={}, name={:?}) from {}", payload.op, payload.app, payload.delete_data, payload.name, requester.unwrap_or("unknown")));
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        // Windows' foreground lock lets a background process take the foreground only in some
+        // cases, so `set_focus` may leave the window behind the AI client's. Flashing the taskbar
+        // button until the window is activated is the fallback when that happens.
+        let _ = w.request_user_attention(Some(tauri::UserAttentionType::Critical));
     }
     let _ = app.emit("mcp-confirm", &payload);
 
@@ -545,9 +577,11 @@ fn pipe_request(app: &AppHandle, conn: &pipe::Pipe) -> pipe::Reply {
     log(&k.paths, &format!("mcp request {id}: {}", if approved { "approved" } else { "denied" }));
     if !approved {
         let _ = app.emit("mcp-confirm-closed", serde_json::json!({ "id": id }));
-        return reply(Denied, "not approved in the Konak window");
+        return (reply(Denied, "the person did not approve this in the Konak window (or did not answer within 5 minutes); nothing was changed"), Some(id));
     }
-    execute(app, &req, &action)
+    // Lets the panel open the app's page before the operation starts.
+    let _ = app.emit("mcp-approved", serde_json::json!({ "id": id, "op": payload.op, "app": payload.app }));
+    (execute(app, &req, &action), Some(id))
 }
 
 /// True only when the user approved request `id` in the window. A denial, no answer within the
@@ -575,8 +609,9 @@ fn wait_for_answer(k: &Konak, conn: &pipe::Pipe, id: &str, answer: &mpsc::Receiv
             Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline && conn.connected() => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Give up, unless an answer took the request first: it was sent under this lock.
+                // Only the timeout counts as a denial for the cooldown, not a client that left.
                 let mut slot = k.confirm.lock().unwrap();
-                if slot.withdraw(id) {
+                if slot.withdraw(id, installer::now(), Instant::now() >= deadline) {
                     return false;
                 }
                 drop(slot);
@@ -841,6 +876,11 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                // A hidden dialog cannot be answered: deny the pending MCP request, the same way as
+                // the Deny button (its handler replies `denied` and emits `mcp-confirm-closed`).
+                if let Some(k) = window.app_handle().try_state::<Konak>() {
+                    k.confirm.lock().unwrap().deny_current(installer::now());
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![

@@ -1,43 +1,56 @@
 //! Local channel from `konak.exe --mcp` to the running Konak window, for the MCP write tools. One
 //! JSON request line, one JSON reply line per connection.
 //!
-//! Security: the pipe's DACL allows only the current user's SID (`D:P(A;;GRGW;;;<sid>)`), remote
-//! clients are rejected, and the first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so
-//! a process that took the name first makes Konak run without the pipe instead of sharing it. The
-//! client opens the pipe with identification-level impersonation only and checks, before writing,
-//! that the server process runs this same konak.exe file.
+//! Security: the name carries a hash of the user's SID, so each Windows user has their own pipe.
+//! The DACL allows only the current user's SID, with read and write-data rights but not
+//! `FILE_CREATE_PIPE_INSTANCE`, and an Owner Rights entry takes away the owner's implicit
+//! `WRITE_DAC`, so no process of this user can add instances or loosen the DACL; a medium-integrity
+//! label keeps low-integrity processes out. Remote clients are rejected, and the first instance is
+//! created with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a process that took the name first makes Konak
+//! run without the pipe instead of sharing it. The client opens the pipe with identification-level
+//! impersonation only and checks, before writing, that the server process runs this same
+//! konak.exe file as this same user.
+//!
+//! Since nobody may create instances once the DACL is final (Konak included: Windows checks every
+//! instance after the first against that DACL, for `FILE_CREATE_PIPE_INSTANCE` among others), all
+//! instances are created at bind time and reused (disconnect, connect again). The name therefore
+//! exists for as long as Konak runs, and a spare instance answers `busy` when every handler is in use.
 //!
 //! Synchronous Win32 calls (windows-sys) rather than tokio's named pipes: the GUI process has no
 //! tokio runtime of its own to drive, the API takes raw security attributes directly, and one
-//! thread per connection (at most `MAX_INSTANCES`) is plenty for one request at a time.
+//! thread per instance is plenty for one request at a time.
 
 use crate::installer::State;
 use crate::{apps, catalog, mcp};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    CloseHandle, GetLastError, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE,
     INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, SetKernelObjectSecurity, TokenUser, DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OBJECT_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFileInformationByHandle, ReadFile, WriteFile, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
-    SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+    CreateFileW, GetFileInformationByHandle, ReadFile, WriteFile, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, READ_CONTROL, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WRITE_DAC,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, PeekNamedPipe, WaitNamedPipeW, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, PeekNamedPipe, WaitNamedPipeW,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
 
 /// Largest request line, newline excluded.
 pub const MAX_REQUEST: usize = 4096;
 const MAX_REPLY: usize = 16 * 1024;
-const MAX_INSTANCES: u32 = 4;
 /// A client gets this long to send its request line.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -93,6 +106,19 @@ pub enum Outcome {
     Running,
 }
 
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Done => "done",
+            Outcome::Failed => "failed",
+            Outcome::Denied => "denied",
+            Outcome::Busy => "busy",
+            Outcome::Invalid => "invalid",
+            Outcome::Running => "running",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Reply {
@@ -117,11 +143,18 @@ pub struct Action {
     pub delete_data: bool,
 }
 
-/// The pipe for a distro, so isolated dev runs (`KONAK_DISTRO`) do not collide. Characters a pipe
-/// name cannot carry become `_`.
-pub fn name(distro: &str) -> String {
+/// The pipe for a user and a distro, `\\.\pipe\konak-<sid-hash8>-<distro>`, so other Windows users
+/// and isolated dev runs (`KONAK_DISTRO`) do not collide. The hash is the first 8 hex digits of the
+/// SHA-256 of the SID string. Characters a pipe name cannot carry become `_`.
+pub fn name(sid: &str, distro: &str) -> String {
+    let hash: String = Sha256::digest(sid.as_bytes())[..4].iter().map(|b| format!("{b:02x}")).collect();
     let safe: String = distro.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' }).collect();
-    format!(r"\\.\pipe\konak-{safe}")
+    format!(r"\\.\pipe\konak-{hash}-{safe}")
+}
+
+/// `name` for the user this process runs as; the server and the client both derive it this way.
+pub fn name_for(distro: &str) -> Result<String, String> {
+    Ok(name(&current_user_sid()?, distro))
 }
 
 pub fn parse(line: &[u8]) -> Result<Request, String> {
@@ -158,14 +191,37 @@ pub fn validate(state: &State, req: &Request) -> Result<Action, String> {
     if let Some(name) = &req.name {
         apps::validate_name(state, &id, name)?;
     }
+    // A request that would change nothing gets no dialog.
+    if let Some(app) = state.apps.iter().find(|a| a.id == id) {
+        match req.op {
+            Op::Rename if req.name.as_deref() == Some(app.name.as_str()) => return Err(format!("same_name: {id} is already called {}", app.name)),
+            Op::Start if !app.stopped => return Err(format!("not_stopped: {id} is not stopped (restart_app restarts it)")),
+            Op::Stop if app.stopped => return Err(format!("already_stopped: {id}")),
+            Op::Claim if app.claimed => return Err(format!("already_claimed: {id}")),
+            _ => {}
+        }
+    }
     Ok(Action { op: req.op, id, name: req.name.clone(), delete_data: req.delete_data.unwrap_or(false) })
 }
 
 // ---- Security descriptor ------------------------------------------------------------------
 
-/// Read and write for exactly this SID; `P` blocks inherited entries. Nothing else gets access.
+/// What the user may do with the pipe: read, plus write data and attributes (what changing a
+/// client's read mode needs). Not `FILE_APPEND_DATA`, which on a pipe is `FILE_CREATE_PIPE_INSTANCE`, and none of
+/// the other write rights `GENERIC_WRITE` carries (`FILE_WRITE_EA`). 0x12018b.
+pub const ACCESS: u32 = FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES;
+
+/// `ACCESS` for exactly this SID; `P` blocks inherited entries, so nothing else gets access. The
+/// Owner Rights entry (`OW`) replaces the owner's implicit `READ_CONTROL | WRITE_DAC` with
+/// `READ_CONTROL`: the owner is this same user, so without it any of the user's processes could
+/// open the pipe with `WRITE_DAC` and loosen it. The mandatory label keeps processes below medium
+/// integrity out entirely.
 pub fn sddl(sid: &str) -> String {
-    format!("D:P(A;;GRGW;;;{sid})")
+    sddl_with(sid, ACCESS)
+}
+
+fn sddl_with(sid: &str, access: u32) -> String {
+    format!("D:P(A;;{access:#x};;;{sid})(A;;{READ_CONTROL:#x};;;OW)S:(ML;;NWNRNX;;;ME)")
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -189,11 +245,34 @@ fn last_error() -> u32 {
 
 /// The SID of the user this process runs as, from its token, e.g. `S-1-5-21-...`.
 pub fn current_user_sid() -> Result<String, String> {
+    // SAFETY: the pseudo handle of this process needs no closing.
+    unsafe { token_user_sid(GetCurrentProcess()) }
+}
+
+/// The SID of the user another process runs as.
+pub fn process_user_sid(pid: u32) -> Result<String, String> {
+    // SAFETY: the process handle is ours and closed after use.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return Err(format!("OpenProcess failed ({})", last_error()));
+        }
+        let sid = token_user_sid(process);
+        CloseHandle(process);
+        sid
+    }
+}
+
+/// The token user of `process` as a string SID.
+///
+/// # Safety
+/// `process` must be a valid process handle with query access.
+unsafe fn token_user_sid(process: HANDLE) -> Result<String, String> {
     // SAFETY: the token handle is ours and closed; the buffer is sized by the first call and
     // aligned for TOKEN_USER (u64 storage).
     unsafe {
         let mut token: HANDLE = std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
             return Err(format!("OpenProcessToken failed ({})", last_error()));
         }
         let mut len = 0u32;
@@ -235,9 +314,9 @@ impl Descriptor {
         Self::from_sddl(&sddl(&current_user_sid()?))
     }
 
-    /// The DACL as SDDL, as the system reads it back.
-    pub fn dacl_sddl(&self) -> Result<String, String> {
-        dacl_to_sddl(self.0)
+    /// The DACL and the integrity label as SDDL, as the system reads them back.
+    pub fn sddl(&self) -> Result<String, String> {
+        to_sddl(self.0)
     }
 }
 
@@ -247,11 +326,13 @@ impl Drop for Descriptor {
     }
 }
 
-fn dacl_to_sddl(sd: PSECURITY_DESCRIPTOR) -> Result<String, String> {
+const READ_BACK: OBJECT_SECURITY_INFORMATION = DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+
+fn to_sddl(sd: PSECURITY_DESCRIPTOR) -> Result<String, String> {
     let mut s: *mut u16 = std::ptr::null_mut();
     // SAFETY: `sd` is a valid descriptor; the system allocates `s`, freed by take_local_wide.
     unsafe {
-        if ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &mut s, std::ptr::null_mut()) == 0 {
+        if ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, READ_BACK, &mut s, std::ptr::null_mut()) == 0 {
             return Err(format!("ConvertSecurityDescriptorToStringSecurityDescriptor failed ({})", last_error()));
         }
         Ok(take_local_wide(s))
@@ -364,18 +445,18 @@ impl Pipe {
         (unsafe { GetNamedPipeServerProcessId(self.0, &mut pid) } != 0).then_some(pid)
     }
 
-    /// The DACL on the pipe object itself, as SDDL.
-    pub fn dacl_sddl(&self) -> Result<String, String> {
+    /// The DACL and integrity label on the pipe object itself, as SDDL.
+    pub fn sddl(&self) -> Result<String, String> {
         use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
         let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: the system allocates `sd`; freed below.
         let err = unsafe {
-            GetSecurityInfo(self.0, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), &mut sd)
+            GetSecurityInfo(self.0, SE_KERNEL_OBJECT, READ_BACK, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), &mut sd)
         };
         if err != 0 {
             return Err(format!("GetSecurityInfo failed ({err})"));
         }
-        let s = dacl_to_sddl(sd);
+        let s = to_sddl(sd);
         unsafe { LocalFree(sd) };
         s
     }
@@ -383,56 +464,103 @@ impl Pipe {
 
 // ---- Server -------------------------------------------------------------------------------
 
+impl Pipe {
+    /// Server side: blocks until a client connects to this instance. False when the connection
+    /// failed (e.g. the client already left); `disconnect` before trying again.
+    pub fn accept(&self) -> bool {
+        // SAFETY: a valid server instance; no overlapped I/O.
+        unsafe { ConnectNamedPipe(self.0, std::ptr::null_mut()) != 0 || GetLastError() == ERROR_PIPE_CONNECTED }
+    }
+
+    /// Server side: drops the client (and anything it has not read yet), so the instance can
+    /// accept the next one.
+    pub fn disconnect(&self) {
+        // SAFETY: a valid server instance.
+        unsafe { DisconnectNamedPipe(self.0) };
+    }
+}
+
+/// Every instance of one pipe name, all created at bind time and reused for the life of Konak.
 pub struct Listener {
-    name: Vec<u16>,
-    sd: Descriptor,
-    /// An instance waiting for a client. One is created before a connected one is handed out, so
-    /// the name never lapses while Konak runs (another process could otherwise take it).
-    next: Option<Pipe>,
+    pub instances: Vec<Pipe>,
 }
 
 impl Listener {
-    /// Creates the first instance. Fails when the name already exists (another process holds it).
-    pub fn bind(name: &str) -> Result<Self, String> {
-        let mut l = Listener { name: wide(name), sd: Descriptor::current_user_only()?, next: None };
-        l.next = Some(l.create(true).map_err(|e| format!("cannot create {name} (error {e}); is another process holding it?"))?);
-        Ok(l)
+    /// Creates `count` instances, then makes the DACL final (`sddl`): from then on nobody, Konak
+    /// included, can create another instance. Fails when the name already exists (another process
+    /// holds it).
+    pub fn bind(name: &str, count: u32) -> Result<Self, String> {
+        let sid = current_user_sid()?;
+        let w = wide(name);
+        // Only while the instances are created. Each further instance is access-checked against the
+        // pipe's DACL for what a duplex server end asks (`GENERIC_READ | GENERIC_WRITE`, which on a
+        // pipe includes `FILE_CREATE_PIPE_INSTANCE`), so the user gets that much for now.
+        let setup = Descriptor::from_sddl(&sddl_with(&sid, FILE_GENERIC_READ | FILE_GENERIC_WRITE))?;
+        let first = create(&w, &setup, FILE_FLAG_FIRST_PIPE_INSTANCE | WRITE_DAC).map_err(|e| format!("cannot create {name} (error {e}); is another process holding it?"))?;
+        let mut instances = vec![first];
+        for _ in 1..count {
+            instances.push(create(&w, &setup, 0).map_err(|e| format!("cannot create an instance of {name} (error {e})"))?);
+        }
+        let last = Descriptor::current_user_only()?;
+        // SAFETY: the first instance's handle was opened with WRITE_DAC; the descriptor is valid.
+        // The DACL belongs to the pipe, so this applies to every instance.
+        if unsafe { SetKernelObjectSecurity(instances[0].0, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, last.0) } == 0 {
+            return Err(format!("cannot restrict {name} (error {})", last_error()));
+        }
+        Ok(Listener { instances })
+    }
+}
+
+/// One instance. No instance limit: the final DACL is what stops anyone from adding instances.
+fn create(name: &[u16], sd: &Descriptor, flags: u32) -> Result<Pipe, u32> {
+    let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: 0 };
+    let pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
+    // SAFETY: NUL-terminated name; `sa` and the descriptor outlive the call.
+    let h = unsafe { CreateNamedPipeW(name.as_ptr(), PIPE_ACCESS_DUPLEX | flags, pipe_mode, PIPE_UNLIMITED_INSTANCES, MAX_REPLY as u32, MAX_REQUEST as u32 + 2, 0, &sa) };
+    if h == INVALID_HANDLE_VALUE {
+        return Err(last_error());
+    }
+    Ok(Pipe(h))
+}
+
+/// Caps how many connections are handled at once; a connection beyond the cap gets `busy`.
+pub struct Gate {
+    active: AtomicUsize,
+    cap: usize,
+}
+
+/// One handled connection; leaves the gate on drop.
+pub struct Pass<'a>(&'a Gate);
+
+impl Gate {
+    pub const fn new(cap: usize) -> Self {
+        Gate { active: AtomicUsize::new(0), cap }
     }
 
-    fn create(&self, first: bool) -> Result<Pipe, u32> {
-        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: self.sd.0, bInheritHandle: 0 };
-        let open_mode = PIPE_ACCESS_DUPLEX | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 };
-        let pipe_mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
-        // SAFETY: NUL-terminated name; `sa` and the descriptor outlive the call.
-        let h = unsafe { CreateNamedPipeW(self.name.as_ptr(), open_mode, pipe_mode, MAX_INSTANCES, MAX_REPLY as u32, MAX_REQUEST as u32 + 2, 0, &sa) };
-        if h == INVALID_HANDLE_VALUE {
-            return Err(last_error());
+    pub fn enter(&self) -> Option<Pass<'_>> {
+        if self.active.fetch_add(1, Ordering::SeqCst) < self.cap {
+            return Some(Pass(self));
         }
-        Ok(Pipe(h))
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        None
     }
+}
 
-    /// Blocks until a client connects.
-    pub fn accept(&mut self) -> Pipe {
-        loop {
-            let pipe = match self.next.take() {
-                Some(p) => p,
-                None => match self.create(false) {
-                    Ok(p) => p,
-                    // Every instance is in use: wait for one to close.
-                    Err(_) => {
-                        std::thread::sleep(Duration::from_millis(500));
-                        continue;
-                    }
-                },
-            };
-            // SAFETY: a valid, unconnected server instance; no overlapped I/O.
-            let ok = unsafe { ConnectNamedPipe(pipe.0, std::ptr::null_mut()) } != 0 || last_error() == ERROR_PIPE_CONNECTED;
-            self.next = self.create(false).ok();
-            if ok {
-                return pipe;
-            }
-        }
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// The `install.log` line for a finished pipe request: its confirmation id when it got one, who
+/// sent it, the outcome and the reason. The reason is debug-quoted, so a client cannot start a new
+/// log line.
+pub fn audit_line(id: Option<&str>, requester: Option<&str>, reply: &Reply) -> String {
+    let mut line = format!("mcp request {} from {}: {}", id.unwrap_or("-"), requester.unwrap_or("unknown"), reply.outcome.as_str());
+    if let Some(e) = &reply.error {
+        line.push_str(&format!(" {e:?}"));
+    }
+    line
 }
 
 // ---- Client -------------------------------------------------------------------------------
@@ -445,7 +573,7 @@ fn connect(name: &str) -> Result<Pipe, String> {
     for attempt in 0..2 {
         // SAFETY: NUL-terminated name; no security attributes or template.
         let h = unsafe {
-            CreateFileW(w.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, std::ptr::null(), OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, std::ptr::null_mut())
+            CreateFileW(w.as_ptr(), ACCESS, 0, std::ptr::null(), OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, std::ptr::null_mut())
         };
         if h != INVALID_HANDLE_VALUE {
             return Ok(Pipe(h));
@@ -475,13 +603,18 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
     matches!((file_id(a), file_id(b)), (Some(x), Some(y)) if x == y)
 }
 
-/// Refuses a server that is not this same konak.exe (a process that took the pipe name).
+/// Refuses a server that is not this same konak.exe running as this same user (a process that
+/// took the pipe name).
 fn verify_server(pipe: &Pipe) -> Result<(), String> {
     let pid = pipe.server_pid().ok_or("cannot identify the Konak process")?;
     let image = crate::diag::process_image(pid).ok_or("cannot identify the Konak process")?;
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     if !same_file(Path::new(&image), &me) {
         return Err(format!("refused: the pipe is served by {image}, not by this Konak"));
+    }
+    let server_user = process_user_sid(pid).map_err(|e| format!("cannot identify the Konak process's user: {e}"))?;
+    if server_user != current_user_sid()? {
+        return Err(format!("refused: the pipe is served by another Windows user ({server_user})"));
     }
     Ok(())
 }
@@ -498,7 +631,7 @@ fn exchange(pipe: &Pipe, req: &Request) -> Result<Reply, String> {
 /// Sends one request to the running Konak and blocks until its reply: after the user's answer and,
 /// when approved, the operation (or the server's wait cap).
 pub fn call(distro: &str, req: &Request) -> Result<Reply, String> {
-    let pipe = connect(&name(distro))?;
+    let pipe = connect(&name_for(distro)?)?;
     verify_server(&pipe)?;
     exchange(&pipe, req)
 }
@@ -507,6 +640,7 @@ pub fn call(distro: &str, req: &Request) -> Result<Reply, String> {
 mod tests {
     use super::*;
     use crate::installer::InstalledApp;
+    use windows_sys::Win32::Storage::FileSystem::FILE_CREATE_PIPE_INSTANCE;
 
     fn state() -> State {
         let mut s = State::default();
@@ -555,6 +689,19 @@ mod tests {
         assert_eq!(v(r#"{"op":"rename","app":"git","name":"konak"}"#).unwrap_err(), "name_reserved");
         assert_eq!(v(r#"{"op":"rename","app":"git","name":"Bad Name"}"#).unwrap_err(), "invalid_name");
         assert_eq!(v(r#"{"op":"rename","app":"git","name":"-x"}"#).unwrap_err(), "invalid_name");
+        // Requests that would change nothing.
+        assert!(v(r#"{"op":"rename","app":"git","name":"git"}"#).unwrap_err().starts_with("same_name"));
+        assert!(v(r#"{"op":"rename","app":"forgejo","name":"git"}"#).unwrap_err().starts_with("same_name"));
+        assert!(v(r#"{"op":"start","app":"movies"}"#).unwrap_err().starts_with("not_stopped"));
+        assert!(v(r#"{"op":"claim","app":"jellyfin"}"#).unwrap_err().starts_with("already_claimed"));
+        assert_eq!(v(r#"{"op":"claim","app":"git"}"#).unwrap().id, "forgejo");
+        assert_eq!(v(r#"{"op":"stop","app":"movies"}"#).unwrap().id, "jellyfin");
+        let mut stopped = state();
+        stopped.apps[0].stopped = true;
+        let v2 = |j: &str| validate(&stopped, &req(j).unwrap());
+        assert!(v2(r#"{"op":"stop","app":"movies"}"#).unwrap_err().starts_with("already_stopped"));
+        assert_eq!(v2(r#"{"op":"start","app":"movies"}"#).unwrap().id, "jellyfin");
+        assert_eq!(v2(r#"{"op":"restart","app":"movies"}"#).unwrap().id, "jellyfin");
         // Nothing before setup is done.
         let mut early = state();
         early.done = false;
@@ -574,54 +721,110 @@ mod tests {
 
     #[test]
     fn pipe_names() {
-        assert_eq!(name("konak"), r"\\.\pipe\konak-konak");
-        assert_eq!(name("konak-dev.1"), r"\\.\pipe\konak-konak-dev.1");
-        assert_eq!(name(r"a\b c"), r"\\.\pipe\konak-a_b_c");
+        let sid = "S-1-5-21-1-2-3-1001";
+        let n = name(sid, "konak");
+        let hash = n.strip_prefix(r"\\.\pipe\konak-").unwrap().strip_suffix("-konak").unwrap();
+        assert!(hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()), "{n}");
+        assert_eq!(name(sid, "konak"), n, "stable");
+        assert_ne!(name("S-1-5-21-1-2-3-1002", "konak"), n, "per user");
+        assert_eq!(name(sid, "konak-dev.1"), format!(r"\\.\pipe\konak-{hash}-konak-dev.1"));
+        assert_eq!(name(sid, r"a\b c"), format!(r"\\.\pipe\konak-{hash}-a_b_c"));
+        assert_eq!(name_for("konak").unwrap(), name(&current_user_sid().unwrap(), "konak"));
     }
 
     #[test]
     fn descriptor_grants_only_the_current_user() {
         let sid = current_user_sid().unwrap();
         assert!(sid.starts_with("S-1-5-"), "{sid}");
-        assert_eq!(sddl(&sid), format!("D:P(A;;GRGW;;;{sid})"));
-        // The system writes the same rights back in its own order.
-        let back = Descriptor::current_user_only().unwrap().dacl_sddl().unwrap();
-        assert_eq!(back, format!("D:P(A;;GWGR;;;{sid})"));
-        assert_eq!(back.matches("(A;").count(), 1, "{back}");
+        assert_eq!(ACCESS, 0x12018b);
+        assert_eq!(ACCESS & (FILE_CREATE_PIPE_INSTANCE | WRITE_DAC), 0);
+        assert_eq!(sddl(&sid), format!("D:P(A;;0x12018b;;;{sid})(A;;0x20000;;;OW)S:(ML;;NWNRNX;;;ME)"));
+        let back = Descriptor::current_user_only().unwrap().sddl().unwrap();
+        assert_eq!(back, format!("D:P(A;;0x12018b;;;{sid})(A;;RC;;;OW)S:(ML;;NWNRNX;;;ME)"));
+    }
+
+    #[test]
+    fn process_user_is_read_from_its_token() {
+        assert_eq!(process_user_sid(std::process::id()).unwrap(), current_user_sid().unwrap());
+        assert!(process_user_sid(u32::MAX - 3).is_err());
+    }
+
+    #[test]
+    fn gate_caps_concurrent_handlers() {
+        let g = Gate::new(2);
+        let a = g.enter().unwrap();
+        let b = g.enter().unwrap();
+        assert!(g.enter().is_none());
+        assert!(g.enter().is_none(), "a refusal does not count");
+        drop(a);
+        let _c = g.enter().unwrap();
+        assert!(g.enter().is_none());
+        drop(b);
+        assert!(g.enter().is_some());
+    }
+
+    #[test]
+    fn audit_lines() {
+        let r = Reply::new(Outcome::Invalid, Some("unknown_app: x\nfake line".into()));
+        assert_eq!(audit_line(None, Some(r"C:\a\node.exe"), &r), r#"mcp request - from C:\a\node.exe: invalid "unknown_app: x\nfake line""#);
+        assert_eq!(audit_line(Some("ab12"), None, &Reply::new(Outcome::Done, None)), "mcp request ab12 from unknown: done");
     }
 
     fn test_name(tag: &str) -> String {
         format!(r"\\.\pipe\konak-test-{tag}-{}-{}", std::process::id(), crate::confirm::new_id().unwrap())
     }
 
-    /// The real pipe: its own DACL, first-instance exclusivity, framing, the size cap and the timeout.
+    fn open_raw(name: &str, access: u32) -> Result<Pipe, u32> {
+        let w = wide(name);
+        let h = unsafe { CreateFileW(w.as_ptr(), access, 0, std::ptr::null(), OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, std::ptr::null_mut()) };
+        if h == INVALID_HANDLE_VALUE {
+            return Err(last_error());
+        }
+        Ok(Pipe(h))
+    }
+
+    /// One request on a server instance: accept, read, reply, wait for the client, disconnect.
+    fn serve_once(server: &Pipe, reply: &Reply) -> Request {
+        assert!(server.accept());
+        let line = server.read_line(MAX_REQUEST, Some(Instant::now() + REQUEST_TIMEOUT)).ok().unwrap();
+        server.write_line(&serde_json::to_vec(reply).unwrap()).unwrap();
+        server.linger(Duration::from_secs(5));
+        server.disconnect();
+        parse(&line).unwrap()
+    }
+
+    /// The real pipe: its own descriptor, no new instances and no DACL changes by the user,
+    /// first-instance exclusivity, reuse of an instance, framing, the size cap and the timeout.
     #[test]
     fn pipe_roundtrip_and_acl() {
         let name = test_name("rt");
-        let mut l = Listener::bind(&name).unwrap();
+        let l = Listener::bind(&name, 1).unwrap();
+        let server = &l.instances[0];
         // Another first instance under the same name is refused.
-        assert!(Listener::bind(&name).is_err());
+        assert!(Listener::bind(&name, 1).is_err());
         let sid = current_user_sid().unwrap();
-        let n2 = name.clone();
-        let client = std::thread::spawn(move || {
-            let p = connect(&n2).unwrap();
-            let pid = p.server_pid().unwrap();
-            let r = exchange(&p, &Request { op: Op::Start, app: "movies".into(), name: None, delete_data: None });
-            (pid, r)
-        });
-        let server = l.accept();
-        let acl = server.dacl_sddl().unwrap();
-        println!("pipe DACL: {acl}");
-        assert!(acl.starts_with("D:P(") && acl.ends_with(&format!(";;;{sid})")), "{acl}");
-        assert_eq!(acl.matches("(A;").count(), 1, "only the current user: {acl}");
-        let line = server.read_line(MAX_REQUEST, Some(Instant::now() + REQUEST_TIMEOUT)).ok().unwrap();
-        assert_eq!(parse(&line).unwrap().app, "movies");
-        assert_eq!(server.client_pid(), Some(std::process::id()));
-        server.write_line(&serde_json::to_vec(&Reply::new(Outcome::Denied, None)).unwrap()).unwrap();
-        server.linger(Duration::from_secs(5));
-        let (pid, r) = client.join().unwrap();
-        assert_eq!(pid, std::process::id());
-        assert_eq!(r.unwrap().outcome, Outcome::Denied);
+        let acl = server.sddl().unwrap();
+        println!("pipe descriptor: {acl}");
+        assert_eq!(acl, format!("D:P(A;;0x12018b;;;{sid})(A;;RC;;;OW)S:AI(ML;;NWNRNX;;;ME)"));
+        // Nobody may add an instance now, Konak included (the instance limit is unlimited, so this
+        // is the DACL speaking), and the owner's implicit WRITE_DAC is gone.
+        let w = wide(&name);
+        assert_eq!(create(&w, &Descriptor::current_user_only().unwrap(), 0).err(), Some(5));
+        assert_eq!(open_raw(&name, ACCESS | WRITE_DAC).err(), Some(5));
+
+        for round in 0..2 {
+            let n2 = name.clone();
+            let client = std::thread::spawn(move || {
+                let p = connect(&n2).unwrap();
+                let pid = p.server_pid().unwrap();
+                let r = exchange(&p, &Request { op: Op::Start, app: "movies".into(), name: None, delete_data: None });
+                (pid, r)
+            });
+            assert_eq!(serve_once(server, &Reply::new(Outcome::Denied, None)).app, "movies", "round {round}");
+            let (pid, r) = client.join().unwrap();
+            assert_eq!(pid, std::process::id());
+            assert_eq!(r.unwrap().outcome, Outcome::Denied);
+        }
 
         // Oversize request: refused without waiting for a newline.
         let n3 = name.clone();
@@ -630,9 +833,10 @@ mod tests {
             let _ = p.write_line(&vec![b'a'; MAX_REQUEST + 10]);
             p.linger(Duration::from_secs(5));
         });
-        let server = l.accept();
+        assert!(server.accept());
+        assert_eq!(server.client_pid(), Some(std::process::id()));
         assert!(matches!(server.read_line(MAX_REQUEST, Some(Instant::now() + REQUEST_TIMEOUT)), Err(ReadError::TooLarge)));
-        drop(server);
+        server.disconnect();
         client.join().unwrap();
 
         // A client that sends nothing hits the deadline.
@@ -642,20 +846,51 @@ mod tests {
             std::thread::sleep(Duration::from_millis(600));
             drop(p);
         });
-        let server = l.accept();
+        assert!(server.accept());
         assert!(matches!(server.read_line(MAX_REQUEST, Some(Instant::now() + Duration::from_millis(200))), Err(ReadError::Timeout)));
         client.join().unwrap();
         server.linger(Duration::from_secs(2));
         assert!(!server.connected());
+        server.disconnect();
     }
 
-    /// `call` end to end: the server here is this same executable, so the identity check passes.
+    /// With every instance connected, a new client waits briefly and then gets a `busy` error.
+    #[test]
+    fn all_instances_in_use_means_busy() {
+        let name = test_name("full");
+        let l = Listener::bind(&name, 1).unwrap();
+        let first = connect(&name).unwrap();
+        assert!(l.instances[0].accept());
+        assert!(connect(&name).err().unwrap().starts_with("busy"));
+        drop(first);
+    }
+
+    /// Several instances: each has the final descriptor, and a client reaches the second one while
+    /// the first is connected.
+    #[test]
+    fn every_instance_gets_the_final_descriptor() {
+        let name = test_name("multi");
+        let l = Listener::bind(&name, 3).unwrap();
+        let sid = current_user_sid().unwrap();
+        for p in &l.instances {
+            assert_eq!(p.sddl().unwrap(), format!("D:P(A;;0x12018b;;;{sid})(A;;RC;;;OW)S:AI(ML;;NWNRNX;;;ME)"));
+        }
+        assert_eq!(create(&wide(&name), &Descriptor::current_user_only().unwrap(), 0).err(), Some(5));
+        // Two clients at once, so two instances serve (one instance takes one client; see
+        // `all_instances_in_use_means_busy`).
+        let a = connect(&name).unwrap();
+        let b = connect(&name).unwrap();
+        drop((a, b));
+    }
+
+    /// `call` end to end: the server here is this same executable and user, so both checks pass.
     #[test]
     fn call_checks_the_server_and_returns_its_reply() {
         let distro = format!("test-call-{}-{}", std::process::id(), crate::confirm::new_id().unwrap());
-        let mut l = Listener::bind(&name(&distro)).unwrap();
+        let l = Listener::bind(&name_for(&distro).unwrap(), 1).unwrap();
         let client = std::thread::spawn(move || call(&distro, &Request { op: Op::Remove, app: "git".into(), name: None, delete_data: Some(true) }));
-        let server = l.accept();
+        let server = &l.instances[0];
+        assert!(server.accept());
         let got = parse(&server.read_line(MAX_REQUEST, Some(Instant::now() + REQUEST_TIMEOUT)).ok().unwrap()).unwrap();
         assert_eq!(got.delete_data, Some(true));
         server.write_line(br#"{"outcome":"failed","error":"remove of forgejo failed"}"#).unwrap();
