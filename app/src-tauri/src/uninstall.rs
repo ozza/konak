@@ -401,6 +401,23 @@ fn purge_home(paths: &Paths, exe: &Path) -> Result<String, String> {
     }
 }
 
+/// How long an uninstall waits for a running backup or restore to end.
+const BACKUP_WAIT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Waits until no backup or restore runs in the Konak being uninstalled; an error (and nothing
+/// changed) when one still runs after `max`.
+fn wait_for_backup(paths: &Paths, exe: &Path, max: std::time::Duration) -> Result<String, String> {
+    let t0 = std::time::Instant::now();
+    loop {
+        match crate::backup::running_elsewhere(paths, exe) {
+            None if t0.elapsed().as_secs() < 1 => return Ok("none running".into()),
+            None => return Ok(format!("waited {} s for it to end", t0.elapsed().as_secs())),
+            Some((pid, op)) if t0.elapsed() >= max => return Err(format!("a {op} still runs in Konak (pid {pid}); nothing was changed, uninstall again once it is done")),
+            Some(_) => std::thread::sleep(std::time::Duration::from_secs(5)),
+        }
+    }
+}
+
 /// Runs the uninstall and returns the process exit code.
 pub fn run(opts: Opts) -> i32 {
     let exe = std::env::current_exe().unwrap_or_default();
@@ -410,6 +427,16 @@ pub fn run(opts: Opts) -> i32 {
     let mut r = Report { file, log_path, summary: vec![], failed: false };
     r.log(&format!("uninstall: purge={} silent={} exe={} home={} distro={}", opts.purge, opts.silent, exe.display(), paths.home.display(), paths.distro));
 
+    let o = wait_for_backup(&paths, &exe, BACKUP_WAIT);
+    let busy = o.is_err();
+    r.step("backup or restore", o);
+    if busy {
+        // Nothing is changed: stopping Konak now would cut a restore or backup in the middle.
+        let summary = format!("Konak uninstall refused\n{}\nlog: {}", r.summary.join("\n"), r.log_path.display());
+        r.log("refused");
+        println!("{summary}");
+        return 1;
+    }
     let o = stop_processes(&paths, &exe);
     r.step("processes", o);
     let o = stop_containers(&paths);
@@ -462,6 +489,35 @@ mod tests {
 
     fn args(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_uninstall_waits_for_a_running_backup() {
+        let paths = crate::settings::tests::temp_paths("uninstall-wait");
+        // No marker, or one of a process that is gone: nothing to wait for.
+        let none = wait_for_backup(&paths, Path::new(r"C:\x\konak.exe"), std::time::Duration::ZERO);
+        std::fs::write(paths.home.join("op-running.json"), r#"{"pid":4294967295,"op":"restore"}"#).unwrap();
+        let gone = wait_for_backup(&paths, Path::new(r"C:\x\konak.exe"), std::time::Duration::ZERO);
+        // A live process of that exe holds it (ping stands in for Konak).
+        let mut child = shell::hidden("ping.exe").args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let image = crate::diag::process_image(child.id()).unwrap();
+        std::fs::write(paths.home.join("op-running.json"), format!(r#"{{"pid":{},"op":"restore"}}"#, child.id())).unwrap();
+        let busy = wait_for_backup(&paths, Path::new(&image), std::time::Duration::ZERO);
+        let other_exe = wait_for_backup(&paths, Path::new(r"C:\x\konak.exe"), std::time::Duration::ZERO);
+        let _ = child.kill();
+        let _ = child.wait();
+        // The marker a run writes is removed when the run ends.
+        let marker = crate::backup::RunMarker::new(&paths, "backup");
+        let written = paths.home.join("op-running.json").is_file();
+        drop(marker);
+        let removed = !paths.home.join("op-running.json").exists();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(none.unwrap(), "none running");
+        assert_eq!(gone.unwrap(), "none running");
+        let e = busy.unwrap_err();
+        assert!(e.contains("a restore still runs") && e.contains("nothing was changed"), "{e}");
+        assert!(other_exe.is_ok(), "another program with that pid is not Konak");
+        assert!(written && removed);
     }
 
     #[test]

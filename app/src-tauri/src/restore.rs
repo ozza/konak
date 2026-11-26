@@ -741,6 +741,7 @@ fn password(paths: &Paths, given: &str) -> Result<SecretString, String> {
 /// `host` as the final `done` (everything chosen was restored) or `failed` event, with the summary.
 pub fn run(paths: &Paths, host: &dyn Host, target: &dyn Target, _guard: &Guard, req: &Request) -> Result<Summary, Failed> {
     let t0 = Instant::now();
+    let _marker = crate::backup::RunMarker::new(paths, "restore");
     let ctx = Ctx { paths, host, total: Cell::new(0), last: Cell::new(None) };
     let mut summary = Summary::default();
     let result = run_steps(&ctx, target, req, &mut summary);

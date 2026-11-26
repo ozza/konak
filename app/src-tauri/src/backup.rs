@@ -58,6 +58,39 @@ pub fn running() -> bool {
     RUNNING.load(Ordering::SeqCst)
 }
 
+/// While a backup or restore runs, `op-running.json` in the Konak home names this process, so an
+/// uninstall (another process) waits for it instead of stopping Konak in the middle of it.
+pub struct RunMarker(PathBuf);
+
+fn run_marker_file(paths: &Paths) -> PathBuf {
+    paths.home.join("op-running.json")
+}
+
+impl RunMarker {
+    pub fn new(paths: &Paths, op: &str) -> RunMarker {
+        let file = run_marker_file(paths);
+        if let Err(e) = settings::write_atomic(&file, serde_json::json!({ "pid": std::process::id(), "op": op }).to_string().as_bytes()) {
+            crate::log(paths, &format!("{op}: cannot write {}: {e}", file.display()));
+        }
+        RunMarker(file)
+    }
+}
+
+impl Drop for RunMarker {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// The backup or restore another live process of `exe` runs: its pid and op (`backup`, `restore`).
+pub fn running_elsewhere(paths: &Paths, exe: &Path) -> Option<(u32, String)> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(run_marker_file(paths)).ok()?).ok()?;
+    let pid = u32::try_from(v["pid"].as_u64()?).ok()?;
+    let image = crate::diag::process_image(pid)?;
+    let same = |a: &Path, b: &Path| a.to_string_lossy().replace('/', "\\").eq_ignore_ascii_case(&b.to_string_lossy().replace('/', "\\"));
+    (pid != std::process::id() && same(Path::new(&image), exe)).then(|| (pid, v["op"].as_str().unwrap_or("backup").to_string()))
+}
+
 // ---- What the engine needs from its caller ---------------------------------------------------------
 
 /// `backup-progress` event payload (contract).
@@ -689,6 +722,7 @@ pub fn recover(paths: &Paths, apps: &dyn Apps) -> Option<String> {
 /// history and reported through `host` (`done` or `failed`).
 pub fn run(paths: &Paths, host: &dyn Host, apps: &dyn Apps, _guard: &Guard, log_n: u8) -> Result<PathBuf, Failed> {
     let t0 = Instant::now();
+    let _marker = RunMarker::new(paths, "backup");
     let created = now();
     let ctx = Ctx { host, total: Cell::new(0), last: Cell::new(None) };
     let mut partial = None;
@@ -805,7 +839,20 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
             }
             std::thread::sleep(Duration::from_secs(2));
         }
-        let _ = settings::write_atomic(&inflight_file(paths), serde_json::json!({ "app": id }).to_string().as_bytes());
+        // Removed since the sizes were taken (the panel or an MCP remove): left out with a note,
+        // the other apps are still backed up.
+        if !State::try_load(paths).map_err(|e| fail("app", e))?.apps.iter().any(|a| a.id == id) {
+            ctx.host.release(id, &Ok(()));
+            crate::log(paths, &format!("backup: {id} was removed during the backup; left out"));
+            w.skip(format!("apps/{id} (removed during the backup)"));
+            continue;
+        }
+        // Without the marker, a Konak that ended now would leave the app stopped: it is not stopped then.
+        if let Err(e) = settings::write_atomic(&inflight_file(paths), serde_json::json!({ "app": id }).to_string().as_bytes()) {
+            let e = format!("cannot record the backup in progress: {e}");
+            ctx.host.release(id, &Err(e.clone()));
+            return Err(app_fail(e));
+        }
         let result = with_stopped(apps, id, || archive_app(paths, ctx, &mut w, z, created));
         let _ = std::fs::remove_file(inflight_file(paths));
         ctx.host.release(id, &result);
