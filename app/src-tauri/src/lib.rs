@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod paths;
 pub mod pipe;
 pub mod redact;
+pub mod restore;
 pub mod services;
 pub mod settings;
 pub mod shell;
@@ -872,6 +873,73 @@ async fn inspect_backup(app: AppHandle, path: String, password: String) -> Resul
     blocking(app, move |p| backup::inspect(p, &path, &password)).await?
 }
 
+/// `restore::Host` for the running Konak: `restore-progress` events, the busy set (op `restore`,
+/// through `app-progress`), and the supervisor. Remembers the apps it holds, so a run that panics
+/// releases them.
+struct RestoreHost {
+    app: AppHandle,
+    held: Mutex<Vec<String>>,
+}
+
+impl restore::Host for RestoreHost {
+    fn progress(&self, p: &restore::Progress) {
+        let _ = self.app.emit("restore-progress", p);
+    }
+    fn try_busy(&self, id: &str) -> bool {
+        let k = self.app.state::<Konak>();
+        if !k.busy.lock().unwrap().insert(id.to_string()) {
+            return false;
+        }
+        self.held.lock().unwrap().push(id.to_string());
+        let _ = self.app.emit("app-progress", AppProgress { id: id.to_string(), op: "restore", state: "running", error: None });
+        true
+    }
+    fn release(&self, id: &str, result: &Result<(), String>) {
+        let k = self.app.state::<Konak>();
+        k.busy.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
+        self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|h| h != id);
+        let (state, error) = match result {
+            Ok(()) => ("done", None),
+            Err(e) => ("failed", Some(redact::Redactor::new(vec![]).apply(e))),
+        };
+        let _ = self.app.emit("app-progress", AppProgress { id: id.to_string(), op: "restore", state, error });
+    }
+    fn apps_changed(&self) {
+        self.app.state::<Konak>().sup.tick();
+    }
+    fn ca_changed(&self) {
+        self.app.state::<Konak>().sup.restart_web();
+    }
+}
+
+/// Starts a restore; progress arrives as `restore-progress` events, the last one with a summary.
+/// An empty `password` uses the stored one.
+#[tauri::command]
+fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<String>, replace: bool, photos: bool, media: bool) -> Result<(), String> {
+    let paths = app.state::<Konak>().paths.clone();
+    let req = restore::Request { path, password, apps, replace, photos, media };
+    restore::precheck(&paths, &req)?;
+    let guard = backup::Guard::acquire()?;
+    log(&paths, &format!("restore of {} starting", req.path));
+    std::thread::spawn(move || {
+        let k = app.state::<Konak>();
+        let host = RestoreHost { app: app.clone(), held: Mutex::new(vec![]) };
+        let target = restore::DistroTarget(&k.paths);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| restore::run(&k.paths, &host, &target, &guard, &req)));
+        if r.is_err() {
+            log(&k.paths, "restore: the run panicked");
+            let held = host.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            for id in held {
+                restore::Host::release(&host, &id, &Err("internal error".into()));
+            }
+            let _ = app.emit("restore-progress", restore::Progress { state: "failed", step: "done", app: None, done_bytes: None, total_bytes: None, error: Some("internal error".into()), summary: None });
+        }
+        k.sup.tick();
+        drop(guard);
+    });
+    Ok(())
+}
+
 extern "system" {
     fn GetUserDefaultUILanguage() -> u16;
 }
@@ -1072,7 +1140,8 @@ pub fn run() {
             set_backup_password,
             backup_now,
             list_backups,
-            inspect_backup
+            inspect_backup,
+            restore_backup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
