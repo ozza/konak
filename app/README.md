@@ -55,7 +55,10 @@ must verify, and the same for `outside.example` must fail with "permitted subtre
 ## MCP server
 `konak.exe --mcp` runs a headless MCP server on stdin/stdout (official Rust SDK `rmcp`), so AI agents can inspect Konak instead of driving PowerShell or WSL themselves.
 - **Local stdio only.** No network listener; the client starts the process.
-- **Read-only.** No tool changes anything, and none starts the Konak distro: when it is stopped, tools say "distro not running".
+- **Reads never change anything,** and none starts the Konak distro: when it is stopped, tools say "distro not running".
+- **Every write waits for a person.** The write tools forward each request to the running Konak window, which
+  asks the user to approve it. Nothing runs without that click. Without a running Konak they fail with
+  "Konak is not running".
 - **Redacted.** Every string in every reply passes through the same redactor as the UI.
 
 Register it with an MCP client, for example Claude Code:
@@ -70,6 +73,25 @@ The dev environment variables above (`KONAK_HOME`, `KONAK_DISTRO`) apply to it t
 | `mdns_check {name}` | Name syntax, use by Konak, and whether another LAN device answers to `<name>.local` |
 | `resources` | Free space on the Konak drive, distro disk size, host RAM, memory and disk inside the distro when running |
 | `diagnose` | ok/warn/fail, evidence and a suggested fix for: shared-namespace `FORWARD` policy, stale netavark rules, distro keepalive, port 80 owner, LAN adapter choice |
+
+Write tools, each confirmed in the Konak window: `install_app {app}`, `remove_app {app, delete_data?}`,
+`start_app {app}`, `stop_app {app}`, `restart_app {app}`, `rename_app {app, name}`, `claim_app {app}`.
+A call waits for the answer (5 minutes) and then for the operation (up to 15 minutes) and returns
+`done`, `failed`, `denied`, `busy`, `invalid` or `running`.
+
+How the confirmation works (`src-tauri/src/pipe.rs`, `confirm.rs`, `src/lib/panel/McpConfirm.svelte`):
+- `konak.exe --mcp` sends each request over a named pipe, `\\.\pipe\konak-<user hash>-<distro>`, to the
+  running Konak. The pipe accepts only the current Windows user, local clients and medium integrity or
+  higher. The client checks that the server is the same konak.exe file running as the same user.
+- Konak validates the request first: an unknown app, an invalid name, an app busy with another
+  operation or a request that would change nothing is refused without a dialog.
+- The dialog names the requesting program (as it reports itself, unverified), the action and its
+  consequence. Deny has the focus, Approve arms after 1.5 s, and Escape, closing the window or no answer
+  in 5 minutes deny. An identical request denied in the last 2 minutes is refused without a dialog.
+- Every request and its outcome is written to `install.log`.
+- Limit: the click guards this channel only. A program running as the same user can still act outside
+  it, for example by running `wsl` commands itself or by automating clicks; that is inherent to a
+  same-user design.
 
 ## Uninstall
 Run the uninstaller from Windows Settings. Before it removes any file, it asks one question: also

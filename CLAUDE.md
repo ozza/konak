@@ -29,7 +29,8 @@ Native Windows 11 desktop app that turns the user's PC into a self-hosted servic
     - distro keepalive;
     - port 80 owner;
     - LAN adapter choice.
-  - **Write tools:** install, remove, restart, change settings, back up and restore. Each one needs explicit user confirmation in the Konak UI for destructive or outward-facing actions. Secrets are redacted from every tool output.
+  - **Write tools:** built 2026-11-26: install, remove, start, stop, restart, rename and claim. Decision (2026-11-26): every write action waits for an explicit click in the Konak window; none skips it. The MCP process forwards requests over a per-user named pipe to the running Konak. Secrets are redacted from every tool output. Plan: `.audit/plan-mcp-write.md`.
+  - **Later:** back up and restore, as a feature of its own (Konak has no backup yet), then as MCP tools.
 
 ## Proposed, not final
 - Tray agent: Rust, sharing code with the Tauri core.
