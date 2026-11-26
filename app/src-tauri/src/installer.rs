@@ -444,9 +444,9 @@ mod tests {
         let s = State::from_json(old).unwrap();
         assert_eq!(s.rendered_ports, WebPorts::STANDARD);
         assert!(s.done && s.apps[0].stopped);
-        let fallback = State { rendered_ports: WebPorts::FALLBACK, ..s };
+        let fallback = State { rendered_ports: WebPorts::FALLBACKS[0], ..s };
         let back = State::from_json(&serde_json::to_string(&fallback).unwrap()).unwrap();
-        assert_eq!(back.rendered_ports, WebPorts { http: 47080, https: 47443 });
+        assert_eq!(back.rendered_ports, WebPorts { http: 18080, https: 18443 });
     }
 
     fn temp_paths(tag: &str) -> Paths {

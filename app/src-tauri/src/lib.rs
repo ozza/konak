@@ -84,7 +84,7 @@ struct Status {
     repairing: bool,
     repair_error: Option<String>,
     summary: Option<Summary>,
-    /// `{http, https, port80_owner}`: 80/443, or 47080/47443 while another program holds port 80
+    /// `{http, https, port80_owner}`: 80/443, or a fallback pair such as 18080/18443 while another program holds port 80
     /// (then `port80_owner` names it when known, e.g. `httpd.exe (pid 1234)`).
     web_ports: services::WebStatus,
 }

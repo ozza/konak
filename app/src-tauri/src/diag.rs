@@ -291,7 +291,7 @@ pub struct NetFacts {
     pub firewall: Vec<FwProgram>,
     #[serde(default)]
     pub port80: Vec<Listener>,
-    /// Listeners on the fallback HTTP port (`WebPorts::FALLBACK.http`).
+    /// Listeners on the fallback HTTP port Caddy serves on (the heartbeat's); empty on 80/443.
     #[serde(default)]
     pub fallback_http: Vec<Listener>,
 }
@@ -304,7 +304,8 @@ fn ps_quote(s: &str) -> String {
 /// PowerShell run.
 pub fn net_facts(paths: &Paths, ip: Option<&str>) -> Result<NetFacts, String> {
     let progs = [paths.caddy(), paths.mdns()].map(|p| ps_quote(&p.to_string_lossy())).join(",");
-    let cmd = format!("& {{\n{NET_PS1}\n}} -Ip {} -Programs {progs} -FallbackPort {}", ps_quote(ip.unwrap_or("")), WebPorts::FALLBACK.http);
+    let fallback = heartbeat(paths).map(|h| h.web_ports).filter(|p| p.is_fallback()).map_or(0, |p| p.http);
+    let cmd = format!("& {{\n{NET_PS1}\n}} -Ip {} -Programs {progs} -FallbackPort {fallback}", ps_quote(ip.unwrap_or("")));
     let out = shell::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &cmd]);
     let json = out.text.lines().rev().find(|l| l.trim_start().starts_with('{')).unwrap_or("");
     let mut facts: NetFacts = serde_json::from_str(json).map_err(|e| format!("network facts unreadable: {e}: {}", tail(&out.text, 3)))?;
@@ -678,7 +679,7 @@ pub fn port80(f: &Facts) -> Check {
     });
     let others: Vec<String> = relevant.iter().filter(|l| !konak(l)).map(|l| format!("{} pid {} {}", l.address, l.pid, l.image.as_deref().unwrap_or("(image unknown)"))).collect();
     // Konak's Caddy on the fallback port: apps stay reachable there, so a warning, not a failure.
-    let fallback = WebPorts::FALLBACK;
+    let fallback = f.heartbeat.as_ref().map(|h| h.web_ports).unwrap_or_default();
     let on_fallback = f.heartbeat.as_ref().is_some_and(|h| !h.stale(f.now) && h.web_ports.is_fallback()) && net.fallback_http.iter().any(|l| konak_listener(l, ip, caddy_pid, &f.caddy));
     let serving = format!("Konak serves its apps on the fallback ports instead: {} (HTTPS port {})", fallback.url(false, "<name>"), fallback.https);
     if !others.is_empty() {
@@ -921,10 +922,10 @@ mod tests {
         let net = f.net.as_mut().unwrap();
         net.port80 = vec![httpd.clone()];
         net.fallback_http = vec![Listener { address: "192.168.1.5".into(), pid: 22, image: None }];
-        f.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACK;
+        f.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACKS[1];
         let c = port80(&f);
         assert_eq!(c.status, "warn", "{c:?}");
-        assert!(c.evidence.contains("httpd.exe") && c.evidence.contains("pid 4242") && c.evidence.contains(":47080"), "{c:?}");
+        assert!(c.evidence.contains("httpd.exe") && c.evidence.contains("pid 4242") && c.evidence.contains(":28080") && c.evidence.contains("HTTPS port 28443"), "{c:?}");
         assert!(c.fix.contains("returns to port 80 by itself"), "{c:?}");
         assert_eq!(port80_owner(f.net.as_ref().unwrap(), "192.168.1.5", &f.caddy).as_deref(), Some("httpd.exe (pid 4242)"));
 
@@ -935,7 +936,7 @@ mod tests {
         let mut g = facts();
         g.net.as_mut().unwrap().port80 = vec![httpd];
         g.net.as_mut().unwrap().fallback_http = vec![Listener { address: "192.168.1.5".into(), pid: 22, image: None }];
-        g.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACK;
+        g.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACKS[1];
         g.heartbeat.as_mut().unwrap().last_tick_unix = 0;
         assert_eq!(port80(&g).status, "fail");
 
@@ -943,7 +944,7 @@ mod tests {
         let mut h = facts();
         h.net.as_mut().unwrap().port80.clear();
         h.net.as_mut().unwrap().fallback_http = vec![Listener { address: "0.0.0.0".into(), pid: 9, image: Some(r"c:\konak\bin\CADDY.EXE".into()) }];
-        h.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACK;
+        h.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACKS[1];
         let c = port80(&h);
         assert!(c.status == "warn" && c.evidence.contains("free again"), "{c:?}");
     }
