@@ -204,9 +204,44 @@ pub fn wsl_installed() -> bool {
     shell::run("wsl.exe", &["--version"]).ok
 }
 
-pub fn distro_exists(distro: &str) -> bool {
+/// Whether WSL has `distro` registered. `Ok(false)` only when that is certain: `wsl -l -q` listed the
+/// distros without it, or, when `wsl -l` fails (no distros at all, or a WSL service that is hung,
+/// updating or broken), WSL's own registry list (`HKCU\...\Lxss`) has no such name. `Err` when
+/// neither could be read, so a caller never treats "cannot tell" as "not there".
+pub fn distro_exists(distro: &str) -> Result<bool, String> {
     let out = shell::run("wsl.exe", &["-l", "-q"]);
-    out.ok && out.text.lines().any(|l| l.trim() == distro)
+    distro_listed(distro, out.ok, &out.text, registered_distros)
+}
+
+/// The decision behind `distro_exists`, apart from the commands so it can be tested.
+pub fn distro_listed(distro: &str, wsl_ok: bool, wsl_text: &str, registry: impl FnOnce() -> Result<Vec<String>, String>) -> Result<bool, String> {
+    if wsl_ok {
+        return Ok(wsl_text.lines().any(|l| l.trim().eq_ignore_ascii_case(distro)));
+    }
+    match registry() {
+        Ok(names) => Ok(names.iter().any(|n| n.trim().eq_ignore_ascii_case(distro))),
+        Err(e) => Err(format!("cannot tell whether WSL distro '{distro}' is registered: `wsl -l -q` failed ({}) and {e}", tail(wsl_text, 1).trim())),
+    }
+}
+
+/// Read-only: the `DistributionName` of every subkey of WSL's per-user registry list. A missing key
+/// is an empty list (WSL never registered a distro for this user).
+const LXSS_PS1: &str = "$k = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss'\n\
+if (Test-Path -LiteralPath $k) { Get-ChildItem -LiteralPath $k -ErrorAction Stop | ForEach-Object { 'name ' + $_.GetValue('DistributionName') } }\n\
+'end'\n";
+
+fn registered_distros() -> Result<Vec<String>, String> {
+    let out = shell::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", LXSS_PS1]);
+    parse_registered(out.ok, &out.text)
+}
+
+/// `LXSS_PS1` output; the closing `end` line proves the whole list was read.
+pub fn parse_registered(ok: bool, text: &str) -> Result<Vec<String>, String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if !ok || lines.last() != Some(&"end") {
+        return Err(format!("the WSL registry list could not be read ({})", tail(text, 1).trim()));
+    }
+    Ok(lines.iter().filter_map(|l| l.strip_prefix("name ")).map(str::trim).filter(|n| !n.is_empty()).map(String::from).collect())
 }
 
 /// Registers Konak to start at logon (per user, no admin). Used to resume after the reboot and,
@@ -336,12 +371,12 @@ pub fn run_step(step: &str, paths: &Paths, state: &mut State, pre: &Preflight, s
             return Ok(Flow::Pause);
         }
         "distro" => {
-            if !distro_exists(distro) {
+            if !distro_exists(distro)? {
                 let dir = paths.distro_dir();
                 let _ = std::fs::create_dir_all(&dir);
                 let out = shell::run("wsl.exe", &["--install", "Debian", "--name", distro, "--location", &dir.to_string_lossy(), "--no-launch"]);
                 crate::log(paths, &format!("wsl --install Debian: {}", tail(&out.text, 3)));
-                if !distro_exists(distro) {
+                if !distro_exists(distro).unwrap_or(false) {
                     return Err(format!("distro install failed: {}", tail(&out.text, 5)));
                 }
             }
@@ -481,6 +516,31 @@ mod tests {
         assert_eq!(r.err().as_deref(), Some("state_unreadable"));
         assert!(text.contains("forg"), "the damaged file is left as it is");
         assert!(State::from_json("").is_err());
+    }
+
+    #[test]
+    fn cannot_list_is_not_the_same_as_not_listed() {
+        let no_registry = || -> Result<Vec<String>, String> { panic!("the registry is read only when wsl -l fails") };
+        assert_eq!(distro_listed("konak", true, "Ubuntu-24.04\r\nkonak\r\n", no_registry), Ok(true));
+        assert_eq!(distro_listed("konak", true, "Ubuntu-24.04\r\nkonak-auditfix\r\n", no_registry), Ok(false));
+        assert_eq!(distro_listed("konak", true, "KONAK\r\n", no_registry), Ok(true), "WSL names are case-insensitive");
+        // `wsl -l` failed (no distros at all, or a broken service): the registry decides.
+        let failed = "Windows Subsystem for Linux has no installed distributions.";
+        assert_eq!(distro_listed("konak", false, failed, || Ok(vec![])), Ok(false));
+        assert_eq!(distro_listed("konak", false, failed, || Ok(vec!["konak".into()])), Ok(true));
+        let e = distro_listed("konak", false, "The service is being updated", || Err("the WSL registry list could not be read ()".into())).unwrap_err();
+        assert!(e.contains("cannot tell") && e.contains("being updated"), "{e}");
+
+        assert_eq!(parse_registered(true, "name Ubuntu-24.04\r\nname konak\r\nend\r\n"), Ok(vec!["Ubuntu-24.04".to_string(), "konak".to_string()]));
+        assert_eq!(parse_registered(true, "end\r\n"), Ok(vec![]), "no Lxss key: nothing registered");
+        assert!(parse_registered(true, "name konak\r\n").is_err(), "cut off before the end line");
+        assert!(parse_registered(false, "name konak\r\nend\r\n").is_err());
+    }
+
+    #[test]
+    #[ignore = "reads this PC's WSL registry list"]
+    fn reads_the_wsl_registry_list() {
+        assert!(registered_distros().is_ok());
     }
 
     #[test]
