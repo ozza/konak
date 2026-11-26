@@ -1,13 +1,13 @@
 // Dev-only stand-in for the Tauri backend, so the UI can be viewed in a plain browser with `npm run dev`.
 // Loaded from +layout.ts only when import.meta.env.DEV is true and the page is not inside Tauri; the
 // production build drops it. URL flags: ?setup (first-run flow), ?public (Public network notice),
-// ?empty (no apps installed), ?port80 (port 80 taken, fallback port), ?firewall (missing firewall rules), ?stale (a failing diagnostic). Forgejo starts unclaimed; newly installed apps are unclaimed too. Rename to "taken" to see the LAN conflict error.
+// ?empty (no apps installed), ?port80 (port 80 taken, fallback port), ?firewall (missing firewall rules), ?stale (a failing diagnostic), ?mcp=<op> (an AI agent request waiting for confirmation, e.g. ?mcp=remove). Forgejo starts unclaimed; newly installed apps are unclaimed too. Rename to "taken" to see the LAN conflict error.
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type { AppInfo, Manifest, Op } from "$lib/panel/api";
 
 const q = new URLSearchParams(location.search);
-const port = q.has("port80") ? ":47080" : "";
+const port = q.has("port80") ? ":18080" : "";
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const catalog: Manifest[] = [
@@ -38,6 +38,7 @@ const containers: Record<string, AppInfo["containers"]> = {
 
 const GB = 1024 ** 3;
 const hostInfo = () => ({
+  ready: true,
   distro: { name: "konak-podman", running: true },
   memory: { used_bytes: 7.4 * GB, total_bytes: 64 * GB },
   disk: { used_bytes: 118 * GB, total_bytes: 900 * GB },
@@ -54,7 +55,7 @@ const checks = () => [
 
 function info(id: string, name: string, status: AppInfo["status"], claimed = true): AppInfo {
   const m = catalog.find((c) => c.id === id)!;
-  const url = m.https ? `https://${name}.local${port && ":47443"}` : `http://${name}.local${port}`;
+  const url = m.https ? `https://${name}.local${port && ":18443"}` : `http://${name}.local${port}`;
   const local_url = `http://127.0.0.1:${m.port}`;
   return { id, name, url, local_url, https: m.https, port: m.port, installed_unix: 1763800000, claimed, stopped: status === "stopped", status, containers: status === "stopped" ? [] : (containers[id] ?? []) };
 }
@@ -82,7 +83,7 @@ const status = () => ({
   reboot_needed: false,
   done: !q.has("setup"),
   url: `http://konak.local${port}`,
-  web_ports: port ? { http: 47080, https: 47443, port80_owner: "httpd.exe (pid 4120)" } : { http: 80, https: 443, port80_owner: null },
+  web_ports: port ? { http: 18080, https: 18443, port80_owner: "httpd.exe (pid 4120)" } : { http: 80, https: 443, port80_owner: null },
   network_category: q.has("public") ? "Public" : "Private",
   firewall_missing: firewallMissing,
   repairing,
@@ -150,6 +151,14 @@ export function installMock() {
           return op(a.id, "stop", () => ((apps = apps.map((x) => (x.id === a.id ? { ...x, stopped: true, status: "stopped", containers: [] } : x))), null));
         case "start_app":
           return op(a.id, "start", () => ((apps = apps.map((x) => (x.id === a.id ? { ...x, stopped: false, status: "running" } : x))), null));
+        case "mcp_pending": {
+          const op = q.get("mcp");
+          if (!op) return null;
+          return { id: "req-1", requester: "claude.exe", op, app: "jellyfin", name: op === "rename" ? "films" : null, delete_data: q.has("delete"), expires_unix: Date.now() / 1000 + 300 };
+        }
+        case "mcp_answer":
+          console.info("[mock] mcp answer", a.id, a.approve);
+          return null;
         case "restart_app":
           return op(a.id, "restart", () => null);
         case "claim_app":

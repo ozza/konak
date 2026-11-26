@@ -23,9 +23,9 @@
   --color-accent: #1f6feb;
   --color-accent-strong: #1858c4;
   --color-on-accent: #ffffff;
-  --color-ok: #1a7f37;
+  --color-ok: #116329;
   --color-ok-bg: rgb(26 127 55 / 0.1);
-  --color-warn: #9a6700;
+  --color-warn: #7d4e00;
   --color-warn-bg: #fff8e6;
   --color-warn-border: #e9c46a;
   --color-warn-title: #7d4e00;
@@ -35,6 +35,7 @@
   --color-error-bg: #ffebe9;
   --color-error-border: #f1a9a9;
   --color-danger: #cf222e;
+  --color-danger-strong: #a40e26;
   --color-on-error: #ffffff;
   --color-icon-tile: #e8ebef;
   --color-icon-ink: #3d444d;
@@ -75,6 +76,7 @@
       --color-error-bg: #2d1517;
       --color-error-border: #6e2b2b;
       --color-danger: #da3633;
+      --color-danger-strong: #b62324;
       --color-icon-tile: #262b33;
       --color-icon-ink: #c9d1d9;
       --shadow-card: none;
@@ -110,6 +112,7 @@
     --color-error-bg: #2d1517;
     --color-error-border: #6e2b2b;
     --color-danger: #da3633;
+    --color-danger-strong: #b62324;
     --color-icon-tile: #262b33;
     --color-icon-ink: #c9d1d9;
     --shadow-card: none;
@@ -128,7 +131,7 @@
   @apply btn border-accent bg-accent text-on-accent hover:border-accent-strong hover:bg-accent-strong;
 }
 @utility btn-danger {
-  @apply btn border-danger bg-danger text-on-error hover:border-danger hover:bg-danger/85;
+  @apply btn border-danger bg-danger text-on-error hover:border-danger-strong hover:bg-danger-strong;
 }
 @utility card {
   @apply flex min-w-0 flex-col gap-3.5 rounded-xl border border-border bg-panel p-[18px] shadow-card;

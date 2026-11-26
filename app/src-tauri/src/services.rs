@@ -9,7 +9,8 @@
 //! and mDNS restart only when the app list, the LAN IP or the web ports change.
 //!
 //! Web ports: Caddy serves on 80/443 whenever port 80 on the LAN IP is free. While another program
-//! holds it (IIS, XAMPP, Apache, http.sys, ...), Caddy serves on `WebPorts::FALLBACK` instead, and
+//! holds it (IIS, XAMPP, Apache, http.sys, ...), Caddy serves on the first free pair of
+//! `WebPorts::FALLBACKS` instead, and
 //! it returns to 80/443 by itself once port 80 is free again (`PortChoice`). App settings that embed
 //! the app's own address are then re-rendered for the new ports (`apps::rerender_for_ports`).
 
@@ -41,10 +42,17 @@ impl Default for WebPorts {
 
 impl WebPorts {
     pub const STANDARD: WebPorts = WebPorts { http: 80, https: 443 };
-    /// Used while another program holds port 80 on the LAN IP. Below the Windows dynamic range
-    /// (49152+), next to the app block (47100-47199), and outside every range listed by
-    /// `netsh int ipv4 show excludedportrange protocol=tcp` on the dev PC (2026-11-24).
-    pub const FALLBACK: WebPorts = WebPorts { http: 47080, https: 47443 };
+    /// Pairs tried in order while another program holds port 80 on the LAN IP; the first pair whose
+    /// two ports both bind on the LAN IP wins (`first_free_fallback`). The old 47080/47443 pair lies
+    /// inside the TCP/UDP range 44620-48715 that WSL's mirrored networking reserves on Windows (the
+    /// distro's `ip_local_port_range`), so it never binds there. These pairs are:
+    /// - below 32768, where Linux's default ephemeral range starts, so outside it in NAT mode and
+    ///   outside mirrored WSL's 44620-48715;
+    /// - below the Windows dynamic range (49152+), where Hyper-V and WinNAT reserve blocks;
+    /// - outside every range in `netsh int ipv4 show excludedportrange protocol=tcp` on the dev PC
+    ///   (2026-11-26: 5357, 13508 and blocks from 50000 up);
+    /// - not a common dev-server default (3000, 4200, 5000, 5173, 8000, 8080, 8443, 8888, 9000).
+    pub const FALLBACKS: [WebPorts; 3] = [WebPorts { http: 18080, https: 18443 }, WebPorts { http: 28080, https: 28443 }, WebPorts { http: 15080, https: 15443 }];
 
     pub fn is_fallback(self) -> bool {
         self != WebPorts::STANDARD
@@ -65,13 +73,48 @@ impl WebPorts {
 }
 
 /// The web ports Caddy serves on now, from the supervisor heartbeat, so every process (UI, MCP)
-/// reads the same. 80/443 before the first heartbeat.
+/// reads the same. 80/443 before the first heartbeat. For display only; app settings are rendered
+/// with `render_ports`.
 pub fn active_ports(paths: &Paths) -> WebPorts {
-    crate::diag::heartbeat(paths).map(|h| h.web_ports).unwrap_or_default()
+    render_ports(paths).unwrap_or_default()
 }
 
-/// The port choice, kept apart from sockets and clocks so it can be tested. Only port 80 decides;
-/// 443 follows it.
+/// The web ports to render app settings for: as `active_ports`, but a heartbeat that exists and
+/// cannot be read is an error, so a torn or failed read never becomes 80/443 in an app's `.env`.
+pub fn render_ports(paths: &Paths) -> Result<WebPorts, String> {
+    Ok(crate::diag::read_heartbeat(paths)?.map(|h| h.web_ports).unwrap_or_default())
+}
+
+/// Writes `text` to a temporary file next to `path` and renames it over `path`, so a reader sees the
+/// old or the new content, never a truncated file. A reader can hold the target open for a moment;
+/// the rename is retried briefly.
+fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let result = std::fs::write(&tmp, text).and_then(|()| {
+        let mut tries = 0;
+        loop {
+            match std::fs::rename(&tmp, path) {
+                Err(_) if tries < 5 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                r => return r,
+            }
+        }
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// The first fallback pair whose two ports are `free`, or `None` when no pair is.
+pub fn first_free_fallback(free: impl Fn(u16) -> bool) -> Option<WebPorts> {
+    WebPorts::FALLBACKS.into_iter().find(|p| free(p.http) && free(p.https))
+}
+
+/// The port choice, kept apart from sockets and clocks so it can be tested. Only port 80 decides
+/// between 80/443 and a fallback pair; 443 follows it.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct PortChoice {
     /// `None` until the first test.
@@ -80,21 +123,21 @@ pub struct PortChoice {
 }
 
 impl PortChoice {
-    /// Caddy is about to start and none of Konak's runs: the test alone decides.
-    pub fn fresh(port80_free: bool) -> Self {
-        PortChoice { ports: Some(if port80_free { WebPorts::STANDARD } else { WebPorts::FALLBACK }), free_in_a_row: 0 }
+    /// Caddy is about to start and none of Konak's runs: the bind tests alone chose `ports`.
+    pub fn fresh(ports: WebPorts) -> Self {
+        PortChoice { ports: Some(ports), free_in_a_row: 0 }
     }
 
     /// A periodic re-test while on the fallback: back to 80/443 only once port 80 was free on two
     /// tests in a row, so a program that restarts does not make Konak flap. On 80/443 nothing changes
     /// (Konak's own Caddy holds port 80 there).
     pub fn retest(self, port80_free: bool) -> Self {
-        if self.ports != Some(WebPorts::FALLBACK) {
+        if !self.ports.is_some_and(WebPorts::is_fallback) {
             return self;
         }
         match (port80_free, self.free_in_a_row + 1) {
             (false, _) => PortChoice { free_in_a_row: 0, ..self },
-            (true, n) if n >= 2 => PortChoice::fresh(true),
+            (true, n) if n >= 2 => PortChoice::fresh(WebPorts::STANDARD),
             (true, n) => PortChoice { free_in_a_row: n, ..self },
         }
     }
@@ -428,19 +471,30 @@ impl Supervisor {
     /// The web ports for this tick, and whether the program holding port 80 should be looked up.
     /// Port 80 is tested before Caddy starts on its own (first start, or after it exited), and once
     /// a minute while on the fallback. A restart for a new app list keeps the current choice: Konak's
-    /// own Caddy held the port until a moment ago.
+    /// own Caddy held the port until a moment ago. The fallback pair is picked on a fresh start only,
+    /// for the same reason.
     fn choose_ports(&self, p: &mut Procs, ip: &str) -> (WebPorts, bool) {
         let before = p.choice.ports;
         let starting = !alive(&mut p.caddy) && p.caddy_retry_at.is_none_or(|t| Instant::now() >= t);
         let mut owner = false;
         if starting || before.is_none() {
-            p.choice = PortChoice::fresh(can_bind(ip, WebPorts::STANDARD.http));
+            let ports = if can_bind(ip, WebPorts::STANDARD.http) {
+                if !can_bind(ip, WebPorts::STANDARD.https) {
+                    crate::log(&self.paths, &format!("supervisor: port 443 on {ip} is held by another program; HTTPS sites fail until it is free"));
+                }
+                WebPorts::STANDARD
+            } else {
+                first_free_fallback(|port| can_bind(ip, port)).unwrap_or_else(|| {
+                    // As with a single fallback pair: Caddy tries the first one, fails, and backs off.
+                    let all = WebPorts::FALLBACKS.map(|f| format!("{}/{}", f.http, f.https)).join(", ");
+                    crate::log(&self.paths, &format!("supervisor: port 80 and every fallback pair ({all}) on {ip} are held by other programs; trying the first pair anyway"));
+                    WebPorts::FALLBACKS[0]
+                })
+            };
+            p.choice = PortChoice::fresh(ports);
             p.last_port_test = Some(Instant::now());
-            if p.choice.ports == Some(WebPorts::STANDARD) && !can_bind(ip, WebPorts::STANDARD.https) {
-                crate::log(&self.paths, &format!("supervisor: port 443 on {ip} is held by another program; HTTPS sites fail until it is free"));
-            }
-            owner = p.choice.ports == Some(WebPorts::FALLBACK);
-        } else if before == Some(WebPorts::FALLBACK) && p.last_port_test.is_none_or(|t| t.elapsed() >= PORT_RETEST) {
+            owner = ports.is_fallback();
+        } else if before.is_some_and(WebPorts::is_fallback) && p.last_port_test.is_none_or(|t| t.elapsed() >= PORT_RETEST) {
             let free = can_bind(ip, WebPorts::STANDARD.http);
             p.choice = p.choice.retest(free);
             p.last_port_test = Some(Instant::now());
@@ -470,7 +524,9 @@ impl Supervisor {
         let me = Arc::clone(self);
         std::thread::spawn(move || {
             let caddy = me.paths.caddy().to_string_lossy().to_string();
-            let owner = crate::diag::net_facts(&me.paths, Some(&ip)).ok().and_then(|n| crate::diag::port80_owner(&n, &ip, &caddy));
+            let hb = crate::diag::heartbeat(&me.paths);
+            let konak = crate::diag::KonakCaddy::new(hb.as_ref(), crate::installer::now(), &caddy);
+            let owner = crate::diag::net_facts(&me.paths, Some(&ip)).ok().and_then(|n| crate::diag::port80_owner(&n, &ip, konak));
             let mut w = me.web.lock().unwrap();
             // Back on port 80 meanwhile: there is no owner to show.
             if w.http == WebPorts::STANDARD.http || w.port80_owner == owner {
@@ -615,7 +671,9 @@ impl Supervisor {
             port80_owner: self.web.lock().unwrap().port80_owner.clone(),
         };
         // Written before any re-render starts, so an app operation reads the new ports from it.
-        let _ = std::fs::write(self.paths.supervisor_file(), serde_json::to_string_pretty(&beat).unwrap());
+        if let Err(e) = write_atomic(&self.paths.supervisor_file(), &serde_json::to_string_pretty(&beat).unwrap()) {
+            crate::log(&self.paths, &format!("supervisor: heartbeat not written: {e}"));
+        }
         drop(p);
 
         if web_changed {
@@ -689,13 +747,13 @@ mod tests {
         let (storage, site, cert, key) = (PathBuf::from("s"), PathBuf::from("w"), PathBuf::from("c"), PathBuf::from("k"));
         let files = CaddyFiles { storage: &storage, site: &site, ca: Some((&cert, &key)) };
         let routes = [route("jellyfin", 47101, false), route("vault", 47103, true)];
-        let c = caddyfile("192.168.1.5", &routes, &files, WebPorts::FALLBACK);
-        assert!(c.contains("http://konak.local:47080 {\n\tbind 192.168.1.5\n"));
-        assert!(c.contains("http://jellyfin.local:47080 {\n\tbind 192.168.1.5\n\treverse_proxy 127.0.0.1:47101 "));
-        assert!(c.contains("https://vault.local:47443 {\n\tbind 192.168.1.5\n\ttls internal\n"));
+        let c = caddyfile("192.168.1.5", &routes, &files, WebPorts::FALLBACKS[0]);
+        assert!(c.contains("http://konak.local:18080 {\n\tbind 192.168.1.5\n"));
+        assert!(c.contains("http://jellyfin.local:18080 {\n\tbind 192.168.1.5\n\treverse_proxy 127.0.0.1:47101 "));
+        assert!(c.contains("https://vault.local:18443 {\n\tbind 192.168.1.5\n\ttls internal\n"));
         // The redirect keeps the visitor on the fallback HTTPS port.
-        assert!(c.contains("http://vault.local:47080 {\n\tbind 192.168.1.5\n\tredir https://vault.local:47443{uri} permanent\n}"));
-        assert!(c.ends_with("http://:47080 {\n\tbind 192.168.1.5\n\trespond 404\n}\nhttps://:47443 {\n\tbind 192.168.1.5\n\ttls internal\n\trespond 404\n}\n"));
+        assert!(c.contains("http://vault.local:18080 {\n\tbind 192.168.1.5\n\tredir https://vault.local:18443{uri} permanent\n}"));
+        assert!(c.ends_with("http://:18080 {\n\tbind 192.168.1.5\n\trespond 404\n}\nhttps://:18443 {\n\tbind 192.168.1.5\n\ttls internal\n\trespond 404\n}\n"));
         assert!(!c.contains(":80 ") && !c.contains(":443 ") && !c.contains(":80{") && !c.contains(":443{"), "{c}");
         assert_eq!(c.matches('{').count(), c.matches('}').count());
     }
@@ -704,28 +762,47 @@ mod tests {
     fn urls_carry_the_port_only_on_the_fallback() {
         assert_eq!(route("movies", 47101, false).url(WebPorts::STANDARD), "http://movies.local");
         assert_eq!(route("vault", 47104, true).url(WebPorts::STANDARD), "https://vault.local");
-        assert_eq!(route("movies", 47101, false).url(WebPorts::FALLBACK), "http://movies.local:47080");
-        assert_eq!(route("vault", 47104, true).url(WebPorts::FALLBACK), "https://vault.local:47443");
-        assert!(!WebPorts::STANDARD.is_fallback() && WebPorts::FALLBACK.is_fallback());
+        let fb = WebPorts::FALLBACKS[1];
+        assert_eq!(route("movies", 47101, false).url(fb), "http://movies.local:28080");
+        assert_eq!(route("vault", 47104, true).url(fb), "https://vault.local:28443");
+        assert!(!WebPorts::STANDARD.is_fallback() && WebPorts::FALLBACKS.iter().all(|p| p.is_fallback()));
         assert_eq!(WebPorts::default(), WebPorts::STANDARD);
-        let page = home_page(&[route("movies", 47101, false)], WebPorts::FALLBACK, &|k: &str| k.to_string());
-        assert!(page.contains("<a href=\"http://movies.local:47080\">"));
+        let page = home_page(&[route("movies", 47101, false)], fb, &|k: &str| k.to_string());
+        assert!(page.contains("<a href=\"http://movies.local:28080\">"));
+    }
+
+    #[test]
+    fn fallback_pairs_stay_out_of_reserved_ranges_and_the_first_free_pair_wins() {
+        for p in WebPorts::FALLBACKS {
+            for port in [p.http, p.https] {
+                // Mirrored WSL's reserved range, Linux's default ephemeral range, Windows' dynamic range.
+                assert!(port < 32768 && !(44620..=48715).contains(&port), "{port}");
+                assert!(!crate::catalog::PORT_RANGE.contains(&port), "{port}");
+            }
+        }
+        assert_eq!(first_free_fallback(|_| true), Some(WebPorts::FALLBACKS[0]));
+        // Both ports of a pair must be free: a taken HTTPS port skips the pair.
+        assert_eq!(first_free_fallback(|p| p != WebPorts::FALLBACKS[0].https), Some(WebPorts::FALLBACKS[1]));
+        assert_eq!(first_free_fallback(|p| p == WebPorts::FALLBACKS[2].http || p == WebPorts::FALLBACKS[2].https), Some(WebPorts::FALLBACKS[2]));
+        assert_eq!(first_free_fallback(|_| false), None);
     }
 
     #[test]
     fn port_choice_returns_to_80_only_after_two_free_tests() {
-        assert_eq!(PortChoice::fresh(true).ports, Some(WebPorts::STANDARD));
-        let fallback = PortChoice::fresh(false);
-        assert_eq!(fallback.ports, Some(WebPorts::FALLBACK));
+        assert_eq!(PortChoice::fresh(WebPorts::STANDARD).ports, Some(WebPorts::STANDARD));
+        // Any fallback pair, here the second, goes back to 80/443 the same way.
+        let pair = WebPorts::FALLBACKS[1];
+        let fallback = PortChoice::fresh(pair);
+        assert_eq!(fallback.ports, Some(pair));
         let run = |tests: &[bool]| tests.iter().fold(fallback, |c, &free| c.retest(free)).ports.unwrap();
-        assert_eq!(run(&[true]), WebPorts::FALLBACK, "one free test is not enough");
+        assert_eq!(run(&[true]), pair, "one free test is not enough");
         assert_eq!(run(&[true, true]), WebPorts::STANDARD);
-        assert_eq!(run(&[true, false, true]), WebPorts::FALLBACK, "a taken test resets the count");
+        assert_eq!(run(&[true, false, true]), pair, "a taken test resets the count");
         assert_eq!(run(&[true, false, true, true]), WebPorts::STANDARD);
-        assert_eq!(run(&[false, false, false]), WebPorts::FALLBACK);
+        assert_eq!(run(&[false, false, false]), pair);
         // Back on 80/443 the count starts over, and a re-test there changes nothing.
         let back = fallback.retest(true).retest(true);
-        assert_eq!(back, PortChoice::fresh(true));
+        assert_eq!(back, PortChoice::fresh(WebPorts::STANDARD));
         assert_eq!(back.retest(false), back);
         assert_eq!(PortChoice::default().retest(true), PortChoice::default());
     }

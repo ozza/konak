@@ -35,7 +35,7 @@ impl Paths {
         let distro = var("KONAK_DISTRO").unwrap_or_else(|| "konak".into());
         let media = var("KONAK_MEDIA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&profile).join("Konak").join("Media"));
         let photos = var("KONAK_PHOTOS").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&profile).join("Konak").join("Photos"));
-        Paths { home, distro, bin: resource_dir.join("bin"), media, photos }
+        Paths { home, distro, bin: plain(resource_dir).join("bin"), media, photos }
     }
     pub fn state_file(&self) -> PathBuf { self.home.join("state.json") }
     pub fn log_dir(&self) -> PathBuf { self.home.join("logs") }
@@ -55,6 +55,19 @@ impl Paths {
     pub fn mdns(&self) -> PathBuf { self.bin.join("mdns-responder.exe") }
 }
 
+/// Tauri's resource dir comes as a verbatim path (`\\?\C:\...`). Konak passes these paths to the
+/// firewall rules, the process-image comparisons and PowerShell, which all expect the plain form.
+fn plain(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p
+    }
+}
+
 pub fn skip_elevation() -> bool {
     std::env::var("KONAK_SKIP_ELEVATION").is_ok_and(|v| v == "1")
 }
@@ -71,6 +84,15 @@ fn uninstall_env<'a>(var: &'a dyn Fn(&str) -> Option<String>) -> impl Fn(&str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbatim_resource_dirs_become_plain() {
+        assert_eq!(plain(PathBuf::from(r"\\?\C:\Program Files\Konak")), PathBuf::from(r"C:\Program Files\Konak"));
+        assert_eq!(plain(PathBuf::from(r"\\?\UNC\nas\share\Konak")), PathBuf::from(r"\\nas\share\Konak"));
+        assert_eq!(plain(PathBuf::from(r"C:\Konak")), PathBuf::from(r"C:\Konak"));
+        let p = Paths::from_env(PathBuf::from(r"\\?\C:\Users\u\AppData\Local\Konak"), &|_| None);
+        assert_eq!(p.caddy(), PathBuf::from(r"C:\Users\u\AppData\Local\Konak\bin\caddy.exe"));
+    }
 
     #[test]
     fn uninstall_ignores_overrides_unless_dev() {

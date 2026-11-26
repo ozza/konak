@@ -150,7 +150,7 @@
       "body": "Uygulama durur ve ağınızdan kaybolur.",
       "keep_note": "Ayarları ve verileri saklanır; uygulamayı yeniden kurduğunuzda geri gelir.",
       "delete_label": "Uygulamanın verilerini de sil",
-      "delete_warning": "Bu işlem uygulamanın ayarlarını, hesaplarını ve veritabanını kalıcı olarak siler. Geri alınamaz. Medya ve Fotoğraflar klasörlerinizdeki dosyalara dokunulmaz.",
+      "delete_warning": "Bu işlem uygulamanın Konak içinde tuttuğu her şeyi kalıcı olarak siler: dosyalarını, parolalarını, depolarını, hesaplarını, ayarlarını ve veritabanını. Örneğin Nextcloud'daki tüm dosyalar ve Vaultwarden'daki tüm parolalar. Geri alınamaz. Yalnızca Medya ve Fotoğraflar klasörleriniz korunur.",
       "confirm": "Kaldır",
       "confirm_delete": "Kaldır ve verileri sil",
       "cancel": "Vazgeç"
@@ -241,7 +241,7 @@
       "firewall_ok": "Kurallar yerinde",
       "firewall_missing": "Kurallar eksik",
       "diagnostics": "Tanılama",
-      "not_run": "Henüz çalıştırılmadı.",
+      "not_run": "Kontroller Konak açıldıktan kısa süre sonra çalışır.",
       "check_ok": "Geçti",
       "check_warn": "Uyarı",
       "check_fail": "Başarısız",
@@ -252,8 +252,9 @@
       "forward_policy": "Paylaşılan ağ politikası değişmemiş",
       "stale_netavark": "Eski konteyner ağı kuralı yok",
       "keepalive": "Ortam uyanık kalıyor",
-      "port80_owner": "80 numaralı port Konak'ta",
-      "lan_adapter": "Doğru ağ bağdaştırıcısı"
+      "port80_owner": "80 numaralı port",
+      "lan_adapter": "Doğru ağ bağdaştırıcısı",
+      "wsl_networking": "WSL ağ modu"
     },
     "detail": {
       "recent_logs": "Son kayıtlar",
@@ -344,12 +345,19 @@
         "taken": "80 numaralı portu {owner} tutuyor, bu yüzden Konak'ın web sunucusu başlayamıyor.",
         "returning": "80 numaralı port yeniden boş. Konak yaklaşık iki dakika içinde ona geri döner.",
         "ok": "Konak'ın web sunucusu 80 numaralı portta yanıt veriyor.",
-        "nothing": "80 numaralı portta yanıt veren yok."
+        "nothing": "80 numaralı portta yanıt veren yok.",
+        "wsl_service": "80 numaralı port dolu, büyük olasılıkla bir WSL dağıtımındaki bir servis tarafından; bu yüzden Windows programın adını veremiyor."
       },
       "lan_adapter": {
         "virtual": "Kullanılan bağlantı sanal bir bağdaştırıcı ({adapter}), bu yüzden diğer cihazlar bu bilgisayara ulaşamayabilir.",
         "ip_changed": "Bu bilgisayarın ağ adresi değişti. Konak yeni adrese geçiyor.",
         "ok": "{adapter} üzerinde {ip} ağ adresi."
+      },
+      "wsl_networking": {
+        "nat": "WSL standart (NAT) ağ modunu kullanıyor.",
+        "mirrored": "WSL yansıtılmış (mirrored) ağ modunu kullanıyor. Konak bu modda çalışır.",
+        "fallback_reserved": "WSL bu bilgisayarda {range} portlarını ayırıyor, bu yüzden Konak'ın yedek portları {ports} kullanılamıyor.",
+        "unknown": "Konak, WSL'in ağ modunu okuyamadı."
       }
     },
     "diag_fix": {
@@ -373,12 +381,46 @@
         "net_error": "Tanılamayı yeniden çalıştırın.",
         "fallback": "80 numaralı portu boşaltmak için o programı durdurun ya da ayarını değiştirin. Konak sonra kendiliğinden geri döner.",
         "taken": "80 numaralı portu boşaltmak için o programı durdurun ya da ayarını değiştirin. Konak web sunucusunu birkaç saniye içinde başlatır.",
-        "nothing": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın."
+        "nothing": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın.",
+        "wsl_service": "Diğer WSL dağıtımınızdaki web sunucusunu durdurun ya da başka bir porta taşıyın. Konak sonra 80 numaralı portu kendiliğinden alır."
       },
       "lan_adapter": {
         "virtual": "Bağlantıyı tutan VPN'i ya da sanal ağı kapatın.",
         "ip_changed": "Birkaç saniye bekleyin. Sürerse Konak'ı yeniden başlatın."
+      },
+      "wsl_networking": {
+        "fallback_reserved": "80 numaralı port boş olduğu sürece yapılacak bir şey yok. Başka bir program 80'i alırsa, Konak kullanmaya devam edebilsin diye portu boşaltın.",
+        "unknown": "Tanılamayı yeniden çalıştırın. Sürerse Konak'ı yeniden başlatın."
       }
+    },
+    "mcp": {
+      "title": {
+        "install": "{app} kurulsun mu?",
+        "remove": "{app} kaldırılsın mı?",
+        "start": "{app} başlatılsın mı?",
+        "stop": "{app} durdurulsun mu?",
+        "restart": "{app} yeniden başlatılsın mı?",
+        "rename": "{app} adı değiştirilsin mi?",
+        "claim": "{app} ağınızda erişime açılsın mı?"
+      },
+      "intro": "Bir yapay zekâ ajanı, MCP bağlantısı üzerinden Konak'tan bunu yapmasını istiyor.",
+      "requester": "İsteği yapan program kendini {requester} olarak tanıtıyor; Konak bunu doğrulayamaz.",
+      "effect": {
+        "install": "Konak {app} uygulamasını indirip başlatır. Kurulumunu bitirene kadar yalnızca bu bilgisayardan açılabilir.",
+        "remove": "{app} durur ve ağınızdan kaybolur. Ayarları ve verileri saklanır.",
+        "remove_delete": "{app} kaldırılır ve Konak içinde tuttuğu her şey kalıcı olarak silinir: dosyaları, parolaları, depoları, hesapları, ayarları ve veritabanı. Bu geri alınamaz. Medya ve Fotoğraflar klasörleriniz korunur.",
+        "start": "{app} yeniden başlar ve erişilebilir olur.",
+        "stop": "{app} durur. Yeniden başlatılana kadar kimse kullanamaz. Verileri saklanır.",
+        "restart": "{app} yeniden başlar ve kısa bir süre erişilemez.",
+        "rename": "{app} yeni adrese taşınır: {name}.local. Eski adresi kullanan yer imleri ve telefon uygulamaları çalışmaz olur.",
+        "claim": "{app} evdeki ağınızdaki tüm cihazlardan erişilebilir olur. Bunu yalnızca yönetici hesabını oluşturduktan sonra yapın."
+      },
+      "check": "Yalnızca bunu bir yapay zekâ ajanından siz istediyseniz onaylayın.",
+      "countdown": "{time} içinde otomatik olarak reddedilir.",
+      "approve": "Onayla",
+      "deny": "Reddet",
+      "too_late": "Onayınız geç kaldı: istek zaten süresi dolmuş ya da geri çekilmişti, bu yüzden hiçbir şey yapılmadı.",
+      "notify": "Bir yapay zekâ ajanı Konak penceresinde onayınızı bekliyor."
     }
   },
   "apps": {

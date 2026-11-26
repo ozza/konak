@@ -29,5 +29,10 @@ schemars = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std"] }
 # Bind-only port test for the web port choice (already in the tree through tokio).
 socket2 = "0.6"
-# Job object for the child processes (already in the tree through Tauri's dependencies).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# Job object for the child processes, the MCP pipe, and the taskbar flash for an MCP request
+# (already in the tree through Tauri's dependencies).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+# Ids for MCP confirmation requests, from the OS generator (already in the tree through Tauri).
+getrandom = "0.3"
+# Windows notification for an MCP request waiting for the user's answer; shown from Rust only.
+tauri-plugin-notification = "2"

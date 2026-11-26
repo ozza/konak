@@ -26,6 +26,9 @@
   });
 
   function closed() {
+    // A `close` event is queued as its own task; if the dialog was reopened for something else
+    // before it ran, it belongs to the previous content and must not close (or deny) the new one.
+    if (el.open) return;
     onclose();
     opener?.focus();
   }

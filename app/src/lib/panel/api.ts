@@ -24,6 +24,8 @@ export type Op = "install" | "remove" | "rename" | "restart" | "claim" | "stop" 
 export type AppStats = { id: string; cpu_percent: number; mem_bytes: number };
 type Usage = { used_bytes: number; total_bytes: number };
 export type HostInfo = {
+  /** The supervisor runs (fresh heartbeat with keepalive and Caddy up): diagnostics are meaningful. */
+  ready?: boolean;
   distro: { name: string; running: boolean };
   /** Inside Konak's distro; null while it is not running. */
   memory: Usage | null;
@@ -44,7 +46,7 @@ export type WebPorts = { http: number; https: number; port80_owner: string | nul
 export const DEFAULT_HOME_URL = "http://konak.local";
 export const certUrl = (home: string) => `${home}/konak-root.crt`;
 export const hostOf = (url: string) => url.replace(/^https?:\/\//, "");
-/** ":47080" while Caddy is on its fallback port, "" on port 80. */
+/** ":18080" while Caddy is on its fallback port, "" on port 80. */
 export const portSuffix = (ports: WebPorts | null) => (ports && ports.http !== 80 ? `:${ports.http}` : "");
 
 /** Display name from the locale files, falling back to the id for apps without strings yet. */

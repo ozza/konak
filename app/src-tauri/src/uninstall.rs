@@ -206,7 +206,7 @@ fn distro_cmd(paths: &Paths, verb: &str) -> Result<String, String> {
     if !own_distro(d) {
         return Err(format!("refusing to touch distro '{d}', it is not a Konak distro"));
     }
-    if !crate::installer::distro_exists(d) {
+    if !crate::installer::distro_exists(d)? {
         return Ok(format!("distro '{d}' not found, nothing to do"));
     }
     let out = shell::run("wsl.exe", &[verb, d]);
@@ -240,7 +240,7 @@ fn stop_containers(paths: &Paths) -> Result<String, String> {
     if !own_distro(d) {
         return Err(format!("refusing to touch distro '{d}', it is not a Konak distro"));
     }
-    if !crate::installer::distro_exists(d) {
+    if !crate::installer::distro_exists(d)? {
         return Ok(format!("distro '{d}' not found, nothing to do"));
     }
     let out = shell::distro_script(d, STOP_CONTAINERS_SH, &[]);
@@ -345,6 +345,19 @@ pub fn purge_guard(home: &Path, default_home: &Path, has_state: bool, install_di
     Ok(())
 }
 
+/// A registered distro's disk lives in the home, so the home is deleted only once the unregister
+/// succeeded and WSL then certainly no longer lists the distro (`listed_after`). Any doubt skips it.
+pub fn purge_allowed(unregister: &Result<String, String>, listed_after: Result<bool, String>) -> Result<(), String> {
+    if unregister.is_err() {
+        return Err("skipped, the distro may still be registered".into());
+    }
+    match listed_after {
+        Ok(false) => Ok(()),
+        Ok(true) => Err("skipped, the distro is still registered".into()),
+        Err(e) => Err(format!("skipped, could not confirm the distro is unregistered: {e}")),
+    }
+}
+
 /// Deletes the Konak home. When the home is also the install folder, the installed files
 /// (this exe, the uninstaller, bundled binaries) stay for the NSIS uninstaller to remove.
 fn purge_home(paths: &Paths, exe: &Path) -> Result<String, String> {
@@ -422,15 +435,19 @@ pub fn run(opts: Opts) -> i32 {
     }
     if opts.purge {
         let o = distro_cmd(&paths, "--unregister");
-        let unregistered = o.is_ok();
+        let listed_after = if o.is_ok() { crate::installer::distro_exists(&paths.distro) } else { Ok(true) };
+        let allowed = purge_allowed(&o, listed_after);
         r.step("distro unregister", o);
-        // A registered distro's disk lives in the home; never delete it from under WSL.
-        let o = if unregistered { purge_home(&paths, &exe) } else { Err("skipped, the distro is still registered".into()) };
+        let o = allowed.and_then(|()| purge_home(&paths, &exe));
         r.step("konak home", o);
     } else {
         r.step("konak home", Ok(format!("kept {}", paths.home.display())));
     }
-    r.step("media and photos", Ok(format!("kept {} and {}", paths.media.display(), paths.photos.display())));
+    let folders: Vec<String> = [&paths.media, &paths.photos]
+        .iter()
+        .map(|p| format!("{} {}", if p.exists() { "kept" } else { "not present:" }, p.display()))
+        .collect();
+    r.step("media and photos", Ok(folders.join("; ")));
 
     let summary = format!("Konak uninstall {}\n{}\nlog: {}", if r.failed { "finished with errors" } else { "done" }, r.summary.join("\n"), r.log_path.display());
     r.log("done");
@@ -542,6 +559,19 @@ mod tests {
         done.wait().unwrap();
         drop(done);
         assert_eq!(kill(pid), Ok(false));
+    }
+
+    #[test]
+    fn the_home_is_purged_only_when_the_distro_is_certainly_gone() {
+        let done: Result<String, String> = Ok("wsl --unregister konak: done".into());
+        let not_found: Result<String, String> = Ok("distro 'konak' not found, nothing to do".into());
+        assert_eq!(purge_allowed(&done, Ok(false)), Ok(()));
+        assert_eq!(purge_allowed(&not_found, Ok(false)), Ok(()));
+        assert_eq!(purge_allowed(&done, Ok(true)).unwrap_err(), "skipped, the distro is still registered");
+        // WSL could not be asked (hung or updating service): never delete the disk on a guess.
+        let doubt = purge_allowed(&done, Err("cannot tell".into())).unwrap_err();
+        assert!(doubt.starts_with("skipped, could not confirm the distro is unregistered") && doubt.contains("cannot tell"), "{doubt}");
+        assert!(purge_allowed(&Err("cannot tell whether WSL distro 'konak' is registered".into()), Ok(false)).is_err());
     }
 
     #[test]

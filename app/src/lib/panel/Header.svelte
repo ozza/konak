@@ -20,12 +20,26 @@
 
   $effect(() => applyTheme(theme));
 
+  let menuButton = $state<HTMLButtonElement>();
+
   function closeOutside(e: MouseEvent) {
     if (menuOpen && menu && !menu.contains(e.target as Node)) menuOpen = false;
   }
+
+  // Escape returns focus to the settings button, so keyboard users do not land on the page start.
+  function closeOnEscape(e: KeyboardEvent) {
+    if (e.key !== "Escape" || !menuOpen) return;
+    menuOpen = false;
+    menuButton?.focus();
+  }
+
+  // Tabbing out of the menu closes it instead of leaving it open over the page.
+  function closeOnFocusOut(e: FocusEvent) {
+    if (menuOpen && menu && !menu.contains(e.relatedTarget as Node | null)) menuOpen = false;
+  }
 </script>
 
-<svelte:window onclick={closeOutside} onkeydown={(e) => e.key === "Escape" && (menuOpen = false)} />
+<svelte:window onclick={closeOutside} onkeydown={closeOnEscape} />
 
 <header class="flex flex-wrap items-center gap-x-4 gap-y-3 border-b border-border bg-chrome px-5 py-2.5">
   <div class="flex items-center gap-2.5">
@@ -44,8 +58,8 @@
     <span class="font-mono">{homeHost}</span><Icon name="external" size={14} />
   </button>
   <button type="button" class="btn-primary" onclick={onadd}><Icon name="plus" />{t("panel.header.add")}</button>
-  <div class="relative" bind:this={menu}>
-    <button type="button" class="btn px-2.5" aria-label={t("panel.header.settings")} aria-expanded={menuOpen} aria-controls={menuId} onclick={() => (menuOpen = !menuOpen)}>
+  <div class="relative" bind:this={menu} onfocusout={closeOnFocusOut}>
+    <button type="button" class="btn px-2.5" bind:this={menuButton} aria-label={t("panel.header.settings")} aria-expanded={menuOpen} aria-controls={menuId} onclick={() => (menuOpen = !menuOpen)}>
       <Icon name="settings" />
     </button>
     {#if menuOpen}

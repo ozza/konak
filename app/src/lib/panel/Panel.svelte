@@ -9,12 +9,18 @@
   import Header from "./Header.svelte";
   import HostDetail from "./HostDetail.svelte";
   import LogsDrawer from "./LogsDrawer.svelte";
+  import McpConfirm from "./McpConfirm.svelte";
   import Notices from "./Notices.svelte";
   import RemoveDialog from "./RemoveDialog.svelte";
   import Sidebar from "./Sidebar.svelte";
 
   const POLL_MS = 5000;
   const HOST_POLL_MS = 15000;
+  /** The first diagnose waits for the supervisor (`host.ready`); this timeout is only a fallback. */
+  const FIRST_DIAG_MS = 60000;
+  /** Later runs refresh the results while the window is visible. */
+  const DIAG_REFRESH_MS = 300000;
+  let diagReady = $state(false);
   type Summary = { minutes: number; uac_prompts: number; reboots: number; download_mb: number };
   let {
     networkCategory,
@@ -96,6 +102,8 @@
   }
 
   let mainEl = $state<HTMLElement>();
+  /** The app the Add app page shows after an AI agent's install was approved. */
+  let addFocus = $state<string | null>(null);
 
   async function select(id: string) {
     view = id;
@@ -108,8 +116,10 @@
     invoke<Manifest[]>("list_catalog").then((c) => (catalog = c));
     refresh();
     refreshHost();
-    // The sidebar shows This PC's health from the start, not only once its page is opened.
-    diagnose();
+    // The sidebar shows This PC's health from the start, not only once its page is opened. The first
+    // run waits for the supervisor's first ticks (keepalive, Caddy), or it reports them as down.
+    const diagTimer = setTimeout(() => (diagReady = true), FIRST_DIAG_MS);
+    const diagRefresh = setInterval(() => visible() && checks !== null && !diagnosing && diagnose(), DIAG_REFRESH_MS);
     // Network category and firewall rules can change while Konak is not running; both reads are cheap.
     invoke("refresh_network");
     // Poll only while the window is visible; the tray keeps Konak running when it is hidden.
@@ -126,16 +136,25 @@
         refresh();
       }
     });
+    // After the user approves an AI agent's request, show where its progress appears: the install
+    // panel for an install, the app's page for everything else.
+    const unlistenApproved = listen<{ id: string; op: Op; app: string }>("mcp-approved", ({ payload: p }) => {
+      addFocus = p.op === "install" ? p.app : null;
+      select(p.op === "install" ? "add" : p.app);
+    });
     return () => {
+      clearTimeout(diagTimer);
+      clearInterval(diagRefresh);
       clearInterval(timer);
       clearInterval(hostTimer);
       document.removeEventListener("visibilitychange", onVisible);
       unlisten.then((f) => f());
+      unlistenApproved.then((f) => f());
     };
   });
 
   $effect(() => {
-    if (shown === "host" && checks === null && !diagnosing && !diagError) diagnose();
+    if ((diagReady || host?.ready) && checks === null && !diagnosing && !diagError) diagnose();
   });
 </script>
 
@@ -157,6 +176,8 @@
           {host}
           {networkCategory}
           portSuffix={portSuffix(webPorts)}
+          focus={addFocus}
+          onfocused={() => (addFocus = null)}
           oninstall={(id) => run(id, "install")}
           onopen={select}
           ondismiss={(id) => (failed = patch(failed, id, null))}
@@ -183,6 +204,7 @@
   </div>
 </div>
 
+<McpConfirm />
 <LogsDrawer app={logsFor} name={logsFor ? appName(logsFor.id) : ""} onclose={() => (logsFor = null)} />
 <RemoveDialog
   app={removeFor}
