@@ -97,6 +97,8 @@
   }
 
   let mainEl = $state<HTMLElement>();
+  /** The app the Add app page shows after an AI agent's install was approved. */
+  let addFocus = $state<string | null>(null);
 
   async function select(id: string) {
     view = id;
@@ -127,11 +129,18 @@
         refresh();
       }
     });
+    // After the user approves an AI agent's request, show where its progress appears: the install
+    // panel for an install, the app's page for everything else.
+    const unlistenApproved = listen<{ id: string; op: Op; app: string }>("mcp-approved", ({ payload: p }) => {
+      addFocus = p.op === "install" ? p.app : null;
+      select(p.op === "install" ? "add" : p.app);
+    });
     return () => {
       clearInterval(timer);
       clearInterval(hostTimer);
       document.removeEventListener("visibilitychange", onVisible);
       unlisten.then((f) => f());
+      unlistenApproved.then((f) => f());
     };
   });
 
@@ -158,6 +167,7 @@
           {host}
           {networkCategory}
           portSuffix={portSuffix(webPorts)}
+          focus={addFocus}
           oninstall={(id) => run(id, "install")}
           onopen={select}
           ondismiss={(id) => (failed = patch(failed, id, null))}

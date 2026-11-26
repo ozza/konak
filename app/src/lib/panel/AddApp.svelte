@@ -13,6 +13,7 @@
     host,
     networkCategory,
     portSuffix,
+    focus,
     oninstall,
     onopen,
     ondismiss,
@@ -24,6 +25,8 @@
     host: HostInfo | null;
     networkCategory: string | null;
     portSuffix: string;
+    /** An app to show in the install panel, e.g. one an AI agent's approved install is downloading. */
+    focus: string | null;
     oninstall: (id: string) => void;
     onopen: (id: string) => void;
     ondismiss: (id: string) => void;
@@ -32,6 +35,9 @@
   const categories = ["all", ...new Set(Object.values(CATEGORY))];
   let filter = $state("all");
   let picked = $state<string | null>(null);
+  $effect(() => {
+    if (focus) picked = focus;
+  });
 
   const isInstalled = (id: string) => apps.some((a) => a.id === id);
   let shown = $derived(catalog.filter((m) => filter === "all" || CATEGORY[m.id] === filter));

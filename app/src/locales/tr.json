@@ -391,7 +391,7 @@
         "claim": "{app} ağınızda erişime açılsın mı?"
       },
       "intro": "Bir yapay zekâ ajanı, MCP bağlantısı üzerinden Konak'tan bunu yapmasını istiyor.",
-      "requester": "İstek {requester} programından geliyor.",
+      "requester": "İsteği yapan program kendini {requester} olarak tanıtıyor; Konak bunu doğrulayamaz.",
       "effect": {
         "install": "Konak {app} uygulamasını indirip başlatır. Kurulumunu bitirene kadar yalnızca bu bilgisayardan açılabilir.",
         "remove": "{app} durur ve ağınızdan kaybolur. Ayarları ve verileri saklanır.",
@@ -405,7 +405,8 @@
       "check": "Yalnızca bunu bir yapay zekâ ajanından siz istediyseniz onaylayın.",
       "countdown": "{time} içinde otomatik olarak reddedilir.",
       "approve": "Onayla",
-      "deny": "Reddet"
+      "deny": "Reddet",
+      "too_late": "Onayınız geç kaldı: istek zaten süresi dolmuş ya da geri çekilmişti, bu yüzden hiçbir şey yapılmadı."
     }
   },
   "apps": {

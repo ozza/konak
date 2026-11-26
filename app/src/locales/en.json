@@ -391,7 +391,7 @@
         "claim": "Make {app} available on your network?"
       },
       "intro": "An AI agent asks Konak to do this through its MCP connection.",
-      "requester": "The request comes from {requester}.",
+      "requester": "The requesting program calls itself {requester}; Konak cannot verify this.",
       "effect": {
         "install": "Konak downloads {app} and starts it. Only this PC can open it until you finish its setup.",
         "remove": "{app} stops and disappears from your network. Its settings and data are kept.",
@@ -405,7 +405,8 @@
       "check": "Approve only if you asked an AI agent for this.",
       "countdown": "Denied automatically in {time}.",
       "approve": "Approve",
-      "deny": "Deny"
+      "deny": "Deny",
+      "too_late": "Your approval arrived too late: the request had already expired or been withdrawn, so nothing was done."
     }
   },
   "apps": {

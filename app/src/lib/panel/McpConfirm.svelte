@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { t } from "$lib/i18n";
   import { appName } from "./api";
   import Dialog from "./Dialog.svelte";
@@ -19,20 +19,48 @@
     expires_unix: number;
   };
 
+  // Approve is armed only after the request has been on screen this long, and every new request
+  // moves focus back to Deny, so a click or key meant for one request never lands on another.
+  const ARM_MS = 1500;
+
   let pending = $state<Request | null>(null);
   let now = $state(Date.now());
+  let armed = $state(false);
+  let denyButton = $state<HTMLButtonElement>();
+  let answerError = $state<string | null>(null);
+  // The requester names itself (its file name), so it is cleaned and shown as unverified.
+  let requester = $derived(pending?.requester ? clean(pending.requester) : null);
   let label = $derived(pending ? appName(pending.app) : "");
   let destructive = $derived(pending?.op === "remove" && pending.delete_data);
   let effectKey = $derived(destructive ? "remove_delete" : pending?.op);
   let left = $derived(pending ? Math.max(0, Math.round(pending.expires_unix - now / 1000)) : 0);
   let countdown = $derived(`${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`);
 
+  function clean(name: string): string {
+    // Drop control and bidirectional formatting characters, then shorten.
+    const text = name.replace(/[\p{Cc}\p{Cf}]/gu, "").trim();
+    return text.length > 60 ? `${text.slice(0, 57)}...` : text;
+  }
+
+  $effect(() => {
+    const id = pending?.id;
+    armed = false;
+    if (!id) return;
+    tick().then(() => denyButton?.focus());
+    const timer = setTimeout(() => pending?.id === id && (armed = true), ARM_MS);
+    return () => clearTimeout(timer);
+  });
+
   /** Sends the answer once; the dialog closing afterwards finds no pending request and does nothing. */
   function answer(approve: boolean) {
-    if (!pending) return;
+    if (!pending || (approve && !armed)) return;
     const id = pending.id;
     pending = null;
-    invoke("mcp_answer", { id, approve }).catch((e) => console.warn("mcp_answer", e));
+    answerError = null;
+    invoke("mcp_answer", { id, approve }).catch((e) => {
+      // Too late (expired or withdrawn): say so, so an approval is never assumed to have gone through.
+      if (approve) answerError = String(e);
+    });
   }
 
   onMount(() => {
@@ -57,7 +85,7 @@
       <span class="mt-0.5 text-link"><Icon name="pulse" /></span>
       <span>
         {t("panel.mcp.intro")}
-        {#if pending.requester}{t("panel.mcp.requester", { requester: pending.requester })}{/if}
+        {#if requester}{t("panel.mcp.requester", { requester })}{/if}
       </span>
     </p>
     <p
@@ -70,9 +98,17 @@
     <p class="text-xs text-muted" aria-live="off">{t("panel.mcp.countdown", { time: countdown })}</p>
   {/if}
   {#snippet actions()}
-    <!-- Deny takes the initial focus, so a stray Enter never approves. -->
+    <!-- Deny takes the focus for every new request, so a stray Enter never approves. -->
     <!-- svelte-ignore a11y_autofocus -->
-    <button type="button" class="btn" autofocus onclick={() => answer(false)}>{t("panel.mcp.deny")}</button>
-    <button type="button" class={destructive ? "btn-danger" : "btn-primary"} onclick={() => answer(true)}>{t("panel.mcp.approve")}</button>
+    <button type="button" class="btn" autofocus bind:this={denyButton} onclick={() => answer(false)}>{t("panel.mcp.deny")}</button>
+    <button type="button" class={destructive ? "btn-danger" : "btn-primary"} disabled={!armed} onclick={() => answer(true)}>{t("panel.mcp.approve")}</button>
   {/snippet}
 </Dialog>
+
+{#if answerError}
+  <div role="alert" class="fixed right-4 bottom-4 z-30 flex max-w-sm items-start gap-3 rounded-xl border border-error-border bg-error-bg p-4 text-sm shadow-lg">
+    <span class="mt-0.5 text-error"><Icon name="warn" /></span>
+    <p class="flex-1">{t("panel.mcp.too_late")}</p>
+    <button type="button" class="text-xs underline focus-visible:outline-2 focus-visible:outline-link" onclick={() => (answerError = null)}>{t("panel.dismiss")}</button>
+  </div>
+{/if}
