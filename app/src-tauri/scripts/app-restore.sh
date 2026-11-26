@@ -10,7 +10,11 @@
 #   rollback id had_old              removes what the restore made; with had_old=1 moves the set-aside
 #                                    folder and volume content back
 #   commit id                        deletes the set-aside copies
-# Every command but extract and import keeps stdin closed; those two read the data from it.
+#   stop id                          ends a still running extract or import of the app (Konak cut
+#                                    its stream) and waits until it has ended
+# Every command but extract and import keeps stdin closed; those two read the data from it, holding
+# the app's lock meanwhile. rollback and stop end such a step and wait for the lock first, so a
+# step whose wsl.exe was killed can never move a folder into place after a rollback.
 set -euo pipefail
 shopt -s nullglob
 cmd="$1" id="$2"
@@ -20,6 +24,8 @@ root=${KONAK_ROOT:-/var/lib/konak}
 apps=$root/apps
 dir=$apps/$id aside=$apps/$id.before-restore vaside=$apps/$id.before-restore-volumes
 staging=$root/restore-staging/$id
+run=${KONAK_RUN_DIR:-/run}
+lockf=$run/konak-restore-$id.lock pidf=$run/konak-restore-$id.pid
 export DOCKER_HOST=unix:///run/podman/podman.sock
 label="label=com.docker.compose.project=$id"
 
@@ -28,6 +34,37 @@ mountpoint_of() { podman volume inspect "$1" --format '{{.Mountpoint}}' </dev/nu
 empty() { find "$1" -mindepth 1 -delete </dev/null; }
 # Moves everything inside $1 (dotfiles too) into $2.
 move_content() { find "$1" -mindepth 1 -maxdepth 1 -exec mv -t "$2" {} + </dev/null; }
+
+# The app's lock, held by extract and import (and by whatever they start) until they end.
+hold_lock() {
+  exec 9>"$lockf"
+  flock -w 600 9 || { echo "another restore step of $id is still running" >&2; exit 6; }
+  echo $$ > "$pidf"
+}
+
+# TERM to a process and all its descendants (procps may not be installed: /proc is read directly).
+kill_tree() {
+  local p=$1 s line rest ppid k kids=()
+  for s in /proc/[0-9]*/stat; do
+    { read -r line < "$s"; } 2>/dev/null || continue
+    rest=${line##*) }
+    read -r _ ppid _ <<< "$rest"
+    if [ "$ppid" = "$p" ]; then k=${s#/proc/}; kids+=("${k%/stat}"); fi
+  done
+  kill -TERM "$p" 2>/dev/null || true
+  for k in "${kids[@]}"; do kill_tree "$k"; done
+}
+
+# Ends a running extract or import of this app and waits for its lock, then keeps it (fd 8) for
+# the rest of this command. The pid file is trusted only while the lock is taken.
+stop_running() {
+  exec 8>"$lockf"
+  flock -n 8 && return 0
+  local p
+  p=$(cat "$pidf" 2>/dev/null || true)
+  if [[ "$p" =~ ^[0-9]+$ ]]; then kill_tree "$p"; fi
+  flock -w 120 8 || { echo "the running restore step of $id did not end" >&2; exit 6; }
+}
 
 remove_containers() {
   if [ -f "$dir/compose.yml" ]; then
@@ -66,6 +103,7 @@ case "$cmd" in
   extract)
     shift 2
     for b in "$@"; do [[ "$b" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "bad bind source: $b" >&2; exit 2; }; done
+    hold_lock
     [ ! -e "$dir" ] || { echo "$dir exists" >&2; exit 3; }
     rm -rf --one-file-system "$staging"
     # A fresh install has no app folder yet.
@@ -104,6 +142,7 @@ case "$cmd" in
   import)
     name="$3" v="$4"
     [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$v" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "bad volume name: $name $v" >&2; exit 2; }
+    hold_lock
     if ! podman volume exists "$v" </dev/null; then
       # The labels docker-compose looks for, so `up` takes this volume as the project's own.
       podman volume create --label "com.docker.compose.project=$id" --label "com.docker.compose.volume=$name" "$v" </dev/null >/dev/null
@@ -117,6 +156,7 @@ case "$cmd" in
     ;;
   rollback)
     had_old="$3"
+    stop_running
     remove_containers
     rm -rf --one-file-system "$staging"
     if [ "$had_old" != 1 ]; then
@@ -151,6 +191,10 @@ case "$cmd" in
   commit)
     rm -rf --one-file-system "$aside" "$vaside"
     echo committed
+    ;;
+  stop)
+    stop_running
+    echo stopped
     ;;
   *) echo "bad command: $cmd" >&2; exit 2 ;;
 esac

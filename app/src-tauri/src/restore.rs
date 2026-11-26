@@ -156,12 +156,35 @@ pub trait Sink: Write {
     fn abort(self: Box<Self>) -> String;
 }
 
-impl Sink for shell::DistroWriter {
+/// An `extract` or `import` of app-restore.sh. Killing wsl.exe does not reach the Linux side, so
+/// `abort` also runs the script's `stop`, which ends that step and waits until it has.
+struct ScriptSink {
+    w: shell::DistroWriter,
+    distro: String,
+    id: String,
+}
+
+impl Write for ScriptSink {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.w.write(b)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.w.flush()
+    }
+}
+
+impl Sink for ScriptSink {
     fn finish(self: Box<Self>) -> Result<(), String> {
-        shell::DistroWriter::finish(*self).map(|_| ())
+        self.w.finish().map(|_| ())
     }
     fn abort(self: Box<Self>) -> String {
-        shell::DistroWriter::abort(*self)
+        let said = self.w.abort();
+        let out = shell::distro_script(&self.distro, RESTORE_SH, &["stop", &self.id]);
+        if out.ok {
+            said
+        } else {
+            format!("{said}; stopping the restore step failed: {}", shell::tail(&out.text, 2))
+        }
     }
 }
 
@@ -194,6 +217,11 @@ pub trait Target {
 pub struct DistroTarget<'a>(pub &'a Paths);
 
 impl DistroTarget<'_> {
+    fn sink(&self, id: &str, args: &[&str]) -> Result<Box<dyn Sink>, String> {
+        let w = shell::DistroWriter::start(&self.0.distro, RESTORE_SH, args)?;
+        Ok(Box::new(ScriptSink { w, distro: self.0.distro.clone(), id: id.to_string() }))
+    }
+
     fn script(&self, args: &[&str]) -> Result<String, String> {
         let out = shell::distro_script(&self.0.distro, RESTORE_SH, args);
         crate::log(self.0, &format!("restore {} {}: {}", args[0], args[1], shell::tail(&out.text, 2)));
@@ -243,10 +271,10 @@ impl Target for DistroTarget<'_> {
         let binds = catalog::get(id).map(|m| m.bind_sources()).unwrap_or_default();
         let mut args = vec!["extract", id];
         args.extend(binds.iter().map(String::as_str));
-        Ok(Box::new(shell::DistroWriter::start(&self.0.distro, RESTORE_SH, &args)?))
+        self.sink(id, &args)
     }
     fn volume(&self, id: &str, v: &VolumeManifest) -> Result<Box<dyn Sink>, String> {
-        Ok(Box::new(shell::DistroWriter::start(&self.0.distro, RESTORE_SH, &["import", id, &v.name, &v.podman_name])?))
+        self.sink(id, &["import", id, &v.name, &v.podman_name])
     }
     fn bring_up(&self, id: &str, name: &str, claimed: bool, up: bool) -> Result<(), String> {
         apps::render_restored(self.0, id, name, claimed, up)

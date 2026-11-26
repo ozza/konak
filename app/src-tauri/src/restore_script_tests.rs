@@ -82,6 +82,17 @@ fn temp(tag: &str) -> PathBuf {
     base
 }
 
+/// The environment for app-restore.sh in `base`: its root and run folders, and a `flock` that
+/// always gets the lock (Git's bash has none; the lock itself is tested in the distro test).
+fn restore_env(base: &Path) -> Vec<(&'static str, String)> {
+    let shim = base.join("shim");
+    std::fs::create_dir_all(&shim).unwrap();
+    std::fs::write(shim.join("flock"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::create_dir_all(base.join("run")).unwrap();
+    let path = format!("{};{}", shim.display(), std::env::var("PATH").unwrap_or_default());
+    vec![("KONAK_ROOT", slash(&base.join("root"))), ("KONAK_RUN_DIR", slash(&base.join("run"))), ("PATH", path)]
+}
+
 #[test]
 fn extract_keeps_files_and_folders_and_refuses_the_rest() {
     let Some(bash) = git_bash() else {
@@ -107,7 +118,7 @@ fn extract_keeps_files_and_folders_and_refuses_the_rest() {
     for (tag, members, want_code, want_text) in cases {
         let base = temp(&format!("extract-{tag}"));
         let root = base.join("root");
-        let (code, text) = run(&bash, &base, RESTORE_SH, &["extract", "forgejo", "forgejo"], &[("KONAK_ROOT", slash(&root))], &archive(members));
+        let (code, text) = run(&bash, &base, RESTORE_SH, &["extract", "forgejo", "forgejo"], &restore_env(&base), &archive(members));
         let dir = root.join("apps").join("forgejo");
         let placed = dir.is_dir();
         let b = std::fs::read(dir.join("forgejo").join("b")).ok();
@@ -121,7 +132,7 @@ fn extract_keeps_files_and_folders_and_refuses_the_rest() {
     }
     // Bind source names are checked like volume names.
     let base = temp("extract-badbind");
-    let (code, text) = run(&bash, &base, RESTORE_SH, &["extract", "forgejo", "../x"], &[("KONAK_ROOT", slash(&base.join("root")))], &[]);
+    let (code, text) = run(&bash, &base, RESTORE_SH, &["extract", "forgejo", "../x"], &restore_env(&base), &[]);
     let _ = std::fs::remove_dir_all(&base);
     assert_eq!(code, 2, "{text}");
 }
@@ -183,7 +194,7 @@ fn install_writes_never_go_through_what_sits_at_compose_yml_and_env() {
 fn extract_refuses_links_devices_and_setuid_in_a_distro() {
     let distro = std::env::var("KONAK_TEST_DISTRO").expect("set KONAK_TEST_DISTRO");
     assert!(distro.starts_with("konak-") && distro != "konak", "only a throwaway Konak distro");
-    let script = format!("export KONAK_ROOT=/tmp/konak-extract-test\nrm -rf /tmp/konak-extract-test\n{RESTORE_SH}");
+    let script = format!("export KONAK_ROOT=/tmp/konak-extract-test KONAK_RUN_DIR=/tmp\nrm -rf /tmp/konak-extract-test\n{RESTORE_SH}");
     let header = |kind: tar::EntryType, mode: u32, size: u64| {
         let mut h = tar::Header::new_gnu();
         h.set_entry_type(kind);
@@ -225,4 +236,22 @@ fn extract_refuses_links_devices_and_setuid_in_a_distro() {
     }
     let out = shell::distro_script(&distro, "stat -c %a /tmp/konak-extract-test/apps/vaultwarden/su; rm -rf /tmp/konak-extract-test\n", &[]);
     assert_eq!(out.text.trim(), "755", "setuid bit stripped");
+
+    // An extract cut off mid-stream on a header boundary: Konak kills wsl.exe, then `stop` ends
+    // the Linux side, so nothing is moved into place behind the rollback's back.
+    let mut b = tar::Builder::new(vec![]);
+    let (mut h, p) = top.clone();
+    b.append_data(&mut h, p, &[][..]).unwrap();
+    let (mut h, p) = file("vaultwarden/a", 0o644);
+    b.append_data(&mut h, p, &b"x"[..]).unwrap();
+    let partial = b.into_inner().unwrap();
+    let mut w = shell::DistroWriter::start(&distro, &script, &["extract", "vaultwarden", "vw-data"]).unwrap();
+    w.write_all(&partial).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = w.abort();
+    let stop = shell::distro_script(&distro, &script, &["stop", "vaultwarden"]);
+    assert!(stop.ok && stop.text.contains("stopped"), "{}", stop.text);
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let out = shell::distro_script(&distro, "test -e /tmp/konak-extract-test/apps/vaultwarden && echo placed || echo absent; rm -rf /tmp/konak-extract-test\n", &[]);
+    assert_eq!(out.text.trim(), "absent");
 }
