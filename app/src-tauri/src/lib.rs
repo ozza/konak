@@ -1,10 +1,12 @@
 pub mod apps;
 pub mod ca;
 pub mod catalog;
+pub mod confirm;
 pub mod diag;
 pub mod installer;
 pub mod mcp;
 pub mod paths;
+pub mod pipe;
 pub mod redact;
 pub mod services;
 pub mod shell;

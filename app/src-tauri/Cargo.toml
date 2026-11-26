@@ -29,5 +29,7 @@ schemars = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std"] }
 # Bind-only port test for the web port choice (already in the tree through tokio).
 socket2 = "0.6"
-# Job object for the child processes (already in the tree through Tauri's dependencies).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# Job object for the child processes, and the MCP pipe (already in the tree through Tauri's dependencies).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
+# Ids for MCP confirmation requests, from the OS generator (already in the tree through Tauri).
+getrandom = "0.3"
