@@ -73,9 +73,39 @@ impl WebPorts {
 }
 
 /// The web ports Caddy serves on now, from the supervisor heartbeat, so every process (UI, MCP)
-/// reads the same. 80/443 before the first heartbeat.
+/// reads the same. 80/443 before the first heartbeat. For display only; app settings are rendered
+/// with `render_ports`.
 pub fn active_ports(paths: &Paths) -> WebPorts {
-    crate::diag::heartbeat(paths).map(|h| h.web_ports).unwrap_or_default()
+    render_ports(paths).unwrap_or_default()
+}
+
+/// The web ports to render app settings for: as `active_ports`, but a heartbeat that exists and
+/// cannot be read is an error, so a torn or failed read never becomes 80/443 in an app's `.env`.
+pub fn render_ports(paths: &Paths) -> Result<WebPorts, String> {
+    Ok(crate::diag::read_heartbeat(paths)?.map(|h| h.web_ports).unwrap_or_default())
+}
+
+/// Writes `text` to a temporary file next to `path` and renames it over `path`, so a reader sees the
+/// old or the new content, never a truncated file. A reader can hold the target open for a moment;
+/// the rename is retried briefly.
+fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let result = std::fs::write(&tmp, text).and_then(|()| {
+        let mut tries = 0;
+        loop {
+            match std::fs::rename(&tmp, path) {
+                Err(_) if tries < 5 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                r => return r,
+            }
+        }
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// The first fallback pair whose two ports are `free`, or `None` when no pair is.
@@ -641,7 +671,9 @@ impl Supervisor {
             port80_owner: self.web.lock().unwrap().port80_owner.clone(),
         };
         // Written before any re-render starts, so an app operation reads the new ports from it.
-        let _ = std::fs::write(self.paths.supervisor_file(), serde_json::to_string_pretty(&beat).unwrap());
+        if let Err(e) = write_atomic(&self.paths.supervisor_file(), &serde_json::to_string_pretty(&beat).unwrap()) {
+            crate::log(&self.paths, &format!("supervisor: heartbeat not written: {e}"));
+        }
         drop(p);
 
         if web_changed {

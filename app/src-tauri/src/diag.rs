@@ -117,7 +117,28 @@ impl Heartbeat {
 }
 
 pub fn heartbeat(paths: &Paths) -> Option<Heartbeat> {
-    serde_json::from_str(&std::fs::read_to_string(paths.supervisor_file()).ok()?).ok()
+    read_heartbeat(paths).ok().flatten()
+}
+
+/// `Ok(None)` when there is no heartbeat file (the supervisor never ran here). A file that cannot be
+/// read or parsed is retried briefly (a writer from a build without the atomic write may be midway)
+/// and is then an error, never a default.
+pub fn read_heartbeat(paths: &Paths) -> Result<Option<Heartbeat>, String> {
+    let mut last = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        match std::fs::read_to_string(paths.supervisor_file()) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => last = e.to_string(),
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(h) => return Ok(Some(h)),
+                Err(e) => last = e.to_string(),
+            },
+        }
+    }
+    Err(format!("supervisor.json unreadable: {last}"))
 }
 
 #[repr(C)]

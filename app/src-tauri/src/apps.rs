@@ -9,7 +9,7 @@ use crate::catalog::{self, Manifest};
 use crate::installer::{now, InstalledApp, State};
 use crate::paths::Paths;
 use crate::redact::Redactor;
-use crate::services::{active_ports, lan_ip, WebPorts, HOME_NAME};
+use crate::services::{active_ports, lan_ip, render_ports, WebPorts, HOME_NAME};
 use crate::shell::{self, tail};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -408,7 +408,7 @@ pub fn install(paths: &Paths, id: &str) -> Result<InstalledApp, String> {
         }
     };
     let repair = reservation.is_none();
-    if let Err(e) = run_install(paths, m, &name, claimed, None, active_ports(paths), true) {
+    if let Err(e) = run_install(paths, m, &name, claimed, None, render_ports(paths)?, true) {
         if !repair {
             // The containers may already run, holding the port and RAM, while the panel shows the app
             // as not installed. Stop them; the data stays, so a retry reuses its secrets.
@@ -469,7 +469,7 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
     if !name_free_on_lan(paths, new_name)? {
         return Err("name_taken_on_lan".into());
     }
-    let ports = active_ports(paths);
+    let ports = render_ports(paths)?;
     if let Err(e) = run_install(paths, m, new_name, app.claimed, m.post_rename.as_deref(), ports, true) {
         if let Err(back) = run_install(paths, m, &app.name, app.claimed, m.post_rename.as_deref(), ports, true) {
             // The containers may still carry the new name: render the saved one again at next start.
@@ -497,10 +497,21 @@ pub fn rename(paths: &Paths, id: &str, new_name: &str) -> Result<(), String> {
 /// route at the supervisor's next tick. The app is first re-rendered with its `claimed_env` (e.g.
 /// registration closed) and is marked claimed only when that succeeds, so it never reaches the LAN
 /// with its pre-claim settings.
+///
+/// A web-port switch during the render (which can take minutes) re-renders only claimed apps, so it
+/// skips this one; the claim then renders it again for the ports Caddy serves on by now.
 pub fn claim(paths: &Paths, id: &str) -> Result<(), String> {
     let m = manifest(id)?;
     let app = installed(paths, id)?;
-    run_install(paths, m, &app.name, true, None, active_ports(paths), true)?;
+    // The first render runs no hook; a follow-up for new ports is a re-render like a port switch's.
+    claim_with(paths, id, &|ports, again| run_install(paths, m, &app.name, true, if again { m.post_rename.as_deref() } else { None }, ports, true))
+}
+
+/// `claim` with the render passed in (`again` is false for the first render), so the port-switch
+/// handling can be tested without a distro.
+fn claim_with(paths: &Paths, id: &str, render: &dyn Fn(WebPorts, bool) -> Result<(), String>) -> Result<(), String> {
+    let ports = render_ports(paths)?;
+    render(ports, false)?;
     update_state(paths, |s| {
         if let Some(a) = s.apps.iter_mut().find(|a| a.id == id) {
             a.claimed = true;
@@ -508,7 +519,24 @@ pub fn claim(paths: &Paths, id: &str) -> Result<(), String> {
             a.stopped = false;
         }
     })?;
-    Ok(())
+    let now = match render_ports(paths) {
+        Ok(now) if now == ports => return Ok(()),
+        Ok(now) => now,
+        Err(e) => return claim_follow_up_failed(paths, id, ports, &e),
+    };
+    crate::log(paths, &format!("claim of {id}: the web ports changed to {}/{} during the render; rendering it again", now.http, now.https));
+    match render(now, true) {
+        Ok(()) => Ok(()),
+        Err(e) => claim_follow_up_failed(paths, id, ports, &e),
+    }
+}
+
+/// The claim stands (the app answers, with its claimed settings), but carries the settings of
+/// `rendered_for`. Recording those ports as the apps' rendered ports makes the supervisor re-render
+/// every claimed app, this one included, and retry that until it succeeds.
+fn claim_follow_up_failed(paths: &Paths, id: &str, rendered_for: WebPorts, e: &str) -> Result<(), String> {
+    crate::log(paths, &format!("claim of {id}: rendered for ports {}/{}, the supervisor re-renders it: {e}", rendered_for.http, rendered_for.https));
+    update_state(paths, |s| s.rendered_ports = rendered_for)
 }
 
 /// Re-renders every claimed app for the web ports Caddy now serves on, so the settings that embed
@@ -672,6 +700,84 @@ mod tests {
         assert_eq!(not_installed, "not_installed");
         assert!(failed.is_err());
         assert!(!after.apps[0].claimed, "claimed only after a successful re-render");
+    }
+
+    fn heartbeat_on(paths: &Paths, ports: WebPorts) {
+        let hb = serde_json::json!({"last_tick_unix": now(), "lan_ip": null, "web_ports": ports});
+        std::fs::write(paths.supervisor_file(), hb.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_claim_that_overlaps_a_port_switch_ends_with_the_active_ports() {
+        // 02 finding 2: rendered for 18080, the supervisor switches to 80/443 meanwhile and skips
+        // the still unclaimed app.
+        let home = std::env::temp_dir().join(format!("konak-claim-switch-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let mut s = State::default();
+        s.rendered_ports = WebPorts::FALLBACKS[0];
+        s.apps.push(InstalledApp { id: "nextcloud".into(), name: "cloud".into(), installed_unix: 1, claimed: false, stopped: false });
+        s.save(&paths);
+        heartbeat_on(&paths, WebPorts::FALLBACKS[0]);
+        let renders = std::cell::RefCell::new(vec![]);
+        let switching = |ports: WebPorts, again: bool| {
+            renders.borrow_mut().push((ports, again));
+            if !again {
+                heartbeat_on(&paths, WebPorts::STANDARD);
+                update_state(&paths, |s| s.rendered_ports = WebPorts::STANDARD).unwrap();
+            }
+            Ok(())
+        };
+        let r = claim_with(&paths, "nextcloud", &switching);
+        let after = State::load(&paths);
+        assert_eq!(r, Ok(()));
+        assert_eq!(*renders.borrow(), vec![(WebPorts::FALLBACKS[0], false), (WebPorts::STANDARD, true)]);
+        assert!(after.apps[0].claimed);
+
+        // No switch: one render only.
+        renders.borrow_mut().clear();
+        assert_eq!(claim_with(&paths, "nextcloud", &|p, a| { renders.borrow_mut().push((p, a)); Ok(()) }), Ok(()));
+        assert_eq!(renders.borrow().len(), 1);
+
+        // The follow-up render fails: the claim stands, and the old ports are recorded so the
+        // supervisor re-renders every claimed app for the active ones.
+        heartbeat_on(&paths, WebPorts::FALLBACKS[1]);
+        let failing = |_: WebPorts, again: bool| {
+            if again {
+                return Err("busy".to_string());
+            }
+            heartbeat_on(&paths, WebPorts::STANDARD);
+            update_state(&paths, |s| s.rendered_ports = WebPorts::STANDARD).unwrap();
+            Ok(())
+        };
+        let r = claim_with(&paths, "nextcloud", &failing);
+        let after = State::load(&paths);
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(r, Ok(()));
+        assert_eq!(after.rendered_ports, WebPorts::FALLBACKS[1]);
+    }
+
+    #[test]
+    fn an_unreadable_heartbeat_never_renders_as_80_and_443() {
+        let home = std::env::temp_dir().join(format!("konak-torn-hb-{}", std::process::id()));
+        let paths = Paths { home: home.clone(), distro: "konak-nonexistent".into(), bin: home.join("bin"), media: home.join("m"), photos: home.join("p") };
+        let mut s = State::default();
+        s.apps.push(InstalledApp { id: "nextcloud".into(), name: "cloud".into(), installed_unix: 1, claimed: false, stopped: false });
+        s.save(&paths);
+        // No heartbeat yet: 80/443, as before the first tick.
+        assert_eq!(render_ports(&paths), Ok(WebPorts::STANDARD));
+        // A truncated file (a write from a build without the atomic write, caught midway).
+        std::fs::write(paths.supervisor_file(), r#"{"last_tick_unix": 5, "web_po"#).unwrap();
+        let rendered = std::cell::Cell::new(false);
+        let r = claim_with(&paths, "nextcloud", &|_, _| {
+            rendered.set(true);
+            Ok(())
+        });
+        let after = State::load(&paths);
+        let display = active_ports(&paths);
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(r.unwrap_err().contains("supervisor.json unreadable"));
+        assert!(!rendered.get() && !after.apps[0].claimed);
+        assert_eq!(display, WebPorts::STANDARD, "display falls back; rendering does not");
     }
 
     #[test]
