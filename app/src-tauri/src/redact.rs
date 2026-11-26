@@ -1,8 +1,9 @@
 //! The one redactor. Everything Konak returns to the UI or to MCP clients (logs, error text) passes
 //! through it. It masks the secret values generated for installed apps (read from their `.env`
 //! files inside the distro) and anything that looks like `password=...`, `token: ...`,
-//! `scheme://user:password@host`, `Authorization: <scheme> <credentials>`, `?key=...` or a
-//! Nextcloud share link `/s/<token>`.
+//! `scheme://user:password@host`, `Authorization: <scheme> <credentials>`, `?key=...`, `?code=...`,
+//! `?state=...`, a `Cookie:`/`Set-Cookie:` value, a Nextcloud share link `/s/<token>` or an Immich
+//! shared link `/share/<key>`.
 
 use crate::paths::Paths;
 use crate::{catalog, shell};
@@ -18,8 +19,8 @@ pub struct Redactor {
 
 /// Each pattern captures (1) the text kept before the secret, (2) the secret, and optionally (3) the
 /// text kept after it.
-fn patterns() -> &'static [Regex; 5] {
-    static P: OnceLock<[Regex; 5]> = OnceLock::new();
+fn patterns() -> &'static [Regex; 8] {
+    static P: OnceLock<[Regex; 8]> = OnceLock::new();
     P.get_or_init(|| {
         [
             // key=value / key: value / "key": "value", where the key mentions a secret-ish word.
@@ -32,6 +33,12 @@ fn patterns() -> &'static [Regex; 5] {
             Regex::new(r#"(?i)([?&]key=)([^\s&#"']+)"#).unwrap(),
             // Nextcloud public share links, `/s/<token>`.
             Regex::new(r"(/s/)([A-Za-z0-9]{10,})").unwrap(),
+            // Immich shared links, `/share/<key>`.
+            Regex::new(r"(/share/)([A-Za-z0-9_-]{16,})").unwrap(),
+            // Reset, activation and OAuth codes in query strings (Forgejo `/user/recover_account?code=`).
+            Regex::new(r#"(?i)([?&](?:code|state)=)([^\s&#"']+)"#).unwrap(),
+            // Session cookies: the whole header value.
+            Regex::new(r#"(?i)(\b(?:set-)?cookie["']?\s*[:=]\s*["']?)([^\r\n"]+)"#).unwrap(),
         ]
     })
 }
@@ -110,6 +117,18 @@ mod tests {
             ("GET /s/Ab3dE6fG9hJ2kLm HTTP/1.1", "GET /s/[redacted] HTTP/1.1"),
             ("https://cloud.local/index.php/s/qwertyuiopASDFG/download", "https://cloud.local/index.php/s/[redacted]/download"),
             ("/s/short", "/s/short"),
+            // Immich shared links; short paths stay.
+            ("GET /share/AbCdEf0123456789_-xyz HTTP/1.1", "GET /share/[redacted] HTTP/1.1"),
+            ("/share/albums", "/share/albums"),
+            // Reset, activation and OAuth codes.
+            ("GET /user/recover_account?code=9f8e7d6c5b4a HTTP/1.1", "GET /user/recover_account?code=[redacted] HTTP/1.1"),
+            ("/user/activate?code=abc123&lang=en", "/user/activate?code=[redacted]&lang=en"),
+            ("/login/oauth/callback?state=xyz&code=q1w2e3", "/login/oauth/callback?state=[redacted]&code=[redacted]"),
+            ("?zipcode=12345", "?zipcode=12345"),
+            // Session cookies.
+            ("Cookie: i_like_gitea=0a1b2c3d; lang=en-US", "Cookie: [redacted]"),
+            ("set-cookie: oc_sessionPassphrase=Zx9; path=/; HttpOnly", "set-cookie: [redacted]"),
+            (r#"{"Cookie": "immich_access_token=abc"}"#, r#"{"Cookie": "[redacted]"}"#),
         ];
         for (input, want) in cases {
             assert_eq!(Redactor::new(vec![]).apply(input), want, "{input}");

@@ -117,7 +117,28 @@ impl Heartbeat {
 }
 
 pub fn heartbeat(paths: &Paths) -> Option<Heartbeat> {
-    serde_json::from_str(&std::fs::read_to_string(paths.supervisor_file()).ok()?).ok()
+    read_heartbeat(paths).ok().flatten()
+}
+
+/// `Ok(None)` when there is no heartbeat file (the supervisor never ran here). A file that cannot be
+/// read or parsed is retried briefly (a writer from a build without the atomic write may be midway)
+/// and is then an error, never a default.
+pub fn read_heartbeat(paths: &Paths) -> Result<Option<Heartbeat>, String> {
+    let mut last = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        match std::fs::read_to_string(paths.supervisor_file()) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => last = e.to_string(),
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(h) => return Ok(Some(h)),
+                Err(e) => last = e.to_string(),
+            },
+        }
+    }
+    Err(format!("supervisor.json unreadable: {last}"))
 }
 
 #[repr(C)]
@@ -412,7 +433,9 @@ if j=$(nft -j list table inet netavark 2>/dev/null) && [ "${j#\{}" != "$j" ]; th
 elif t=$(nft -a list table inet netavark 2>/dev/null); then echo '## nft text'; printf '%s\n' "$t"; fi
 "#;
 
-/// The `port <name> <host port>` lines of `NETAVARK_SH` output, before its first `## ` section.
+/// The `port <name> <host port>` lines of `NETAVARK_SH` output, before its first `## ` section, for
+/// Konak's own app ports only (`catalog::PORT_RANGE`): another port a container publishes is not
+/// one Caddy uses, and on 127.0.0.1 it may well be another program's.
 pub fn published_ports(out: &str) -> Vec<(String, u16)> {
     out.lines()
         .take_while(|l| !l.starts_with("## "))
@@ -420,6 +443,7 @@ pub fn published_ports(out: &str) -> Vec<(String, u16)> {
             let mut w = l.strip_prefix("port ")?.split_whitespace();
             Some((w.next()?.to_string(), w.next()?.parse().ok()?))
         })
+        .filter(|(_, p)| crate::catalog::PORT_RANGE.contains(p))
         .collect()
 }
 
@@ -445,10 +469,13 @@ pub fn port_answers(port: u16, timeout: std::time::Duration) -> bool {
     s.write_all(b"HEAD / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n").is_ok() && matches!(s.read(&mut [0u8; 1]), Ok(1))
 }
 
-/// Probes every published port at once, 3 s at most each, as the in-distro probe did.
+/// Probes every published port at once. A port that does not answer within 3 s gets a second try
+/// of 10 s before it counts as closed: a cold Nextcloud or a busy Immich can take that long for
+/// `HEAD /`, and a healthy slow app must not read as a stale forward.
 pub fn probe_ports(ports: &[(String, u16)]) -> Vec<PortProbe> {
+    use std::time::Duration;
     std::thread::scope(|s| {
-        let handles: Vec<_> = ports.iter().map(|(name, port)| (name, *port, s.spawn(move || port_answers(*port, std::time::Duration::from_secs(3))))).collect();
+        let handles: Vec<_> = ports.iter().map(|(name, port)| (name, *port, s.spawn(move || port_answers(*port, Duration::from_secs(3)) || port_answers(*port, Duration::from_secs(10))))).collect();
         handles.into_iter().map(|(name, port, h)| PortProbe { name: name.clone(), port, open: h.join().unwrap_or(false) }).collect()
     })
 }
@@ -569,6 +596,15 @@ pub fn foreign_konak_dnat(t: &NftTable, known: &[&str]) -> Vec<ForeignNetwork> {
     found
 }
 
+/// Host ports that `NETAVARK-HOSTPORT-DNAT` forwards into one of Konak's own Podman networks.
+pub fn own_dnat_ports(t: &NftTable, known: &[&str]) -> Vec<u16> {
+    let own = |r: &&NftRule| r.jump.as_deref().and_then(nv_id).is_some_and(|id| known.iter().any(|k| k.starts_with(id)));
+    let mut ports: Vec<u16> = t.rules.iter().filter(|r| r.chain == "NETAVARK-HOSTPORT-DNAT").filter(own).flat_map(|r| r.dports.iter().copied()).collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
 /// Commands that delete only this network's jumps, then its chains.
 fn foreign_fix(n: &ForeignNetwork) -> String {
     let mut cmds: Vec<String> = n
@@ -590,6 +626,17 @@ pub fn distro_usage(paths: &Paths, d: &Distro) -> (Option<Usage>, Option<Usage>)
     in_distro(paths, d, RESOURCES_SH).as_deref().map(|t| t.split_once("---").unwrap_or((t, ""))).map(|(m, df)| (parse_free(m), parse_df(df))).unwrap_or((None, None))
 }
 
+/// Whether the supervisor is up, so a first diagnose reflects the running system: its heartbeat is
+/// fresh (not older than `HEARTBEAT_STALE_S`), the keepalive pid it names is a live wsl.exe, the
+/// Caddy pid is a live process of the bundled caddy.exe, and the distro runs. Apps may still be
+/// starting.
+pub fn supervisor_ready(hb: Option<&Heartbeat>, now: u64, distro_running: bool, caddy: &str, image_of: &dyn Fn(u32) -> Option<String>) -> bool {
+    let Some(h) = hb.filter(|h| !h.stale(now)) else { return false };
+    let keepalive = h.pids.keepalive.and_then(image_of).is_some_and(|i| norm_image(&i).ends_with(r"\wsl.exe"));
+    let caddy_up = h.pids.caddy.and_then(image_of).is_some_and(|i| norm_image(&i) == norm_image(caddy));
+    distro_running && keepalive && caddy_up
+}
+
 /// The panel's "This PC" view. `category` is the network category Konak last read (the panel's
 /// `refresh_network`); when there is none, the LAN adapter's own category is used.
 pub fn host_info(paths: &Paths, category: Option<String>) -> serde_json::Value {
@@ -600,7 +647,10 @@ pub fn host_info(paths: &Paths, category: Option<String>) -> serde_json::Value {
     let net = network(paths).map_err(|e| crate::log(paths, &format!("host info: {e}"))).ok();
     let adapter = net.as_ref().and_then(|n| n.facts.adapter.as_ref());
     let category = category.filter(|c| !c.is_empty()).or_else(|| adapter.map(|a| a.category.clone()).filter(|c| !c.is_empty()));
+    let ready = supervisor_ready(heartbeat(paths).as_ref(), now(), d.running, &paths.caddy().to_string_lossy(), &process_image);
     json!({
+        // The panel runs its first diagnose once this turns true.
+        "ready": ready,
         "distro": {"name": d.name, "running": d.running},
         "memory": used_total(mem),
         "disk": used_total(disk),
@@ -703,7 +753,7 @@ pub fn stale_netavark(f: &Facts) -> Check {
     // The container lines come before the first `## ` section (networks, rule dump).
     let head: Vec<&str> = all.lines().take_while(|l| !l.starts_with("## ")).collect();
     let containers = head.iter().filter(|l| l.starts_with("container ")).count();
-    let closed: Vec<String> = f.probes.iter().filter(|p| !p.open).map(|p| format!("{}:{}", p.name, p.port)).collect();
+    let mut closed: Vec<String> = f.probes.iter().filter(|p| !p.open).map(|p| format!("{}:{}", p.name, p.port)).collect();
     if containers > 0 && head.contains(&"table missing") {
         return check("stale_netavark", "fail", format!("{containers} containers running but the shared inet netavark table is missing (another Podman distro may have flushed it)"), FIX)
             .msg("stale_netavark.table_missing", &[("containers", containers.to_string())]);
@@ -711,7 +761,18 @@ pub fn stale_netavark(f: &Facts) -> Check {
     // Only when Konak's Podman listed its networks: otherwise every network would look foreign.
     if let Some(known) = section(all, "podman networks") {
         let table = section(all, "nft json").and_then(|j| parse_nft_json(&j.join("\n"))).or_else(|| section(all, "nft text").map(|t| parse_nft_text(&t.join("\n"))));
-        let foreign = table.map(|t| foreign_konak_dnat(&t, &known)).unwrap_or_default();
+        let foreign = table.as_ref().map(|t| foreign_konak_dnat(t, &known)).unwrap_or_default();
+        // A port that answers on 127.0.0.1 without a forward into one of Konak's networks is answered
+        // by someone else (another distro or a Windows program), not by Konak's app. Only judged when
+        // the dump shows Konak forwards at all, so an unknown rule layout reports nothing.
+        let own = table.as_ref().map(|t| own_dnat_ports(t, &known)).unwrap_or_default();
+        let others: Vec<&PortProbe> = f.probes.iter().filter(|p| p.open && !own.is_empty() && !own.contains(&p.port)).collect();
+        if foreign.is_empty() && !others.is_empty() {
+            let names: Vec<String> = others.iter().map(|p| format!("{}:{}", p.name, p.port)).collect();
+            closed.extend(names.iter().cloned());
+            return check("stale_netavark", "warn", format!("published ports answering on 127.0.0.1 from Windows, but with no port forward into Konak's networks, so another program answers: {}", names.join(", ")), FIX)
+                .msg("stale_netavark.closed", &[("ports", closed.join(", "))]);
+        }
         if !foreign.is_empty() {
             let evidence = foreign.iter().map(|n| format!("network {} is not one of Konak's Podman networks (left by a removed distro?) but still forwards port {}", n.id, n.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", "))).collect::<Vec<_>>().join("; ");
             let fix = format!(
@@ -1051,6 +1112,66 @@ mod tests {
     }
 
     #[test]
+    fn a_port_answered_without_a_konak_forward_is_not_konaks() {
+        // Konak's forgejo network forwards 47105; 47101 answers but has no forward at all (03 R3:
+        // another distro or a Windows program answers there).
+        let dump = "table inet netavark {\n\tchain NETAVARK-HOSTPORT-DNAT {\n\t\tip daddr 127.0.0.1 tcp dport 47105 jump nv_655c363a_10_234_1_0_nm24_dnat\n\t\ttcp dport 8000 jump nv_ff1513d2_10_89_2_0_nm24_dnat\n\t}\n}\n";
+        assert_eq!(own_dnat_ports(&parse_nft_text(dump), &[FORGEJO_NET]), vec![47105]);
+        let mut f = facts();
+        let head = "table present\ncontainer forgejo\nport forgejo 47105\ncontainer jellyfin\nport jellyfin 47101\n";
+        f.netavark = Some(format!("{head}## podman networks\n{FORGEJO_NET}\n## nft text\n{dump}"));
+        f.probes = vec![probe("forgejo", 47105, true), probe("jellyfin", 47101, true)];
+        let c = stale_netavark(&f);
+        assert_eq!((c.status, c.code, c.args["ports"].as_str()), ("warn", "stale_netavark.closed", "jellyfin:47101"), "{c:?}");
+        assert!(c.evidence.contains("another program answers"), "{c:?}");
+        // With both forwarded into Konak's networks: ok.
+        let both = dump.replace("tcp dport 8000 jump nv_ff1513d2_10_89_2_0_nm24_dnat", "tcp dport 47101 jump nv_655c363a_10_234_1_0_nm24_dnat");
+        f.netavark = Some(format!("{head}## podman networks\n{FORGEJO_NET}\n## nft text\n{both}"));
+        assert_eq!(stale_netavark(&f).status, "ok");
+        // Only Konak's app ports are probed at all.
+        assert_eq!(published_ports("port db 5432\nport forgejo 47105\nport web 8080\n"), vec![("forgejo".to_string(), 47105)]);
+    }
+
+    #[test]
+    fn a_slow_app_gets_a_second_longer_probe() {
+        use std::io::{Read, Write};
+        let slow = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = slow.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            // The first probe gives up after 3 s; the second connection is answered at once.
+            let (first, _) = slow.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(3500));
+            drop(first);
+            let (mut c, _) = slow.accept().unwrap();
+            let _ = c.read(&mut [0u8; 64]);
+            c.write_all(b"HTTP/1.0 302 Found\r\n\r\n").unwrap();
+        });
+        assert_eq!(probe_ports(&[("nextcloud".into(), port)]), vec![probe("nextcloud", port, true)]);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn ready_needs_a_fresh_heartbeat_with_live_keepalive_and_caddy() {
+        let f = facts();
+        let hb = f.heartbeat.clone().unwrap();
+        let caddy = r"C:\Konak\bin\caddy.exe";
+        let live = |pid: u32| match pid {
+            11 => Some(r"C:\Windows\System32\wsl.exe".to_string()),
+            22 => Some(r"c:\konak\bin\CADDY.EXE".to_string()),
+            _ => None,
+        };
+        assert!(supervisor_ready(Some(&hb), 1000, true, caddy, &live));
+        assert!(!supervisor_ready(None, 1000, true, caddy, &live), "no heartbeat");
+        assert!(!supervisor_ready(Some(&hb), 1000 + HEARTBEAT_STALE_S + 10, true, caddy, &live), "stale");
+        assert!(!supervisor_ready(Some(&hb), 1000, false, caddy, &live), "distro not running yet");
+        assert!(!supervisor_ready(Some(&hb), 1000, true, caddy, &|pid| if pid == 22 { live(pid) } else { None }), "keepalive gone");
+        let mut no_caddy = hb.clone();
+        no_caddy.pids.caddy = None;
+        assert!(!supervisor_ready(Some(&no_caddy), 1000, true, caddy, &live), "Caddy not started");
+        assert!(!supervisor_ready(Some(&hb), 1000, true, r"D:\other\caddy.exe", &live), "a pid reused by another program");
+    }
+
+    #[test]
     fn port80_ownership_by_pid_or_image() {
         let caddy = r"C:\Konak\bin\caddy.exe";
         let net = |address: &str, pid: u32, image: Option<&str>| NetFacts { port80: vec![Listener { address: address.into(), pid, image: image.map(String::from) }], ..Default::default() };
@@ -1113,7 +1234,9 @@ mod tests {
         // A stale heartbeat does not count as serving on the fallback.
         let mut g = facts();
         g.net.as_mut().unwrap().port80 = vec![httpd];
-        g.net.as_mut().unwrap().fallback_http = vec![Listener { address: "192.168.1.5".into(), pid: 22, image: None }];
+        // The bundled caddy.exe, as Get-NetTCPConnection reports it: with a stale heartbeat it matches
+        // by image, so only the staleness check keeps this from counting as serving on the fallback.
+        g.net.as_mut().unwrap().fallback_http = vec![Listener { address: "192.168.1.5".into(), pid: 22, image: Some(r"C:\Konak\bin\caddy.exe".into()) }];
         g.heartbeat.as_mut().unwrap().web_ports = WebPorts::FALLBACKS[1];
         g.heartbeat.as_mut().unwrap().last_tick_unix = 0;
         assert_eq!(port80(&g).status, "fail");
