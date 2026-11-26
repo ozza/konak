@@ -12,17 +12,23 @@
   let loading = $state(false);
   let pre = $state<HTMLPreElement>();
 
+  // Replies can arrive out of order (each goes through WSL); only the latest request may write.
+  let seq = 0;
+
   async function load(id: string) {
+    const mine = ++seq;
     loading = true;
     error = null;
     try {
       // Already redacted by the backend (apps::logs).
-      text = await invoke<string>("app_logs", { id, lines: LINES });
+      const reply = await invoke<string>("app_logs", { id, lines: LINES });
+      if (mine !== seq) return;
+      text = reply;
       queueMicrotask(() => pre && (pre.scrollTop = pre.scrollHeight));
     } catch (e) {
-      error = errorText(e);
+      if (mine === seq) error = errorText(e);
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
 
@@ -30,6 +36,8 @@
     if (app) {
       text = null;
       load(app.id);
+    } else {
+      seq++;
     }
   });
 </script>

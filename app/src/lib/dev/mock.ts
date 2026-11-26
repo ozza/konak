@@ -38,6 +38,7 @@ const containers: Record<string, AppInfo["containers"]> = {
 
 const GB = 1024 ** 3;
 const hostInfo = () => ({
+  ready: true,
   distro: { name: "konak-podman", running: true },
   memory: { used_bytes: 7.4 * GB, total_bytes: 64 * GB },
   disk: { used_bytes: 118 * GB, total_bytes: 900 * GB },

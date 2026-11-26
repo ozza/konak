@@ -150,7 +150,7 @@
       "body": "The app stops and disappears from your network.",
       "keep_note": "Its settings and data are kept, so installing it again brings them back.",
       "delete_label": "Also delete the app's data",
-      "delete_warning": "This permanently deletes the app's settings, accounts and database. It cannot be undone. Files in your Media and Photos folders are not touched.",
+      "delete_warning": "This permanently deletes everything the app keeps inside Konak: its files, passwords, repositories, accounts, settings and database. For example, all files stored in Nextcloud and every password in Vaultwarden. It cannot be undone. Only your Media and Photos folders are kept.",
       "confirm": "Remove",
       "confirm_delete": "Remove and delete data",
       "cancel": "Cancel"
@@ -408,7 +408,7 @@
       "effect": {
         "install": "Konak downloads {app} and starts it. Only this PC can open it until you finish its setup.",
         "remove": "{app} stops and disappears from your network. Its settings and data are kept.",
-        "remove_delete": "{app} is removed and its data is deleted for good: settings, accounts and database. This cannot be undone.",
+        "remove_delete": "{app} is removed and everything it keeps inside Konak is deleted for good: its files, passwords, repositories, accounts, settings and database. This cannot be undone. Your Media and Photos folders are kept.",
         "start": "{app} starts again and becomes reachable.",
         "stop": "{app} stops. Nobody can use it until it is started again. Its data is kept.",
         "restart": "{app} restarts and is unavailable for a short time.",

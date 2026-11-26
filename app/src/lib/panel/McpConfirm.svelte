@@ -42,11 +42,16 @@
     return text.length > 60 ? `${text.slice(0, 57)}...` : text;
   }
 
+  // The arming delay counts only while the window has focus: a request that arrives while Konak is
+  // behind another window is not armed until the user has been looking at it for ARM_MS.
+  let focused = $state(document.hasFocus());
+
   $effect(() => {
     const id = pending?.id;
     armed = false;
     if (!id) return;
     tick().then(() => denyButton?.focus());
+    if (!focused) return;
     const timer = setTimeout(() => pending?.id === id && (armed = true), ARM_MS);
     return () => clearTimeout(timer);
   });
@@ -98,12 +103,17 @@
     <p class="text-xs text-muted" aria-live="off">{t("panel.mcp.countdown", { time: countdown })}</p>
   {/if}
   {#snippet actions()}
-    <!-- Deny takes the focus for every new request, so a stray Enter never approves. -->
-    <!-- svelte-ignore a11y_autofocus -->
-    <button type="button" class="btn" autofocus bind:this={denyButton} onclick={() => answer(false)}>{t("panel.mcp.deny")}</button>
-    <button type="button" class={destructive ? "btn-danger" : "btn-primary"} disabled={!armed} onclick={() => answer(true)}>{t("panel.mcp.approve")}</button>
+    <!-- New button nodes for every request, so a mouse button held down on one request's Approve
+         cannot release onto the next one's. Deny takes the focus, so a stray Enter never approves. -->
+    {#key pending?.id}
+      <!-- svelte-ignore a11y_autofocus -->
+      <button type="button" class="btn" autofocus bind:this={denyButton} onclick={() => answer(false)}>{t("panel.mcp.deny")}</button>
+      <button type="button" class={destructive ? "btn-danger" : "btn-primary"} disabled={!armed} onclick={() => answer(true)}>{t("panel.mcp.approve")}</button>
+    {/key}
   {/snippet}
 </Dialog>
+
+<svelte:window onfocus={() => (focused = true)} onblur={() => (focused = false)} />
 
 {#if answerError}
   <div role="alert" class="fixed right-4 bottom-4 z-30 flex max-w-sm items-start gap-3 rounded-xl border border-error-border bg-error-bg p-4 text-sm shadow-lg">

@@ -24,6 +24,8 @@ export type Op = "install" | "remove" | "rename" | "restart" | "claim" | "stop" 
 export type AppStats = { id: string; cpu_percent: number; mem_bytes: number };
 type Usage = { used_bytes: number; total_bytes: number };
 export type HostInfo = {
+  /** The supervisor runs (fresh heartbeat with keepalive and Caddy up): diagnostics are meaningful. */
+  ready?: boolean;
   distro: { name: string; running: boolean };
   /** Inside Konak's distro; null while it is not running. */
   memory: Usage | null;

@@ -15,6 +15,7 @@
     networkCategory,
     portSuffix,
     focus,
+    onfocused,
     oninstall,
     onopen,
     ondismiss,
@@ -28,6 +29,8 @@
     portSuffix: string;
     /** An app to show in the install panel, e.g. one an AI agent's approved install is downloading. */
     focus: string | null;
+    /** Called once the focus was applied, so a later visit opens the page normally. */
+    onfocused: () => void;
     oninstall: (id: string) => void;
     onopen: (id: string) => void;
     ondismiss: (id: string) => void;
@@ -41,6 +44,7 @@
   $effect(() => {
     if (!focus) return;
     picked = focus;
+    onfocused();
     tick().then(() => aside?.scrollIntoView({ block: "nearest" }));
   });
 

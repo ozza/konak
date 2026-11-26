@@ -150,7 +150,7 @@
       "body": "Uygulama durur ve ağınızdan kaybolur.",
       "keep_note": "Ayarları ve verileri saklanır; uygulamayı yeniden kurduğunuzda geri gelir.",
       "delete_label": "Uygulamanın verilerini de sil",
-      "delete_warning": "Bu işlem uygulamanın ayarlarını, hesaplarını ve veritabanını kalıcı olarak siler. Geri alınamaz. Medya ve Fotoğraflar klasörlerinizdeki dosyalara dokunulmaz.",
+      "delete_warning": "Bu işlem uygulamanın Konak içinde tuttuğu her şeyi kalıcı olarak siler: dosyalarını, parolalarını, depolarını, hesaplarını, ayarlarını ve veritabanını. Örneğin Nextcloud'daki tüm dosyalar ve Vaultwarden'daki tüm parolalar. Geri alınamaz. Yalnızca Medya ve Fotoğraflar klasörleriniz korunur.",
       "confirm": "Kaldır",
       "confirm_delete": "Kaldır ve verileri sil",
       "cancel": "Vazgeç"
@@ -408,7 +408,7 @@
       "effect": {
         "install": "Konak {app} uygulamasını indirip başlatır. Kurulumunu bitirene kadar yalnızca bu bilgisayardan açılabilir.",
         "remove": "{app} durur ve ağınızdan kaybolur. Ayarları ve verileri saklanır.",
-        "remove_delete": "{app} kaldırılır ve verileri kalıcı olarak silinir: ayarlar, hesaplar ve veritabanı. Bu geri alınamaz.",
+        "remove_delete": "{app} kaldırılır ve Konak içinde tuttuğu her şey kalıcı olarak silinir: dosyaları, parolaları, depoları, hesapları, ayarları ve veritabanı. Bu geri alınamaz. Medya ve Fotoğraflar klasörleriniz korunur.",
         "start": "{app} yeniden başlar ve erişilebilir olur.",
         "stop": "{app} durur. Yeniden başlatılana kadar kimse kullanamaz. Verileri saklanır.",
         "restart": "{app} yeniden başlar ve kısa bir süre erişilemez.",
