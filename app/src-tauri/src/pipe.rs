@@ -134,6 +134,9 @@ pub fn parse(line: &[u8]) -> Result<Request, String> {
 /// Checks a request against the saved state: the app the op needs, the fields the op takes, and the
 /// name rules for rename. Runs before any dialog, and again right before an approved op runs.
 pub fn validate(state: &State, req: &Request) -> Result<Action, String> {
+    if !state.done {
+        return Err("setup_not_done: finish Konak's setup first".into());
+    }
     if req.delete_data.is_some() && req.op != Op::Remove {
         return Err("delete_data is only for remove".into());
     }
@@ -507,6 +510,7 @@ mod tests {
 
     fn state() -> State {
         let mut s = State::default();
+        s.done = true;
         s.apps.push(InstalledApp { id: "jellyfin".into(), name: "movies".into(), installed_unix: 0, claimed: true, stopped: false });
         s.apps.push(InstalledApp { id: "forgejo".into(), name: "git".into(), installed_unix: 0, claimed: false, stopped: false });
         s
@@ -533,7 +537,7 @@ mod tests {
         let s = state();
         let v = |j: &str| validate(&s, &req(j).unwrap());
         assert_eq!(v(r#"{"op":"remove","app":"movies.local","delete_data":true}"#).unwrap(), Action { op: Op::Remove, id: "jellyfin".into(), name: None, delete_data: true });
-        assert_eq!(v(r#"{"op":"remove","app":"jellyfin"}"#).unwrap().delete_data, false);
+        assert!(!v(r#"{"op":"remove","app":"jellyfin"}"#).unwrap().delete_data);
         assert_eq!(v(r#"{"op":"stop","app":"jellyfin","delete_data":false}"#).unwrap_err(), "delete_data is only for remove");
         assert_eq!(v(r#"{"op":"install","app":"vaultwarden","delete_data":true}"#).unwrap_err(), "delete_data is only for remove");
         // Install takes a catalog id that is not installed yet.
@@ -551,6 +555,10 @@ mod tests {
         assert_eq!(v(r#"{"op":"rename","app":"git","name":"konak"}"#).unwrap_err(), "name_reserved");
         assert_eq!(v(r#"{"op":"rename","app":"git","name":"Bad Name"}"#).unwrap_err(), "invalid_name");
         assert_eq!(v(r#"{"op":"rename","app":"git","name":"-x"}"#).unwrap_err(), "invalid_name");
+        // Nothing before setup is done.
+        let mut early = state();
+        early.done = false;
+        assert!(validate(&early, &req(r#"{"op":"install","app":"vaultwarden"}"#).unwrap()).unwrap_err().starts_with("setup_not_done"));
     }
 
     #[test]
