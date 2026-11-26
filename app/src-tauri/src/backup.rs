@@ -1043,7 +1043,6 @@ mod tests {
     #[test]
     #[ignore]
     fn live_backup() {
-        use std::io::Read;
         let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
         let distro = env("KONAK_TEST_DISTRO");
         assert!(distro.starts_with("konak-") && distro != "konak", "only a throwaway Konak distro");
