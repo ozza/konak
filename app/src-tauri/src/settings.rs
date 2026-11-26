@@ -134,11 +134,26 @@ fn absolute_windows_path(p: &str) -> bool {
     drive || unc
 }
 
-/// Checks a backup location: absolute, an existing folder, writable, and outside the folders a
-/// backup reads from or a purge deletes. Error codes as `validate`.
+/// A path into a WSL distro (`\\wsl$\...`, `\\wsl.localhost\...`), as written or once resolved
+/// (a mapped drive, a link or a junction that leads there).
+pub fn wsl_path(p: &str) -> bool {
+    let wsl = |s: &str| {
+        let l = s.replace('/', "\\").to_lowercase();
+        ["\\\\wsl$", "\\\\wsl.localhost"].iter().any(|h| l == *h || l.starts_with(&format!("{h}\\")))
+    };
+    wsl(p) || wsl(&norm(Path::new(p)))
+}
+
+/// Checks a backup location: absolute, not inside a WSL distro, an existing folder, writable, and
+/// outside the folders a backup reads from or a purge deletes. Error codes as `validate`.
 pub fn check_location(paths: &Paths, location: &str) -> Result<(), String> {
     if !absolute_windows_path(location) {
         return Err("settings_location_relative".into());
+    }
+    // Backups inside the distro they protect would be lost with it, and could sit in a folder an
+    // app's container mounts.
+    if wsl_path(location) {
+        return Err("settings_location_wsl".into());
     }
     let dir = Path::new(location);
     if !dir.is_dir() {
@@ -421,6 +436,9 @@ pub(crate) mod tests {
             (with(&|s| s.backup.include.apps = vec!["jellyfin".into(), "nosuch".into()]), Some("settings_unknown_app")),
             (with(&|s| s.backup.location = Some("backups".into())), Some("settings_location_relative")),
             (with(&|s| s.backup.location = Some(r"\\?\C:\x".into())), Some("settings_location_relative")),
+            (with(&|s| s.backup.location = Some(r"\\wsl.localhost\konak\var\lib\konak\apps\jellyfin\config".into())), Some("settings_location_wsl")),
+            (with(&|s| s.backup.location = Some(r"\\WSL$\konak\tmp".into())), Some("settings_location_wsl")),
+            (with(&|s| s.backup.location = Some("//wsl.localhost/konak/tmp".into())), Some("settings_location_relative")),
             (with(&|s| s.backup.location = Some(out.join("missing").to_string_lossy().into())), Some("settings_location_missing")),
             (with(&|s| s.backup.location = Some(paths.home.to_string_lossy().into())), Some("settings_location_in_konak")),
             (with(&|s| s.backup.location = Some(paths.photos.join("sub").to_string_lossy().into())), Some("settings_location_in_library")),
@@ -434,6 +452,9 @@ pub(crate) mod tests {
         }
         assert_eq!(leftovers, 0, "the write probe is removed");
         assert!(absolute_windows_path(r"\\nas\share\konak") && !absolute_windows_path(r"\\nas"));
+        assert!(wsl_path(r"\\wsl$\konak\x") && wsl_path("//wsl.localhost/konak/x") && wsl_path(r"\\wsl.localhost"));
+        // Local paths only here: resolving a UNC path would ask that host.
+        assert!(!wsl_path(r"C:\wsl.localhost\x") && !wsl_path(r"D:\wsl$\x"));
         assert_eq!(parse_time("23:59"), Some((23, 59)));
     }
 

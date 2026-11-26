@@ -370,6 +370,9 @@ pub struct Inspected {
 /// files come after the apps in the file, so this reads (and decrypts) up to them; the rest of the
 /// file is not checked here, a restore verifies all of it first.
 pub fn inspect(paths: &Paths, path: &str, password: &str) -> Result<Inspected, String> {
+    if settings::wsl_path(path) {
+        return Err("backup_path_refused".into());
+    }
     let pw = if password.is_empty() { settings::password(paths)?.ok_or("backup_no_password")? } else { SecretString::from(password.to_string()) };
     let b = fmt::open(Path::new(path), &pw).map_err(|e| {
         crate::log(paths, &format!("inspect backup: {e}"));

@@ -720,6 +720,9 @@ pub fn precheck(paths: &Paths, req: &Request) -> Result<(), String> {
     if !chosen_something(req) {
         return Err("restore_nothing_chosen".into());
     }
+    if settings::wsl_path(&req.path) {
+        return Err("backup_path_refused".into());
+    }
     if !fmt::has_magic(Path::new(&req.path)) {
         return Err(if Path::new(&req.path).is_file() { "backup_not_konak" } else { "backup_unreadable" }.into());
     }
