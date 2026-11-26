@@ -260,6 +260,9 @@ pub fn run_value_owned(reg_query: &str, exe: &Path) -> bool {
         .any(|v| v.trim().strip_prefix('"').and_then(|v| v.split_once('"')).is_some_and(|(p, rest)| same_path(Path::new(p), exe) && rest.trim() == "--autostart"))
 }
 
+/// `remove_run_value`'s answer when the Run value is not this exe's.
+pub(crate) const KEPT_ELSEWHERE: &str = "kept, it points elsewhere";
+
 /// Also used by the Settings page's "start with Windows" switch.
 pub(crate) fn remove_run_value(exe: &Path) -> Result<String, String> {
     let out = shell::run("reg.exe", &["query", RUN_KEY, "/v", "Konak"]);
@@ -267,7 +270,7 @@ pub(crate) fn remove_run_value(exe: &Path) -> Result<String, String> {
         return Ok("no Run value".into());
     }
     if !run_value_owned(&out.text, exe) {
-        return Ok(format!("kept, it points elsewhere: {}", tail(&out.text, 1).trim()));
+        return Ok(format!("{KEPT_ELSEWHERE}: {}", tail(&out.text, 1).trim()));
     }
     let out = shell::run("reg.exe", &["delete", RUN_KEY, "/v", "Konak", "/f"]);
     if out.ok {

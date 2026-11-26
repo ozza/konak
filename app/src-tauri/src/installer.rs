@@ -246,15 +246,15 @@ pub fn parse_registered(ok: bool, text: &str) -> Result<Vec<String>, String> {
 
 /// Registers Konak to start at logon (per user, no admin). Used to resume after the reboot and,
 /// once installed, to run the supervisor from the tray.
-pub fn register_autostart() {
+pub fn register_autostart() -> Result<(), String> {
     // Dev runs (see app/README.md) must not add the dev build to the developer's logon programs.
     if skip_elevation() {
-        return;
+        return Ok(());
     }
-    if let Ok(exe) = std::env::current_exe() {
-        let value = format!("\"{}\" --autostart", exe.display());
-        shell::run("reg.exe", &["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Konak", "/t", "REG_SZ", "/d", &value, "/f"]);
-    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let value = format!("\"{}\" --autostart", exe.display());
+    let out = shell::run("reg.exe", &["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Konak", "/t", "REG_SZ", "/d", &value, "/f"]);
+    out.ok.then_some(()).ok_or_else(|| format!("reg add failed: {}", shell::tail(&out.text, 2)))
 }
 
 /// `-EncodedCommand` argument: base64 of the UTF-16LE text, as powershell.exe expects it.

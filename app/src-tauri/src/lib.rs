@@ -171,7 +171,9 @@ fn run_all(app: AppHandle, set_private: bool) {
         state.started_unix = installer::now();
         log(&paths, "install started");
     }
-    installer::register_autostart();
+    if let Err(e) = installer::register_autostart() {
+        log(&paths, &format!("autostart: {e}"));
+    }
 
     let pre = match installer::preflight(&paths) {
         Ok(p) => p,
@@ -1026,7 +1028,9 @@ pub fn run() {
                 // An uninstall that kept the data removed the Run value; put it back (not in dev
                 // runs), unless the user turned "start with Windows" off in Settings.
                 if settings::load(&paths).autostart {
-                    installer::register_autostart();
+                    if let Err(e) = installer::register_autostart() {
+                        log(&paths, &format!("autostart: {e}"));
+                    }
                 }
                 let (paths, sup) = (paths.clone(), Arc::clone(&sup));
                 std::thread::spawn(move || {

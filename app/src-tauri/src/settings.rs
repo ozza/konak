@@ -230,11 +230,20 @@ fn apply_autostart(on: bool) -> Result<(), String> {
         return Ok(());
     }
     if on {
-        crate::installer::register_autostart();
-        return Ok(());
+        return crate::installer::register_autostart().map_err(|_| "autostart_failed".to_string());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    crate::uninstall::remove_run_value(&exe).map(|_| ()).map_err(|_| "autostart_failed".to_string())
+    autostart_off_result(crate::uninstall::remove_run_value(&exe))
+}
+
+/// Turning autostart off succeeded only when no Run value starts Konak any more: one that points at
+/// another Konak exe stays, and says so (`autostart_other_value`).
+fn autostart_off_result(removed: Result<String, String>) -> Result<(), String> {
+    match removed {
+        Ok(s) if s.starts_with(crate::uninstall::KEPT_ELSEWHERE) => Err("autostart_other_value".into()),
+        Ok(_) => Ok(()),
+        Err(_) => Err("autostart_failed".into()),
+    }
 }
 
 /// Writes a temporary file, flushes it and renames it over `path`.
@@ -472,6 +481,15 @@ pub(crate) mod tests {
         assert_eq!(saved.language, "en");
         assert!(text.contains("\"password_set\": false"));
         assert!(save(&paths, &Settings { language: "xx".into(), ..Settings::default() }).is_err());
+    }
+
+    #[test]
+    fn autostart_off_reports_a_value_that_stays() {
+        assert_eq!(autostart_off_result(Ok("removed".into())), Ok(()));
+        assert_eq!(autostart_off_result(Ok("no Run value".into())), Ok(()));
+        let other = format!("{}: Konak REG_SZ \"D:\\Other\\konak.exe\" --autostart", crate::uninstall::KEPT_ELSEWHERE);
+        assert_eq!(autostart_off_result(Ok(other)).unwrap_err(), "autostart_other_value");
+        assert_eq!(autostart_off_result(Err("access denied".into())).unwrap_err(), "autostart_failed");
     }
 
     #[test]
