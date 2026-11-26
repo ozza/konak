@@ -28,7 +28,7 @@ use time::{Date, Month, PrimitiveDateTime, Time};
 const EXT: &str = ".konakbackup";
 const PARTIAL: &str = ".partial";
 /// Room kept free beyond the estimate.
-const SPACE_MARGIN: u64 = 64 << 20;
+pub(crate) const SPACE_MARGIN: u64 = 64 << 20;
 /// How long an app's turn waits for another operation on it to end.
 const BUSY_WAIT: Duration = Duration::from_secs(10 * 60);
 const HISTORY_MAX: usize = 30;
@@ -526,7 +526,7 @@ pub fn parse_sizes(text: &str, ids: &[&str]) -> Result<Vec<AppSize>, String> {
 }
 
 /// Bytes free for this user on the volume holding `dir` (a drive or a network share).
-fn free_space(dir: &Path) -> Result<u64, String> {
+pub(crate) fn free_space(dir: &Path) -> Result<u64, String> {
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let wide: Vec<u16> = dir.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
     let mut avail = 0u64;

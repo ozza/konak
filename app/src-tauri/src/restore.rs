@@ -33,6 +33,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const RESTORE_SH: &str = include_str!("../scripts/app-restore.sh");
+/// Bytes free on the distro's disk (the VHDX's ext4, which holds /var/lib/konak).
+const FREE_SH: &str = "set -euo pipefail\ndf -B1 --output=avail /var/lib </dev/null | tail -n 1\n";
+/// Room kept free on the distro's disk beyond what a restore brings: the running apps' databases
+/// share it.
+const DISTRO_MARGIN: u64 = 1 << 30;
 /// Names tried for an app: its backed-up name, then `-2` up to this.
 const MAX_SUFFIX: u32 = 9;
 
@@ -172,6 +177,14 @@ pub trait Target {
     /// Starts the app's own containers again after a rollback (it was running before).
     fn start_old(&self, id: &str) -> Result<(), String>;
     fn name_free_on_lan(&self, name: &str) -> Result<bool, String>;
+    /// Bytes free on the distro's disk.
+    fn distro_free(&self) -> Result<u64, String>;
+    /// Bytes free for this user on the Windows volume that holds `dir` (or would: the nearest
+    /// folder that exists on the way).
+    fn windows_free(&self, dir: &Path) -> Result<u64, String> {
+        let existing = dir.ancestors().find(|a| a.is_dir()).ok_or_else(|| format!("no folder on the way to {}", dir.display()))?;
+        crate::backup::free_space(existing)
+    }
 }
 
 pub struct DistroTarget<'a>(pub &'a Paths);
@@ -240,6 +253,14 @@ impl Target for DistroTarget<'_> {
     }
     fn name_free_on_lan(&self, name: &str) -> Result<bool, String> {
         apps::name_free_on_lan(self.0, name)
+    }
+    fn distro_free(&self) -> Result<u64, String> {
+        let out = shell::distro_script(&self.0.distro, FREE_SH, &[]);
+        let text = out.text.trim();
+        if !out.ok {
+            return Err(format!("cannot read the distro's free space: {}", shell::tail(text, 2)));
+        }
+        text.lines().last().and_then(|l| l.trim().parse().ok()).ok_or_else(|| format!("cannot read the distro's free space: {text}"))
     }
 }
 
@@ -511,6 +532,8 @@ struct Verified {
     manifest: Manifest,
     total: u64,
     ca: Option<(String, String)>,
+    /// Every entry's path and size, from `checksums.json`.
+    sizes: Vec<(String, u64)>,
 }
 
 fn verify(path: &Path, pw: &SecretString, ctx: &Ctx) -> Result<Verified, Failed> {
@@ -550,7 +573,8 @@ fn verify(path: &Path, pw: &SecretString, ctx: &Ctx) -> Result<Verified, Failed>
             read_err(e)
         })?;
     let total = sums.entries.iter().skip(1).map(|e| e.size).sum();
-    Ok(Verified { manifest, total, ca: crt.zip(key) })
+    let sizes = sums.entries.into_iter().map(|e| (e.path, e.size)).collect();
+    Ok(Verified { manifest, total, ca: crt.zip(key), sizes })
 }
 
 // ---- The run ---------------------------------------------------------------------------------------
@@ -646,6 +670,7 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
     let before = stamp(file);
     let v = verify(file, &pw, ctx)?;
     crate::log(paths, &format!("restore: {} verified ({} apps in it; chosen {:?}, replace {}, photos {}, media {})", file.display(), v.manifest.apps.len(), req.apps, req.replace, req.photos, req.media));
+    check_space(paths, target, req, &v.sizes).map_err(|e| fail("verify", e))?;
 
     ctx.step("konak", None, 0);
     restore_ca(paths, ctx.host, &v, req.ca, state.apps.is_empty(), summary);
@@ -676,6 +701,48 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
         }
     }
     walked.map_err(|e| fail("verify", if e.code == "backup_restore_failed" { "backup_damaged" } else { e.code }))
+}
+
+/// What a restore writes, per destination: the distro (the chosen apps' folders and volumes) and
+/// the Photos and Media folders (when chosen). The sizes are the archive's, so a merge that finds
+/// identical files needs less. `restore_no_space` when a destination lacks room for its part plus
+/// a margin; nothing has been changed then. Photos and Media on one Windows volume count together.
+fn check_space(paths: &Paths, target: &dyn Target, req: &Request, sizes: &[(String, u64)]) -> Result<(), String> {
+    let (mut apps, mut photos, mut media) = (0u64, 0u64, 0u64);
+    for (path, size) in sizes {
+        match fmt::parse_entry(path) {
+            Some(Entry::AppFolder { app, .. } | Entry::AppVolume { app, .. }) if req.apps.contains(&app) => apps += size,
+            Some(Entry::Photos(_)) if req.photos => photos += size,
+            Some(Entry::Media(_)) if req.media => media += size,
+            _ => {}
+        }
+    }
+    if apps > 0 {
+        let free = target.distro_free()?;
+        if free < apps + DISTRO_MARGIN {
+            crate::log(paths, &format!("restore: {free} bytes free in the distro, {apps} needed plus a margin"));
+            return Err("restore_no_space".into());
+        }
+    }
+    let volume = |p: &Path| p.ancestors().last().map(|r| r.to_string_lossy().to_lowercase());
+    let mut wanted: Vec<(&Path, u64)> = vec![];
+    for (dir, need) in [(paths.photos.as_path(), photos), (paths.media.as_path(), media)] {
+        if need == 0 {
+            continue;
+        }
+        match wanted.iter_mut().find(|(d, _)| volume(d) == volume(dir)) {
+            Some(w) => w.1 += need,
+            None => wanted.push((dir, need)),
+        }
+    }
+    for (dir, need) in wanted {
+        let free = target.windows_free(dir)?;
+        if free < need + crate::backup::SPACE_MARGIN {
+            crate::log(paths, &format!("restore: {free} bytes free for {}, {need} needed plus a margin", dir.display()));
+            return Err("restore_no_space".into());
+        }
+    }
+    Ok(())
 }
 
 fn restore_ca(paths: &Paths, host: &dyn Host, v: &Verified, chosen: bool, fresh: bool, summary: &mut Summary) {
@@ -1079,6 +1146,9 @@ mod tests {
         lan_taken: Vec<String>,
         fail_up: Vec<String>,
         data: Data,
+        /// Free bytes in the distro and on Windows; `None`: plenty.
+        distro_free: Option<u64>,
+        windows_free: Option<u64>,
     }
 
     struct FakeSink {
@@ -1155,6 +1225,12 @@ mod tests {
         fn name_free_on_lan(&self, name: &str) -> Result<bool, String> {
             self.call(format!("lan {name}"));
             Ok(!self.lan_taken.iter().any(|t| t == name))
+        }
+        fn distro_free(&self) -> Result<u64, String> {
+            Ok(self.distro_free.unwrap_or(u64::MAX / 2))
+        }
+        fn windows_free(&self, _: &Path) -> Result<u64, String> {
+            Ok(self.windows_free.unwrap_or(u64::MAX / 2))
         }
     }
 
@@ -1406,6 +1482,28 @@ mod tests {
         assert!(!calls.iter().any(|c| c.contains("immich") || c.contains("pgdata") || c.contains("extra")), "{calls:?}");
         assert_eq!(summary2.failed, [AppFailure { id: "nextcloud".into(), error: "backup_damaged: volume nextcloud is missing".into() }]);
         assert!(target2.calls.borrow().is_empty(), "{:?}", target2.calls.borrow());
+    }
+
+    #[test]
+    fn a_restore_without_room_changes_nothing() {
+        let (paths, file) = setup("space", &[]);
+        let photo = vec![7u8; 100_000];
+        write_backup(&file, &[app("nextcloud", "cloud-f", false, &["db", "nextcloud"])], None, &[("big.jpg", &photo)]);
+        let host = FakeHost::default();
+        // The app's streams are 3000 + 2 * 5000 bytes: just below them plus the margin is too little.
+        let tight_distro = FakeTarget { distro_free: Some(DISTRO_MARGIN + 12_000), ..Default::default() };
+        let no_distro = restore(&paths, &host, &tight_distro, &request(&file, &["nextcloud"], false, false));
+        let enough_distro = FakeTarget { distro_free: Some(DISTRO_MARGIN + 13_000), ..Default::default() };
+        let ok = restore(&paths, &host, &enough_distro, &request(&file, &["nextcloud"], false, false));
+        let tight_photos = FakeTarget { windows_free: Some(crate::backup::SPACE_MARGIN + 99_999), ..Default::default() };
+        let no_photos = restore(&paths, &host, &tight_photos, &request(&file, &[], false, true));
+        let photos_written = paths.photos.join("big.jpg").exists();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(no_distro.unwrap_err(), fail("verify", "restore_no_space"));
+        assert!(tight_distro.calls.borrow().is_empty(), "{:?}", tight_distro.calls.borrow());
+        assert!(ok.unwrap().failed.is_empty());
+        assert_eq!(no_photos.unwrap_err(), fail("verify", "restore_no_space"));
+        assert!(!photos_written);
     }
 
     #[test]
