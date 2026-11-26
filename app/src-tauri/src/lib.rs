@@ -335,8 +335,12 @@ fn spawn_op_notify(
         k.busy.lock().unwrap().remove(&id);
         // Apply a changed app list to Caddy and mDNS now rather than at the next tick.
         k.sup.tick();
+        // Panel and MCP operations both get a result line in install.log.
         let (state, error) = match result {
-            Ok(()) => ("done", None),
+            Ok(()) => {
+                log(&k.paths, &format!("{op} {id} done"));
+                ("done", None)
+            }
             Err(e) => {
                 log(&k.paths, &format!("{op} {id} failed: {e}"));
                 ("failed", Some(e))
