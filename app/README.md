@@ -107,11 +107,16 @@ updates (`/UPDATE`) skip the cleanup. Then it runs `konak.exe --uninstall [--pur
 - `--purge` also runs `wsl --unregister` on the distro and deletes the Konak home. The default home is
   also the install folder, so the installed files are left for the uninstaller. A path guard refuses
   any folder that holds the Media/Photos folders, the user profile, AppData or Temp, and any folder that
-  is neither the default home nor a folder with Konak's `state.json`.
+  is neither the default home nor a folder with Konak's `state.json`. The home is deleted only when
+  WSL then certainly no longer lists the distro; if WSL cannot be asked, the home is kept and the log
+  says so.
 - The Media and Photos folders under the user profile are never deleted.
 - Without `--purge` the data, the distro and the CA stay in `%LOCALAPPDATA%\Konak`. The uninstaller
   deletes only its own files there, so a reinstall picks up where it left off.
 - Every action is logged to `%TEMP%\konak-uninstall-<unix time>.log`, and a summary is printed on stdout.
+
+Firewall rules created by earlier builds (with `\\?\` program paths) may read as missing after an
+upgrade; "Repair network access" in the panel recreates them with one UAC prompt.
 
 Dev runs use the same overrides as above (`KONAK_HOME`, `KONAK_DISTRO`, `KONAK_MEDIA`, `KONAK_PHOTOS`),
 but only together with `KONAK_SKIP_ELEVATION=1`; otherwise `--uninstall` ignores them and works on
