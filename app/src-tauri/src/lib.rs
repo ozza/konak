@@ -503,14 +503,15 @@ fn serve_pipe(app: AppHandle) {
 /// One connection: handled, or `busy` past the cap; then the reply and its audit line.
 fn serve_connection(app: &AppHandle, conn: &pipe::Pipe, gate: &pipe::Gate) {
     let requester = conn.client_pid().and_then(requester_image);
+    let mut sent = pipe::Sent::default();
     let (reply, id, linger) = match gate.enter() {
         Some(_pass) => {
-            let (r, id) = pipe_request(app, conn, requester.as_deref());
+            let (r, id) = pipe_request(app, conn, requester.as_deref(), &mut sent);
             (r, id, Duration::from_secs(5))
         }
         None => (reply(pipe::Outcome::Busy, "Konak is handling other requests; try again shortly"), None, Duration::from_secs(1)),
     };
-    log(&app.state::<Konak>().paths, &pipe::audit_line(id.as_deref(), requester.as_deref(), &reply));
+    log(&app.state::<Konak>().paths, &pipe::audit_line(id.as_deref(), requester.as_deref(), &sent, &reply));
     if let Ok(line) = serde_json::to_vec(&reply) {
         let _ = conn.write_line(&line);
     }
@@ -522,8 +523,8 @@ fn reply(outcome: pipe::Outcome, error: impl Into<String>) -> pipe::Reply {
 }
 
 /// One pipe request: read, validate, ask the user, and run it only if approved. Also returns the
-/// confirmation id once the request got one.
-fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>) -> (pipe::Reply, Option<String>) {
+/// confirmation id once the request got one, and fills `sent` for the audit line.
+fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>, sent: &mut pipe::Sent) -> (pipe::Reply, Option<String>) {
     use pipe::Outcome::{Busy, Denied, Failed, Invalid};
     let k = app.state::<Konak>();
     let line = match conn.read_line(pipe::MAX_REQUEST, Some(Instant::now() + pipe::REQUEST_TIMEOUT)) {
@@ -532,6 +533,7 @@ fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>) -> 
         Err(pipe::ReadError::Timeout) => return (reply(Invalid, "no request received"), None),
         Err(pipe::ReadError::Closed) => return (reply(Invalid, "connection closed"), None),
     };
+    *sent = pipe::sent(&line);
     let req = match pipe::parse(&line) {
         Ok(r) => r,
         Err(e) => return (reply(Invalid, e), None),
@@ -578,11 +580,13 @@ fn pipe_request(app: &AppHandle, conn: &pipe::Pipe, requester: Option<&str>) -> 
     let _ = app.emit("mcp-confirm", &payload);
 
     let approved = wait_for_answer(&k, conn, &id, &answer);
-    log(&k.paths, &format!("mcp request {id}: {}", if approved { "approved" } else { "denied" }));
     if !approved {
+        // `serve_connection`'s audit line is the denial's only line.
         let _ = app.emit("mcp-confirm-closed", serde_json::json!({ "id": id }));
         return (reply(Denied, "the person did not approve this in the Konak window (or did not answer within 5 minutes); nothing was changed"), Some(id));
     }
+    // Logged now: the operation may run for minutes before the audit line is written.
+    log(&k.paths, &format!("mcp request {id}: approved"));
     // Lets the panel open the app's page before the operation starts.
     let _ = app.emit("mcp-approved", serde_json::json!({ "id": id, "op": payload.op, "app": payload.app }));
     (execute(app, &req, &action), Some(id))
