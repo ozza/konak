@@ -62,7 +62,8 @@ case "$cmd" in
   extract)
     [ ! -e "$dir" ] || { echo "$dir exists" >&2; exit 3; }
     rm -rf --one-file-system "$staging"
-    mkdir -p "$staging"
+    # A fresh install has no app folder yet.
+    mkdir -p "$staging" "$apps"
     # GNU tar refuses members with "..", strips leading "/", and creates symlinks only at the end, so
     # nothing is written outside the staging folder.
     tar -C "$staging" --numeric-owner --xattrs --xattrs-include='*' --acls -xpf -
