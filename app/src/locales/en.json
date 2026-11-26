@@ -252,7 +252,7 @@
       "forward_policy": "Shared network policy unchanged",
       "stale_netavark": "No stale container network rules",
       "keepalive": "Environment stays awake",
-      "port80_owner": "Port 80 belongs to Konak",
+      "port80_owner": "Port 80",
       "lan_adapter": "Right network adapter",
       "wsl_networking": "WSL networking"
     },

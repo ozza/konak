@@ -443,7 +443,11 @@ pub fn run(opts: Opts) -> i32 {
     } else {
         r.step("konak home", Ok(format!("kept {}", paths.home.display())));
     }
-    r.step("media and photos", Ok(format!("kept {} and {}", paths.media.display(), paths.photos.display())));
+    let folders: Vec<String> = [&paths.media, &paths.photos]
+        .iter()
+        .map(|p| format!("{} {}", if p.exists() { "kept" } else { "not present:" }, p.display()))
+        .collect();
+    r.step("media and photos", Ok(folders.join("; ")));
 
     let summary = format!("Konak uninstall {}\n{}\nlog: {}", if r.failed { "finished with errors" } else { "done" }, r.summary.join("\n"), r.log_path.display());
     r.log("done");

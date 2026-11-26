@@ -252,7 +252,7 @@
       "forward_policy": "Paylaşılan ağ politikası değişmemiş",
       "stale_netavark": "Eski konteyner ağı kuralı yok",
       "keepalive": "Ortam uyanık kalıyor",
-      "port80_owner": "80 numaralı port Konak'ta",
+      "port80_owner": "80 numaralı port",
       "lan_adapter": "Doğru ağ bağdaştırıcısı",
       "wsl_networking": "WSL ağ modu"
     },

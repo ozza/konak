@@ -387,6 +387,7 @@ fn run_install(paths: &Paths, m: &Manifest, name: &str, claimed: bool, hook: Opt
     }
     if up {
         windows_side_check(&m.id, m.port, PORT_WINDOW)?;
+        crate::log(paths, &format!("install {}: 127.0.0.1:{} answers from Windows", m.id, m.port));
     }
     Ok(())
 }
