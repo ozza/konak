@@ -8,6 +8,7 @@
   import AppDetail from "./AppDetail.svelte";
   import Header from "./Header.svelte";
   import HostDetail from "./HostDetail.svelte";
+  import SettingsPage from "./SettingsPage.svelte";
   import LogsDrawer from "./LogsDrawer.svelte";
   import McpConfirm from "./McpConfirm.svelte";
   import Notices from "./Notices.svelte";
@@ -59,7 +60,7 @@
   let showCert = $derived(catalog.some((m) => m.https) || (apps?.some((a) => a.https) ?? false));
   // Nothing picked yet, or the picked app was removed: the first app, else This PC.
   let shown = $derived(
-    view === "add" || view === "host" || apps?.some((a) => a.id === view) ? view : apps === null ? null : (apps[0]?.id ?? "host"),
+    view === "add" || view === "host" || view === "settings" || apps?.some((a) => a.id === view) ? view : apps === null ? null : (apps[0]?.id ?? "host"),
   );
   let current = $derived(apps?.find((a) => a.id === shown) ?? null);
 
@@ -159,7 +160,14 @@
 </script>
 
 <div class="flex min-h-dvh flex-col">
-  <Header engineRunning={host ? host.distro.running : null} {networkCategory} {homeUrl} onadd={() => select("add")} />
+  <Header
+    engineRunning={host ? host.distro.running : null}
+    {networkCategory}
+    {homeUrl}
+    settingsOpen={shown === "settings"}
+    onadd={() => select("add")}
+    onsettings={() => select("settings")}
+  />
 
   <div class="flex flex-1 flex-wrap items-stretch">
     <Sidebar {apps} selected={shown ?? ""} {host} {checks} {busy} onselect={select} />
@@ -182,6 +190,8 @@
           onopen={select}
           ondismiss={(id) => (failed = patch(failed, id, null))}
         />
+      {:else if shown === "settings"}
+        <SettingsPage apps={apps ?? []} />
       {:else if shown === "host"}
         <HostDetail {host} {checks} {diagnosing} {diagError} appCount={apps?.length ?? 0} {showCert} {summary} {homeUrl} ondiagnose={diagnose} />
       {:else if current && apps}

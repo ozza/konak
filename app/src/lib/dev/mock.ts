@@ -91,6 +91,30 @@ const status = () => ({
   summary: q.has("setup") ? null : { minutes: 11.4, uac_prompts: 1, reboots: 1, download_mb: 612 },
 });
 
+let settings = {
+  language: "system",
+  autostart: true,
+  backup: {
+    location: q.has("nobackup") ? null : "D:\\Backups\\Konak",
+    schedule: { kind: "daily", time: "03:00", weekday: 1 },
+    keep: 7,
+    include: { apps: [] as string[], photos: true, media: false },
+    password_set: !q.has("nobackup"),
+  },
+};
+const day = 86400;
+let backups = [
+  { file: "konak-20261125-030000.konakbackup", created_unix: 1795575600, size_bytes: 3.2 * GB, apps: ["jellyfin", "nextcloud", "forgejo"], status: "ok", error: null },
+  { file: "konak-20261124-030000.konakbackup", created_unix: 1795575600 - day, size_bytes: 3.1 * GB, apps: ["jellyfin", "nextcloud"], status: "failed", error: "location_full" },
+];
+
+function progress(event: string, steps: [string, string | null][], ms = 600) {
+  steps.forEach(([step, app], i) =>
+    setTimeout(() => emit(event, { state: "running", step, app, done_bytes: i, total_bytes: steps.length, error: null }), i * ms),
+  );
+  setTimeout(() => emit(event, { state: "done", step: "done", app: null, done_bytes: null, total_bytes: null, error: null }), steps.length * ms);
+}
+
 function op(id: string, name: Op, work: () => string | null, ms = 1500) {
   emit("app-progress", { id, op: name, state: "running", error: null });
   wait(ms).then(() => {
@@ -159,6 +183,42 @@ export function installMock() {
         case "mcp_answer":
           console.info("[mock] mcp answer", a.id, a.approve);
           return null;
+        case "get_settings":
+          return settings;
+        case "save_settings":
+          if (a.settings.backup.keep < 1 || a.settings.backup.keep > 100) throw "invalid_keep";
+          settings = { ...a.settings, backup: { ...a.settings.backup, password_set: settings.backup.password_set } };
+          return settings;
+        case "set_backup_password":
+          await wait(300);
+          if (settings.backup.password_set && a.current !== "correct horse battery") throw "wrong_password";
+          settings = { ...settings, backup: { ...settings.backup, password_set: true } };
+          return null;
+        case "list_backups":
+          return backups;
+        case "backup_now":
+          progress("backup-progress", [["prepare", null], ["app", "jellyfin"], ["app", "nextcloud"], ["photos", null], ["verify", null]]);
+          setTimeout(() => (backups = [{ ...backups[0], file: "konak-new.konakbackup", created_unix: Date.now() / 1000 }, ...backups]), 3100);
+          return null;
+        case "inspect_backup":
+          await wait(400);
+          if (a.password !== "correct horse battery") throw "wrong_password";
+          return {
+            format: 1,
+            konak_version: "0.1.0",
+            created_unix: 1795575600,
+            apps: [
+              { id: "jellyfin", name: "movies", claimed: true, stopped: false, size_bytes: 120 * 1_048_576 },
+              { id: "vaultwarden", name: "vault", claimed: true, stopped: false, size_bytes: 3 * 1_048_576 },
+            ],
+            photos_bytes: 2.4 * GB,
+            media_bytes: null,
+          };
+        case "restore_backup":
+          progress("restore-progress", (a.apps as string[]).map((id) => ["app", id] as [string, string | null]));
+          return null;
+        case "plugin:dialog|open":
+          return a.options?.directory ? "E:\\KonakBackups" : "D:\\Backups\\Konak\\konak-20261125-030000.konakbackup";
         case "restart_app":
           return op(a.id, "restart", () => null);
         case "claim_app":

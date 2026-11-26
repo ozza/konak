@@ -1,13 +1,20 @@
-// Minimal i18n: locale follows the Windows display language (WebView2 reports it as
-// navigator.language). Turkish if it is Turkish, otherwise English.
+// Minimal i18n: by default the locale follows the Windows display language (WebView2 reports it as
+// navigator.language): Turkish if it is Turkish, otherwise English. The Language setting overrides
+// it; it is applied once at start (`setLanguage` before the panel renders), and a change reloads.
 import en from "../locales/en.json";
 import tr from "../locales/tr.json";
 
 type Dict = { [key: string]: string | Dict };
 const dicts: Record<string, Dict> = { en, tr };
 
-export const locale = navigator.language.toLowerCase().startsWith("tr") ? "tr" : "en";
+const systemLocale = navigator.language.toLowerCase().startsWith("tr") ? "tr" : "en";
+export let locale: "tr" | "en" = systemLocale;
 document.documentElement.lang = locale;
+
+export function setLanguage(language: "system" | "tr" | "en") {
+  locale = language === "system" ? systemLocale : language;
+  document.documentElement.lang = locale;
+}
 
 function lookup(dict: Dict, key: string): string | undefined {
   let node: string | Dict | undefined = dict;

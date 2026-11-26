@@ -40,6 +40,47 @@ export type AppProgress = { id: string; op: Op; state: "running" | "done" | "fai
 export type ErrorText = { message: string | null; details: string | null };
 export type Failure = ErrorText & { op: Op };
 
+// Settings and backups: the contract in .audit/plan-backup-settings.md.
+export type Language = "system" | "tr" | "en";
+export type Schedule = { kind: "off" | "daily" | "weekly"; time: string; weekday: number };
+export type Settings = {
+  language: Language;
+  autostart: boolean;
+  backup: {
+    location: string | null;
+    schedule: Schedule;
+    keep: number;
+    /** `apps` empty = every installed app. */
+    include: { apps: string[]; photos: boolean; media: boolean };
+    /** Read-only: whether a backup password is stored. */
+    password_set: boolean;
+  };
+};
+export type BackupEntry = {
+  file: string;
+  created_unix: number;
+  size_bytes: number;
+  apps: string[];
+  status: "ok" | "failed" | "unverified";
+  error: string | null;
+};
+export type BackupManifest = {
+  format: number;
+  konak_version: string;
+  created_unix: number;
+  apps: { id: string; name: string; claimed: boolean; stopped: boolean; size_bytes: number }[];
+  photos_bytes: number | null;
+  media_bytes: number | null;
+};
+export type BackupProgress = {
+  state: "running" | "done" | "failed";
+  step: string;
+  app: string | null;
+  done_bytes: number | null;
+  total_bytes: number | null;
+  error: string | null;
+};
+
 /** Ports Caddy serves on. `http` is not 80 while another program holds port 80 (`port80_owner`). */
 export type WebPorts = { http: number; https: number; port80_owner: string | null };
 /** Used until the backend reports the home page URL, which carries the port on the fallback. */
