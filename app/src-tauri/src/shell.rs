@@ -113,6 +113,93 @@ pub fn distro_read<T>(distro: &str, script: &str, args: &[&str], read: impl FnOn
     Ok(value)
 }
 
+/// Runs a base64-encoded script given as `$1`, with the arguments after it as `$1...`, so the
+/// script's stdin stays free for data.
+const RUN_B64: &str = r#"s=$(printf %s "$1" | base64 -d) || exit 2; shift; eval "$s""#;
+
+/// A bash script run as root inside the distro whose stdin is fed by the caller through `Write`
+/// (binary-safe), for streams too large to hold: the counterpart of `distro_read`. The script travels
+/// as an argument, so it must not read stdin for anything but the data. stdout and stderr are
+/// collected meanwhile. End it with `finish` (closes stdin, waits, fails on a non-zero exit) or
+/// `abort` (kills it).
+pub struct DistroWriter {
+    child: Child,
+    stdin: Option<std::process::ChildStdin>,
+    output: Vec<std::thread::JoinHandle<String>>,
+}
+
+impl DistroWriter {
+    pub fn start(distro: &str, script: &str, args: &[&str]) -> Result<Self, String> {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(script.replace("\r\n", "\n"));
+        let mut full = vec!["-d", distro, "-u", "root", "--exec", "bash", "-c", RUN_B64, "konak", &b64];
+        full.extend_from_slice(args);
+        let mut child = hidden("wsl.exe")
+            .args(&full)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("cannot start wsl.exe: {e}"))?;
+        let collect = |mut r: Box<dyn std::io::Read + Send>| {
+            std::thread::spawn(move || {
+                let mut buf = vec![];
+                let _ = r.read_to_end(&mut buf);
+                decode(&buf)
+            })
+        };
+        let mut output = vec![];
+        if let Some(o) = child.stdout.take() {
+            output.push(collect(Box::new(o)));
+        }
+        if let Some(e) = child.stderr.take() {
+            output.push(collect(Box::new(e)));
+        }
+        Ok(DistroWriter { stdin: child.stdin.take(), child, output })
+    }
+
+    fn wait(&mut self) -> (Option<std::process::ExitStatus>, String) {
+        self.stdin = None;
+        let status = self.child.wait().ok();
+        let text = self.output.drain(..).map(|h| h.join().unwrap_or_default()).collect::<Vec<_>>().join("");
+        (status, text)
+    }
+
+    /// Closes stdin and waits; the script's output, or an error with its last lines.
+    pub fn finish(mut self) -> Result<String, String> {
+        match self.wait() {
+            (Some(s), text) if s.success() => Ok(text),
+            (s, text) => Err(format!("exit {:?}: {}", s.and_then(|s| s.code()), tail(&text, 4))),
+        }
+    }
+
+    /// Kills the script and returns the end of what it printed (why a write may have failed).
+    pub fn abort(mut self) -> String {
+        let _ = self.child.kill();
+        tail(&self.wait().1, 4)
+    }
+}
+
+impl Drop for DistroWriter {
+    /// Dropped without `finish` or `abort` (an early return, a panic): the script is killed, so it
+    /// never treats a cut stream as complete.
+    fn drop(&mut self) {
+        if !self.output.is_empty() {
+            let _ = self.child.kill();
+            self.wait();
+        }
+    }
+}
+
+impl std::io::Write for DistroWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.stdin.as_mut().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stdin.as_mut().map_or(Ok(()), |s| s.flush())
+    }
+}
+
 /// A Windows job object that kills every process in it when its last handle closes.
 pub struct Job(HANDLE);
 
