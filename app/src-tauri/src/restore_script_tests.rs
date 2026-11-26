@@ -215,7 +215,8 @@ fn extract_refuses_links_devices_and_setuid_in_a_distro() {
         (h, path.to_string())
     };
     let top = (header(tar::EntryType::Directory, 0o755, 0), "vaultwarden".to_string());
-    let cases: Vec<(&str, Vec<(tar::Header, String)>, bool)> = vec![
+    type Members = Vec<(tar::Header, String)>;
+    let cases: Vec<(&str, Members, bool)> = vec![
         ("bind source to /", vec![top.clone(), sym("vaultwarden/vw-data", "/")], false),
         ("compose.yml to wsl.conf", vec![top.clone(), sym("vaultwarden/compose.yml", "/etc/wsl.conf")], false),
         ("relative link inside", vec![top.clone(), file("vaultwarden/a", 0o644), sym("vaultwarden/b", "a")], false),

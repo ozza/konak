@@ -775,6 +775,14 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
         return Err(fail("verify", "backup_not_set_up"));
     }
     let pw = password(paths, &req.password).map_err(|e| fail("verify", e))?;
+    // An earlier turn that did not finish (its rollback failed at the last start): tried again
+    // now; while it stays, no restore runs, so its record is never overwritten.
+    if inflight_file(paths).is_file() {
+        recover(paths, target);
+        if inflight_file(paths).is_file() {
+            return Err(fail("verify", "restore_aside_exists"));
+        }
+    }
     let file = Path::new(&req.path);
     let before = stamp(file);
     let v = verify(file, &pw, ctx)?;
@@ -1689,6 +1697,25 @@ mod tests {
         assert_eq!(after_old, [old]);
         assert!(!commit_marker_left);
         assert!(failed_marker_left, "a failed rollback is tried again at the next start");
+    }
+
+    #[test]
+    fn a_leftover_turn_is_recovered_before_a_new_restore_and_blocks_it_while_it_stays() {
+        let (paths, file) = setup("leftover", &[]);
+        write_backup(&file, &[app("forgejo", "git-l", false, &[])], None, &[]);
+        let leftover = Inflight { app: "vaultwarden".into(), had_old: false, old: None, phase: "restore".into() };
+        mark(&paths, &leftover).unwrap();
+        let failing = FakeTarget { fail_rollback: true, ..Default::default() };
+        let blocked = restore(&paths, &FakeHost::default(), &failing, &request(&file, &["forgejo"], false, false));
+        let kept = inflight_file(&paths).exists();
+        let target = FakeTarget::default();
+        let ok = restore(&paths, &FakeHost::default(), &target, &request(&file, &["forgejo"], false, false));
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(blocked.unwrap_err(), fail("verify", "restore_aside_exists"));
+        assert_eq!(*failing.calls.borrow(), ["rollback vaultwarden false"], "nothing else touched");
+        assert!(kept);
+        assert_eq!(ok.unwrap().restored.len(), 1);
+        assert_eq!(target.calls.borrow()[0], "rollback vaultwarden false");
     }
 
     #[test]

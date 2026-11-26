@@ -1042,7 +1042,11 @@ pub fn run() {
                     // An app a backup stopped before Konak ended is started again, and one a restore
                     // left half done goes back to its previous data.
                     backup::recover(&paths, &backup::DistroApps(&paths));
-                    restore::recover(&paths, &restore::DistroTarget(&paths));
+                    // Under the run guard, so a restore started meanwhile does not race it (that one
+                    // recovers the app itself first).
+                    if let Ok(_guard) = backup::Guard::acquire() {
+                        restore::recover(&paths, &restore::DistroTarget(&paths));
+                    }
                     sup.start();
                 });
             }
