@@ -257,34 +257,50 @@ pub fn register_autostart() {
     }
 }
 
+/// `-EncodedCommand` argument: base64 of the UTF-16LE text, as powershell.exe expects it.
+fn encode_command(text: &str) -> String {
+    use base64::Engine;
+    let bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// The elevated process's `-EncodedCommand`: `script` as a script block, called with `params` as an
+/// inline base64 JSON argument. The elevated process reads no file a same-user process could swap
+/// while the UAC prompt is open (base64 has no quote characters, so the argument needs no escaping).
+fn elevated_command(script: &str, params: &serde_json::Value) -> String {
+    use base64::Engine;
+    let p = base64::engine::general_purpose::STANDARD.encode(params.to_string());
+    encode_command(&format!("& {{\n{script}\n}} -ParamsB64 '{p}'"))
+}
+
+/// The non-elevated launcher: one UAC prompt, waits, and exits with the elevated exit code (1223
+/// when the prompt was declined).
+fn elevation_launcher(encoded: &str) -> String {
+    format!("try {{ $p = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}'; exit $p.ExitCode }} catch {{ exit 1223 }}")
+}
+
 /// One UAC prompt for everything that needs admin. Returns whether a reboot is required.
 fn elevate(paths: &Paths, enable_wsl: bool, set_private_interface: i64) -> Result<bool, String> {
     let dir = paths.home.join("scripts");
     let _ = std::fs::create_dir_all(&dir);
-    let script = dir.join("elevated.ps1");
-    let params = dir.join("elevated-params.json");
+    // The elevated script derives this same path from the home and refuses reparse points on it.
     let result = dir.join("elevated-result.json");
     let _ = std::fs::remove_file(&result);
-    std::fs::write(&script, ELEVATED_PS1).map_err(|e| e.to_string())?;
+    // Files earlier builds left for the elevated step to read; nothing reads them any more.
+    let _ = std::fs::remove_file(dir.join("elevated.ps1"));
+    let _ = std::fs::remove_file(dir.join("elevated-params.json"));
     let p = serde_json::json!({
         "enable_wsl": enable_wsl,
+        "home": paths.home,
+        "bin": paths.bin,
         "programs": [paths.caddy(), paths.mdns()],
         "set_private_interface": set_private_interface,
-        "result_file": result,
     });
-    std::fs::write(&params, p.to_string()).map_err(|e| e.to_string())?;
-
-    let q = |p: &std::path::Path| p.to_string_lossy().replace('\'', "''");
-    let cmd = format!(
-        "try {{ $p = Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{}\" -ParamFile \"{}\"'; exit $p.ExitCode }} catch {{ exit 1223 }}",
-        q(&script),
-        q(&params)
-    );
-    let out = shell::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &cmd]);
+    let out = shell::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &elevation_launcher(&elevated_command(ELEVATED_PS1, &p))]);
     if out.code == Some(1223) {
         return Err("uac_declined".into());
     }
-    let text = std::fs::read_to_string(&result).map_err(|_| format!("elevated step left no result: {}", tail(&out.text, 5)))?;
+    let text = std::fs::read_to_string(&result).map_err(|_| format!("elevated step left no result (exit {:?}): {}", out.code, tail(&out.text, 5)))?;
     let v: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.to_string())?;
     if let Some(errors) = v["errors"].as_array().filter(|a| !a.is_empty()) {
         return Err(format!("elevated step failed: {}", errors.iter().map(|e| e.as_str().unwrap_or("")).collect::<Vec<_>>().join("; ")));
@@ -516,6 +532,73 @@ mod tests {
         assert_eq!(r.err().as_deref(), Some("state_unreadable"));
         assert!(text.contains("forg"), "the damaged file is left as it is");
         assert!(State::from_json("").is_err());
+    }
+
+    fn decode_command(encoded: &str) -> String {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        String::from_utf16(&bytes.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()).unwrap()
+    }
+
+    fn params(home: &std::path::Path, programs: &[std::path::PathBuf]) -> serde_json::Value {
+        serde_json::json!({"enable_wsl": false, "home": home, "bin": home.join("bin"), "programs": programs, "set_private_interface": 0})
+    }
+
+    #[test]
+    fn the_elevated_step_gets_script_and_parameters_inline() {
+        use base64::Engine;
+        let home = std::path::PathBuf::from(r"C:\Users\u\AppData\Local\Konak");
+        let p = params(&home, &[home.join(r"bin\caddy.exe"), home.join(r"bin\mdns-responder.exe")]);
+        let encoded = elevated_command(ELEVATED_PS1, &p);
+        let text = decode_command(&encoded);
+        assert!(text.starts_with("& {\n") && text.contains(ELEVATED_PS1));
+        let arg = text.rsplit_once("-ParamsB64 '").unwrap().1.strip_suffix('\'').unwrap();
+        let back: serde_json::Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(arg).unwrap()).unwrap();
+        assert_eq!(back, p);
+        assert!(!back.to_string().contains("result_file"), "the result path is never an input");
+        let launcher = elevation_launcher(&encoded);
+        assert!(launcher.contains("-Verb RunAs") && launcher.contains(&format!("-EncodedCommand {encoded}'")) && !launcher.contains("-File "));
+        // Both command lines stay far below Windows' 32767-character limit.
+        assert!(launcher.len() < 24_000, "{}", launcher.len());
+    }
+
+    /// Runs the real elevated script, not elevated, on inputs it must refuse before it changes
+    /// anything: no firewall rule is touched, no network profile, no WSL install.
+    fn run_elevated_unprivileged(p: &serde_json::Value) -> shell::Out {
+        shell::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", &elevated_command(ELEVATED_PS1, p)])
+    }
+
+    #[test]
+    fn the_elevated_script_refuses_programs_outside_bin() {
+        let paths = temp_paths("elevated-bin");
+        let dir = paths.home.join("scripts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = run_elevated_unprivileged(&params(&paths.home, &[paths.home.join(r"bin\..\evil.exe"), std::path::PathBuf::from(r"C:\Windows\System32\cmd.exe")]));
+        let result = std::fs::read_to_string(dir.join("elevated-result.json"));
+        let _ = std::fs::remove_dir_all(&paths.home);
+        let v: serde_json::Value = serde_json::from_str(result.unwrap_or_else(|e| panic!("{e}: {}", out.text)).trim_start_matches('\u{feff}')).unwrap();
+        let errors = v["errors"].to_string();
+        assert!(errors.contains("firewall: refused") && errors.contains("cmd.exe") && errors.contains("evil.exe"), "{errors}");
+        assert_eq!(v["reboot_required"], false);
+    }
+
+    #[test]
+    fn the_elevated_script_never_writes_through_a_reparse_point() {
+        let paths = temp_paths("elevated-junction");
+        let target = paths.home.with_extension("target");
+        std::fs::create_dir_all(&paths.home).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        // A junction needs no admin rights: <home>\scripts -> elsewhere.
+        let j = shell::run("cmd.exe", &["/c", "mklink", "/J", &paths.home.join("scripts").to_string_lossy(), &target.to_string_lossy()]);
+        assert!(j.ok, "{}", j.text);
+        // No programs: even past the path check, the firewall step would refuse.
+        let out = run_elevated_unprivileged(&params(&paths.home, &[]));
+        let written = target.join("elevated-result.json").exists();
+        let _ = std::fs::remove_dir(paths.home.join("scripts"));
+        let _ = std::fs::remove_dir_all(&paths.home);
+        let _ = std::fs::remove_dir_all(&target);
+        assert_eq!(out.code, Some(3), "{}", out.text);
+        assert!(!written);
     }
 
     #[test]
