@@ -1,6 +1,6 @@
 # Konak app
 
-Tauri 2 + SvelteKit (SPA) + Tailwind CSS. It started as the spike step 5 installer and may become the product skeleton.
+Konak's desktop app: Tauri 2 + SvelteKit (SPA) + Tailwind CSS.
 
 What it does today:
 - **Installs the platform from scratch:**
@@ -15,7 +15,7 @@ What it does today:
 1. `npm install`
 2. `powershell -File scripts/prepare-bins.ps1`
    - Downloads Caddy and checks its checksum.
-   - Builds `spike/mdns-responder`.
+   - Builds `mdns-responder` (Konak's own mDNS responder, in `app/mdns-responder/`).
    - Puts both into `src-tauri/resources/bin/`, which is git-ignored.
 3. `npm run tauri build`. The result is a per-user NSIS installer at `src-tauri/target/release/bundle/nsis/`.
 
@@ -44,7 +44,7 @@ These environment variables keep a dev run away from a real install:
 | `KONAK_SKIP_ELEVATION=1` | Skips the UAC step and autostart registration. WSL must already be installed, and no firewall rules are added, so other LAN devices cannot reach the app. |
 | `KONAK_DEV_AUTO_INSTALL=1` | Starts the install at launch, without a click |
 
-Port 80 and 443 on the LAN IP must be free. Stop the spike's Caddy and its `konak-podman` distro first.
+Port 80 and 443 on the LAN IP must be free. Stop any other web server that holds them first.
 
 ### Checking the local CA against Caddy
 `cargo test write_root_and_caddyfile -- --ignored` with `KONAK_CA_CHECK_DIR` set writes a root and a

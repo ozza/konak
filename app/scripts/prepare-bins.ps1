@@ -1,6 +1,6 @@
 # Puts the Windows binaries Konak bundles into src-tauri/resources/bin (git-ignored):
 #  - caddy.exe: Caddy v2.11.9 from the official release, SHA-512 checked against the release checksums.
-#  - mdns-responder.exe: built from spike/mdns-responder.
+#  - mdns-responder.exe: built from app/mdns-responder.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $bin = Join-Path $root 'src-tauri\resources\bin'
@@ -19,7 +19,7 @@ if ($expected -ne $actual) { throw "caddy checksum mismatch" }
 Expand-Archive "$tmp\$zipName" -DestinationPath $tmp -Force
 Copy-Item "$tmp\caddy.exe" $bin -Force
 
-$crate = Join-Path (Split-Path $root -Parent) 'spike\mdns-responder'
+$crate = Join-Path $root 'mdns-responder'
 # cargo reports progress on stderr, which Windows PowerShell 5.1 turns into errors under 'Stop'.
 $ErrorActionPreference = 'Continue'
 cargo build --release --quiet --manifest-path "$crate\Cargo.toml"
