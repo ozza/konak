@@ -39,8 +39,21 @@
     ${If} ${Silent}
       StrCpy $R9 "$R9 --silent"
     ${EndIf}
-    DetailPrint "Konak cleanup: --uninstall$R9"
+    DetailPrint "Konak cleanup: --uninstall$R9 (waits up to 3 minutes for a running backup or restore)"
     ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --uninstall$R9' $R7
     DetailPrint "Konak cleanup finished with exit code $R7 (log in %TEMP%\konak-uninstall-*.log)"
+    ; 3 (uninstall::REFUSED_EXIT): a backup or restore still runs and nothing was changed. Stop
+    ; here, before Tauri's section deletes any file, so Konak and its uninstall entry stay whole.
+    ; Silent runs end with exit code 3.
+    ${If} $R7 = 3
+      ${If} $LANGUAGE = 1055 ; Turkish
+        StrCpy $R8 "Konak şu anda bir yedekleme veya geri yükleme yapıyor. Hiçbir şey kaldırılmadı.$\n$\nİşlem bitince (ya da yedeklemeyi Konak'ın Ayarlar sayfasından iptal edince) Konak'ı yeniden kaldırın."
+      ${Else}
+        StrCpy $R8 "Konak is running a backup or a restore right now. Nothing was removed.$\n$\nUninstall Konak again once it is done (or after cancelling the backup on Konak's Settings page)."
+      ${EndIf}
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$R8" /SD IDOK
+      SetErrorLevel 3
+      Abort "$R8"
+    ${EndIf}
   ${EndIf}
 !macroend

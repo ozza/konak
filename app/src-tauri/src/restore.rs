@@ -1782,6 +1782,7 @@ mod tests {
         let m = Manifest {
             format: fmt::FORMAT,
             konak_version: "0.1.0".into(),
+            install_id: None,
             created_unix: 1,
             apps: apps.to_vec(),
             photos_bytes: (!photos.is_empty()).then_some(photos.iter().map(|p| p.1.len() as u64).sum()),

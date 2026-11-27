@@ -404,8 +404,13 @@ fn purge_home(paths: &Paths, exe: &Path) -> Result<String, String> {
     }
 }
 
-/// How long an uninstall waits for a running backup or restore to end.
-const BACKUP_WAIT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// How long an uninstall waits for a running backup or restore to end: what a user sits through
+/// (the NSIS hook says so before it starts waiting).
+const BACKUP_WAIT: std::time::Duration = std::time::Duration::from_secs(3 * 60);
+
+/// The exit code of an uninstall refused because a backup or restore still runs. `hooks.nsh`
+/// aborts the uninstaller on it, so no file is deleted and the uninstall entry stays.
+pub const REFUSED_EXIT: i32 = 3;
 
 /// Waits until no backup or restore runs in the Konak being uninstalled; an error (and nothing
 /// changed) when one still runs after `max`.
@@ -421,6 +426,21 @@ fn wait_for_backup(paths: &Paths, exe: &Path, max: std::time::Duration) -> Resul
     }
 }
 
+/// Waits up to `max` for a backup or restore in the Konak being uninstalled; `Some(REFUSED_EXIT)`
+/// (and nothing changed) when one still runs: stopping Konak now would cut it in the middle.
+fn refuse_while_busy(paths: &Paths, exe: &Path, max: std::time::Duration, r: &mut Report) -> Option<i32> {
+    let o = wait_for_backup(paths, exe, max);
+    let busy = o.is_err();
+    r.step("backup or restore", o);
+    if !busy {
+        return None;
+    }
+    let summary = format!("Konak uninstall refused\n{}\nlog: {}", r.summary.join("\n"), r.log_path.display());
+    r.log("refused");
+    println!("{summary}");
+    Some(REFUSED_EXIT)
+}
+
 /// Runs the uninstall and returns the process exit code.
 pub fn run(opts: Opts) -> i32 {
     let exe = std::env::current_exe().unwrap_or_default();
@@ -430,15 +450,8 @@ pub fn run(opts: Opts) -> i32 {
     let mut r = Report { file, log_path, summary: vec![], failed: false };
     r.log(&format!("uninstall: purge={} silent={} exe={} home={} distro={}", opts.purge, opts.silent, exe.display(), paths.home.display(), paths.distro));
 
-    let o = wait_for_backup(&paths, &exe, BACKUP_WAIT);
-    let busy = o.is_err();
-    r.step("backup or restore", o);
-    if busy {
-        // Nothing is changed: stopping Konak now would cut a restore or backup in the middle.
-        let summary = format!("Konak uninstall refused\n{}\nlog: {}", r.summary.join("\n"), r.log_path.display());
-        r.log("refused");
-        println!("{summary}");
-        return 1;
+    if let Some(code) = refuse_while_busy(&paths, &exe, BACKUP_WAIT, &mut r) {
+        return code;
     }
     let o = stop_processes(&paths, &exe);
     r.step("processes", o);
@@ -507,6 +520,9 @@ mod tests {
         std::fs::write(paths.home.join("op-running.json"), format!(r#"{{"pid":{},"op":"restore"}}"#, child.id())).unwrap();
         let busy = wait_for_backup(&paths, Path::new(&image), std::time::Duration::ZERO);
         let other_exe = wait_for_backup(&paths, Path::new(r"C:\x\konak.exe"), std::time::Duration::ZERO);
+        let report = || Report { file: None, log_path: PathBuf::from("x.log"), summary: vec![], failed: false };
+        let refused = refuse_while_busy(&paths, Path::new(&image), std::time::Duration::ZERO, &mut report());
+        let not_refused = refuse_while_busy(&paths, Path::new(r"C:\x\konak.exe"), std::time::Duration::ZERO, &mut report());
         let _ = child.kill();
         let _ = child.wait();
         // The marker a run writes is removed when the run ends.
@@ -521,6 +537,21 @@ mod tests {
         assert!(e.contains("a restore still runs") && e.contains("nothing was changed"), "{e}");
         assert!(other_exe.is_ok(), "another program with that pid is not Konak");
         assert!(written && removed);
+        // Refused with the code the NSIS hook aborts on (not 1, which it would ignore).
+        assert_eq!((refused, not_refused), (Some(REFUSED_EXIT), None));
+    }
+
+    #[test]
+    fn the_nsis_uninstaller_stops_when_the_cleanup_is_refused() {
+        let hooks = include_str!("../windows/hooks.nsh");
+        let pre = &hooks[hooks.find("!macro NSIS_HOOK_PREUNINSTALL").unwrap()..];
+        let after_exec = &pre[pre.find("ExecWait '\"$INSTDIR\\${MAINBINARYNAME}.exe\" --uninstall$R9' $R7").unwrap()..];
+        let check = after_exec.find(&format!("${{If}} $R7 = {REFUSED_EXIT}")).expect("the hook checks the refused code");
+        let abort = after_exec[check..].find("Abort").expect("and aborts");
+        assert!(after_exec[check..check + abort].contains("SetErrorLevel 3"), "a silent run ends with exit code 3");
+        assert!(after_exec.find("!macroend").unwrap() > check + abort, "inside the uninstall hook");
+        assert!(BACKUP_WAIT <= std::time::Duration::from_secs(5 * 60), "a wait a user sits through");
+        assert!(pre.contains("waits up to 3 minutes") && BACKUP_WAIT == std::time::Duration::from_secs(180), "the hook says how long it waits");
     }
 
     #[test]

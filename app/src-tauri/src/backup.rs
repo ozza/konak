@@ -4,7 +4,9 @@
 //! Consistency, "the safe way" of the plan: apps are archived one at a time, each stopped
 //! (`docker-compose stop`) while its folder and named volumes stream out of the distro, then started
 //! again if it was running. Every database is thus copied at rest. The Windows Photos and Media
-//! folders are plain files, copied before the apps' parts while the apps run.
+//! folders are plain files, copied after the apps' parts while the apps run, so an app's database
+//! never refers to a file the archive misses. An app that cannot be stopped or is busy for too long
+//! is left out with a note, and the run goes on (status `partial`).
 //!
 //! A run writes `<location>\konak-<YYYYMMDD-HHMMSS>.konakbackup.partial`, re-reads all of it
 //! (decrypt and checksums), and only then renames it to `.konakbackup`. A failure removes the
@@ -58,6 +60,18 @@ pub fn running() -> bool {
     RUNNING.load(Ordering::SeqCst)
 }
 
+/// The op of the run in progress (`RunMarker`), for the panel and the tray's Quit.
+static CURRENT_OP: Mutex<Option<String>> = Mutex::new(None);
+
+/// What holds the run guard: `backup`, `restore`, or `recover` (the startup recovery of an
+/// unfinished run, or the moment before a run's marker is written); `None` when nothing runs.
+pub fn running_op() -> Option<String> {
+    if !running() {
+        return None;
+    }
+    Some(CURRENT_OP.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| "recover".into()))
+}
+
 /// While a backup or restore runs, `op-running.json` in the Konak home names this process, so an
 /// uninstall (another process) waits for it instead of stopping Konak in the middle of it.
 pub struct RunMarker(PathBuf);
@@ -72,13 +86,76 @@ impl RunMarker {
         if let Err(e) = settings::write_atomic(&file, serde_json::json!({ "pid": std::process::id(), "op": op }).to_string().as_bytes()) {
             crate::log(paths, &format!("{op}: cannot write {}: {e}", file.display()));
         }
+        *CURRENT_OP.lock().unwrap_or_else(|e| e.into_inner()) = Some(op.to_string());
         RunMarker(file)
     }
 }
 
 impl Drop for RunMarker {
     fn drop(&mut self) {
+        *CURRENT_OP.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+// ---- Cancel and keep-awake ---------------------------------------------------------------------
+
+static CANCEL: AtomicBool = AtomicBool::new(false);
+/// The error (and history/event code) of a backup the user cancelled.
+pub const CANCELLED: &str = "backup_cancelled";
+
+/// Asks the running backup to stop: it ends at the next file or chunk, the app being archived is
+/// started again, and the partial file is deleted. `backup_not_running` when no backup runs (a
+/// restore cannot be cancelled).
+pub fn cancel() -> Result<(), String> {
+    if running_op().as_deref() != Some("backup") {
+        return Err("backup_not_running".into());
+    }
+    CANCEL.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+fn cancelled() -> bool {
+    CANCEL.load(Ordering::SeqCst)
+}
+
+/// A reader that fails with `CANCELLED` once a cancel was asked for.
+struct Cancellable<R>(R);
+
+impl<R: std::io::Read> std::io::Read for Cancellable<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if cancelled() {
+            return Err(std::io::Error::other(CANCELLED));
+        }
+        self.0.read(buf)
+    }
+}
+
+/// Keeps the PC from going to sleep while a backup or restore runs on this thread
+/// (`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`), and lets it sleep again when
+/// dropped. The display may still turn off; no power setting is changed.
+pub struct KeepAwake(());
+
+impl KeepAwake {
+    pub fn new() -> KeepAwake {
+        use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED};
+        // SAFETY: plain call; it only changes this thread's execution state.
+        unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+        KeepAwake(())
+    }
+}
+
+impl Default for KeepAwake {
+    fn default() -> Self {
+        KeepAwake::new()
+    }
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS};
+        // SAFETY: as in `new`.
+        unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
     }
 }
 
@@ -96,18 +173,24 @@ pub fn running_elsewhere(paths: &Paths, exe: &Path) -> Option<(u32, String)> {
 /// `backup-progress` event payload (contract).
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Progress {
-    /// running | done | failed
+    /// running | done | failed | cancelled
     pub state: &'static str,
-    /// prepare | app | konak | photos | media | verify | finish | done
+    /// prepare | konak | app | photos | media | verify | finish | done
     pub step: &'static str,
     pub app: Option<String>,
     pub done_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
     /// A locale code (`errors.<code>`): `backup_app_failed` and `backup_failed` stand for any
-    /// error without a code of its own.
+    /// error without a code of its own; `backup_cancelled` with state `cancelled`.
     pub error: Option<String>,
     /// The technical text behind `error`, redacted; for details on demand.
     pub detail: Option<String>,
+    /// With state `done`: how many files or apps were left out, or changed while they were read
+    /// (0 for a complete backup; the history lists it as `partial` then).
+    pub skipped: Option<u64>,
+    /// With state `done`: the first of those, e.g. `photos/2026/a.jpg (changed while it was read)`
+    /// or `apps/jellyfin (left out: busy)`, redacted.
+    pub notes: Option<Vec<String>>,
 }
 
 /// The running Konak: progress events and the busy set the panel's app operations use.
@@ -118,12 +201,18 @@ pub trait Host {
     fn release(&self, id: &str, result: &Result<(), String>);
 }
 
-/// Stopping and starting an app's containers.
+/// The apps' side of a run: stopping and starting an app's containers, and reading its data.
 pub trait Apps {
     /// Whether any of the app's containers runs.
     fn running(&self, id: &str) -> Result<bool, String>;
     fn stop(&self, id: &str) -> Result<(), String>;
     fn start(&self, id: &str) -> Result<(), String>;
+    /// Folder and named-volume sizes of the given apps.
+    fn sizes(&self, ids: &[&str]) -> Result<Vec<AppSize>, String>;
+    /// Hands the tar stream of the app's folder to `read`.
+    fn read_folder(&self, id: &str, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String>;
+    /// Hands `podman volume export <podman_name>` to `read`.
+    fn read_volume(&self, podman_name: &str, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String>;
 }
 
 /// `Apps` through docker-compose in Konak's distro.
@@ -147,6 +236,16 @@ impl Apps for DistroApps<'_> {
     fn start(&self, id: &str) -> Result<(), String> {
         let out = crate::apps::compose(self.0, id, "start");
         out.ok.then_some(()).ok_or_else(|| format!("start of {id} failed: {}", shell::tail(&out.text, 4)))
+    }
+    fn sizes(&self, ids: &[&str]) -> Result<Vec<AppSize>, String> {
+        let out = shell::distro_script(&self.0.distro, SIZES_SH, ids);
+        parse_sizes(&out.text, ids)
+    }
+    fn read_folder(&self, id: &str, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String> {
+        shell::distro_read(&self.0.distro, FOLDER_SH, &[id], |out| read(out))
+    }
+    fn read_volume(&self, podman_name: &str, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String> {
+        shell::distro_read(&self.0.distro, VOLUME_SH, &[podman_name], |out| read(out))
     }
 }
 
@@ -259,26 +358,61 @@ pub fn reset_schedule(paths: &Paths) {
     write_baseline(paths, now());
 }
 
-/// The slot whose skip was last logged, so a skipped slot is logged once, not every tick.
+/// The slot a skip was last logged for, so a slot kept due is logged once, not every tick.
 static SKIP_LOGGED: Mutex<Option<PrimitiveDateTime>> = Mutex::new(None);
 
-/// Called every supervisor tick: true when a scheduled backup should start now (the caller starts
-/// it). A due run with no password or no location is skipped with one log line, and runs once they
-/// are set (the slot is still due then).
-pub fn scheduled_due(paths: &Paths) -> bool {
-    let s = settings::load(paths);
-    let sched = &s.backup.schedule;
-    if sched.kind == "off" || running() {
+fn read_baseline(paths: &Paths) -> Option<u64> {
+    std::fs::read(schedule_file(paths)).ok().and_then(|b| serde_json::from_slice::<ScheduleState>(&b).ok()).map(|b| b.baseline_unix)
+}
+
+/// Logs `msg` once for the current scheduled slot.
+pub fn log_once_per_slot(paths: &Paths, msg: &str) {
+    let sched = settings::load(paths).backup.schedule;
+    let slot = local_of(now()).and_then(|local| latest_slot(&sched, local));
+    let mut logged = SKIP_LOGGED.lock().unwrap_or_else(|e| e.into_inner());
+    if *logged != slot {
+        *logged = slot;
+        crate::log(paths, msg);
+    }
+}
+
+/// A drive letter that is not there at all (a USB disk that is unplugged). Instant, no disk or
+/// network access; UNC paths and present drives are not checked here (the run checks them).
+fn drive_missing(location: &str) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    let b = location.as_bytes();
+    if !(b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') {
         return false;
     }
-    let t = now();
-    let baseline = match std::fs::read(schedule_file(paths)).ok().and_then(|b| serde_json::from_slice::<ScheduleState>(&b).ok()) {
-        Some(b) => b.baseline_unix,
-        None => {
-            write_baseline(paths, t);
-            return false;
-        }
+    let root: Vec<u16> = format!("{}:\\", b[0] as char).encode_utf16().chain(Some(0)).collect();
+    // SAFETY: NUL-terminated string. 1 is DRIVE_NO_ROOT_DIR.
+    unsafe { GetDriveTypeW(root.as_ptr()) == 1 }
+}
+
+/// Called every supervisor tick: true when a scheduled backup should start now. The caller starts
+/// it and only then marks the slot as done (`consume_slot`), so a run that cannot start keeps it
+/// due. While no location or no password is set, the slot is passed over (the starting point moves
+/// on), so the first scheduled run after setting them is the next slot, not one at once. While the
+/// location's drive is missing, the slot stays due (logged once) and runs when the drive is back.
+pub fn scheduled_due(paths: &Paths) -> bool {
+    !running() && schedule_check(paths, &settings::load(paths), now())
+}
+
+fn schedule_check(paths: &Paths, s: &settings::Settings, t: u64) -> bool {
+    let sched = &s.backup.schedule;
+    if sched.kind == "off" {
+        return false;
+    }
+    let Some(baseline) = read_baseline(paths) else {
+        write_baseline(paths, t);
+        return false;
     };
+    // A run made while the clock was wrong in the future would hold every later slot back.
+    if baseline > t + FUTURE_SLACK {
+        crate::log(paths, &format!("backup schedule: its last run ({baseline}) is in the future; counting from now"));
+        write_baseline(paths, t);
+        return false;
+    }
     let (Some(last), Some(local)) = (local_of(baseline), local_of(t)) else { return false };
     if !due(sched, last, local) {
         return false;
@@ -291,16 +425,20 @@ pub fn scheduled_due(paths: &Paths) -> bool {
         None
     };
     if let Some(reason) = reason {
-        let slot = latest_slot(sched, local);
-        let mut logged = SKIP_LOGGED.lock().unwrap_or_else(|e| e.into_inner());
-        if *logged != slot {
-            *logged = slot;
-            crate::log(paths, &format!("scheduled backup skipped: {reason}"));
-        }
+        crate::log(paths, &format!("scheduled backup skipped: {reason}"));
+        write_baseline(paths, t);
         return false;
     }
-    write_baseline(paths, t);
+    if s.backup.location.as_deref().is_some_and(drive_missing) {
+        log_once_per_slot(paths, "scheduled backup waits: the backup folder's drive is not connected");
+        return false;
+    }
     true
+}
+
+/// Marks the current slot as done; called once a scheduled run has started.
+pub fn consume_slot(paths: &Paths) {
+    write_baseline(paths, now());
 }
 
 // ---- History and listing ---------------------------------------------------------------------------
@@ -311,13 +449,28 @@ struct HistoryEntry {
     created_unix: u64,
     size_bytes: u64,
     apps: Vec<String>,
-    /// ok | failed
+    /// ok | partial (a file with left-out entries) | failed | cancelled
     status: String,
     /// A locale code, as in `Progress`.
     error: Option<String>,
     #[serde(default)]
     detail: Option<String>,
     step: Option<String>,
+    /// As in `Progress`.
+    #[serde(default)]
+    skipped: u64,
+    #[serde(default)]
+    notes: Vec<String>,
+    /// Started by the schedule, not by "Back up now".
+    #[serde(default)]
+    scheduled: bool,
+}
+
+/// How many notes a history entry or a `done` event keeps.
+const NOTES_MAX: usize = 10;
+
+fn has_file(status: &str) -> bool {
+    status == "ok" || status == "partial"
 }
 
 fn history_file(paths: &Paths) -> PathBuf {
@@ -347,12 +500,30 @@ pub struct BackupEntry {
     pub created_unix: u64,
     pub size_bytes: u64,
     pub apps: Vec<String>,
-    /// ok (verified when written) | failed (no file) | unverified (a Konak file this PC has no
-    /// record of, e.g. copied from another PC)
+    /// ok (verified when written) | partial (verified, but some files or apps were left out:
+    /// `skipped`, `notes`) | failed (no file) | unverified (a Konak file this PC has no record of,
+    /// e.g. copied from another PC)
     pub status: &'static str,
     /// A failed run's locale code, and its technical text.
     pub error: Option<String>,
     pub detail: Option<String>,
+    pub skipped: u64,
+    pub notes: Vec<String>,
+}
+
+/// `last_scheduled_backup` (contract): the newest run the schedule started.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ScheduledRun {
+    pub created_unix: u64,
+    /// ok | partial | failed | cancelled
+    pub status: String,
+    pub error: Option<String>,
+    pub detail: Option<String>,
+    pub skipped: u64,
+}
+
+pub fn last_scheduled(paths: &Paths) -> Option<ScheduledRun> {
+    load_history(paths).into_iter().find(|h| h.scheduled).map(|h| ScheduledRun { created_unix: h.created_unix, status: h.status, error: h.error, detail: h.detail, skipped: h.skipped })
 }
 
 fn same_file(a: &str, b: &str) -> bool {
@@ -382,7 +553,7 @@ pub fn list(paths: &Paths) -> Vec<BackupEntry> {
         let mut pw: Option<Option<SecretString>> = None;
         for (name, meta) in konak_files(Path::new(&loc)) {
             let file = Path::new(&loc).join(&name).to_string_lossy().to_string();
-            let known = history.iter().find(|h| h.status == "ok" && same_file(&h.file, &file));
+            let known = history.iter().find(|h| has_file(&h.status) && same_file(&h.file, &file));
             let (created_unix, apps) = match known {
                 Some(h) => (h.created_unix, h.apps.clone()),
                 None => {
@@ -393,11 +564,17 @@ pub fn list(paths: &Paths) -> Vec<BackupEntry> {
                     }
                 }
             };
-            out.push(BackupEntry { file, created_unix, size_bytes: meta.len(), apps, status: if known.is_some() { "ok" } else { "unverified" }, error: None, detail: None });
+            let status = match known {
+                Some(h) if h.status == "partial" => "partial",
+                Some(_) => "ok",
+                None => "unverified",
+            };
+            let (skipped, notes) = known.map(|h| (h.skipped, h.notes.clone())).unwrap_or_default();
+            out.push(BackupEntry { file, created_unix, size_bytes: meta.len(), apps, status, error: None, detail: None, skipped, notes });
         }
     }
     for h in history.iter().filter(|h| h.status == "failed") {
-        out.push(BackupEntry { file: h.file.clone(), created_unix: h.created_unix, size_bytes: 0, apps: h.apps.clone(), status: "failed", error: h.error.clone(), detail: h.detail.clone() });
+        out.push(BackupEntry { file: h.file.clone(), created_unix: h.created_unix, size_bytes: 0, apps: h.apps.clone(), status: "failed", error: h.error.clone(), detail: h.detail.clone(), skipped: 0, notes: vec![] });
     }
     out.sort_by_key(|e| std::cmp::Reverse(e.created_unix));
     out
@@ -464,23 +641,60 @@ pub fn prune_candidates(mut found: Vec<(String, u64)>, keep: usize) -> Vec<Strin
     found.into_iter().skip(keep).map(|(n, _)| n).collect()
 }
 
+fn install_id_file(paths: &Paths) -> PathBuf {
+    paths.home.join("install-id")
+}
+
+/// This Konak install's id (32 hex digits), made once and kept in the Konak home. Backups carry it
+/// in their manifest, so retention deletes only this install's files (a shared NAS folder, or a
+/// file copied in by hand, is left alone).
+pub fn install_id(paths: &Paths) -> String {
+    let file = install_id_file(paths);
+    if let Ok(s) = std::fs::read_to_string(&file) {
+        let s = s.trim();
+        if s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return s.to_string();
+        }
+    }
+    let mut bytes = [0u8; 16];
+    if let Err(e) = getrandom::fill(&mut bytes) {
+        crate::log(paths, &format!("backup: no random install id ({e}); using the time and pid"));
+        bytes[..8].copy_from_slice(&std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().to_le_bytes()[..8]);
+        bytes[8..12].copy_from_slice(&std::process::id().to_le_bytes());
+    }
+    let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    if let Err(e) = settings::write_atomic(&file, id.as_bytes()) {
+        crate::log(paths, &format!("backup: cannot save the install id: {e}"));
+    }
+    id
+}
+
 /// Deletes Konak's backups beyond the newest `keep` in `dir`. `written` is the file this run just
 /// wrote and verified: it takes one of the `keep` places and is never deleted. Of the other files
 /// with Konak's name pattern and magic line, only those that open with `password` (age header,
 /// manifest entry and its tar checksum: a quick check, not a full verify, which would read every
-/// file end to end) and whose manifest time is not in the future are counted, ranked by that time,
-/// and may be deleted. A file that does not open (another password, planted, damaged) or has a
-/// future time is neither counted nor deleted, with a log line. Returns the deleted names.
+/// file end to end), were made by this install (its id in the manifest, or, for files of earlier
+/// builds without an id, listed in this install's history) and whose manifest time is not in the
+/// future are counted, ranked by that time, and may be deleted. Any other file (another password,
+/// another install, planted, damaged, a future time) is neither counted nor deleted, with a log
+/// line. Returns the deleted names.
 pub fn prune(paths: &Paths, dir: &Path, keep: usize, password: &SecretString, written: &Path) -> Vec<String> {
     let written_name = written.file_name().map(|n| n.to_string_lossy().to_string());
     let limit = now() + FUTURE_SLACK;
+    let ours = install_id(paths);
+    let history = load_history(paths);
     let mut counted = vec![];
     for (name, _) in konak_files(dir) {
         if Some(&name) == written_name.as_ref() {
             continue;
         }
-        match fmt::open(&dir.join(&name), password) {
+        let path = dir.join(&name);
+        let in_history = || history.iter().any(|h| has_file(&h.status) && same_file(&h.file, &path.to_string_lossy()));
+        match fmt::open(&path, password) {
             Ok(b) if b.manifest.created_unix > limit => crate::log(paths, &format!("backup retention: {name} not counted, its time is in the future")),
+            Ok(b) if !(b.manifest.install_id.as_deref() == Some(ours.as_str()) || (b.manifest.install_id.is_none() && in_history())) => {
+                crate::log(paths, &format!("backup retention: {name} not counted, another Konak install made it"))
+            }
             Ok(b) => counted.push((name, b.manifest.created_unix)),
             Err(e) => crate::log(paths, &format!("backup retention: {name} not counted, it does not open with the current password ({})", e.code)),
         }
@@ -657,7 +871,7 @@ struct Ctx<'a> {
 impl Ctx<'_> {
     fn step(&self, step: &'static str, app: Option<&str>, done: u64) {
         self.last.set(Some(Instant::now()));
-        self.host.progress(&Progress { state: "running", step, app: app.map(String::from), done_bytes: Some(done.min(self.total.get())), total_bytes: Some(self.total.get()), error: None, detail: None });
+        self.host.progress(&Progress { state: "running", step, app: app.map(String::from), done_bytes: Some(done.min(self.total.get())), total_bytes: Some(self.total.get()), error: None, detail: None, skipped: None, notes: None });
     }
     fn bytes(&self, step: &'static str, app: Option<&str>, done: u64) {
         if self.last.get().is_none_or(|t| t.elapsed() >= Duration::from_millis(500)) {
@@ -717,11 +931,17 @@ fn inflight_file(paths: &Paths) -> PathBuf {
     paths.home.join("backup-inflight.json")
 }
 
+/// The app an unfinished backup left stopped, if any (what `recover` will start again).
+pub fn inflight_app(paths: &Paths) -> Option<String> {
+    let body = std::fs::read(inflight_file(paths)).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&body).ok().and_then(|v| v["app"].as_str().map(String::from))
+}
+
 /// At start: an app left stopped by a backup that did not finish is started again (unless the user
 /// had stopped it). Returns its id.
 pub fn recover(paths: &Paths, apps: &dyn Apps) -> Option<String> {
-    let body = std::fs::read(inflight_file(paths)).ok()?;
-    let id = serde_json::from_slice::<serde_json::Value>(&body).ok().and_then(|v| v["app"].as_str().map(String::from));
+    std::fs::metadata(inflight_file(paths)).ok()?;
+    let id = inflight_app(paths);
     if let Some(id) = &id {
         let user_stopped = State::load(paths).apps.iter().find(|a| &a.id == id).is_none_or(|a| a.stopped);
         if !user_stopped {
@@ -733,19 +953,23 @@ pub fn recover(paths: &Paths, apps: &dyn Apps) -> Option<String> {
     id
 }
 
-/// One backup run, start to end. `_guard` proves no other run is going on. On failure the partial
-/// file is gone and every app is back in its previous running state. The result is recorded in the
-/// history and reported through `host` (`done` or `failed`).
-pub fn run(paths: &Paths, host: &dyn Host, apps: &dyn Apps, _guard: &Guard, log_n: u8) -> Result<PathBuf, Failed> {
+/// One backup run, start to end. `_guard` proves no other run is going on; `scheduled` says who
+/// started it (the history keeps it for `last_scheduled`). On failure or cancel the partial file is
+/// gone and every app is back in its previous running state. The result is recorded in the history
+/// and reported through `host` (`done`, `failed` or `cancelled`).
+pub fn run(paths: &Paths, host: &dyn Host, apps: &dyn Apps, _guard: &Guard, log_n: u8, scheduled: bool) -> Result<PathBuf, Failed> {
     let t0 = Instant::now();
+    CANCEL.store(false, Ordering::SeqCst);
     let _marker = RunMarker::new(paths, "backup");
     let created = now();
     let ctx = Ctx { host, total: Cell::new(0), last: Cell::new(None) };
     let mut partial = None;
     let mut ids = vec![];
     let result = run_steps(paths, &ctx, apps, created, log_n, &mut partial, &mut ids);
+    let was_cancelled = result.is_err() && cancelled();
+    CANCEL.store(false, Ordering::SeqCst);
     let file_for_history = match (&result, &partial) {
-        (Ok(p), _) => p.to_string_lossy().to_string(),
+        (Ok((p, _)), _) => p.to_string_lossy().to_string(),
         (Err(_), Some(p)) => p.to_string_lossy().trim_end_matches(PARTIAL).to_string(),
         (Err(_), None) => String::new(),
     };
@@ -757,25 +981,53 @@ pub fn run(paths: &Paths, host: &dyn Host, apps: &dyn Apps, _guard: &Guard, log_
         }
     }
     let redact = |e: &str| crate::redact::Redactor::new(vec![]).apply(e);
+    let entry = |status: &str, size_bytes: u64, error: Option<String>, detail: Option<String>, step: Option<String>, skipped: u64, notes: Vec<String>| HistoryEntry {
+        file: file_for_history.clone(),
+        created_unix: created,
+        size_bytes,
+        apps: ids.clone(),
+        status: status.into(),
+        error,
+        detail,
+        step,
+        skipped,
+        notes,
+        scheduled,
+    };
     match &result {
-        Ok(p) => {
+        Ok((p, left_out)) => {
             let size = std::fs::metadata(p).map_or(0, |m| m.len());
-            crate::log(paths, &format!("backup done: {} ({size} bytes, {:.0} s)", p.display(), t0.elapsed().as_secs_f64()));
-            record(paths, HistoryEntry { file: file_for_history, created_unix: created, size_bytes: size, apps: ids, status: "ok".into(), error: None, detail: None, step: None });
-            host.progress(&Progress { state: "done", step: "done", app: None, done_bytes: Some(ctx.total.get()), total_bytes: Some(ctx.total.get()), error: None, detail: None });
+            let notes: Vec<String> = left_out.iter().take(NOTES_MAX).map(|n| redact(n)).collect();
+            let skipped = left_out.len() as u64;
+            crate::log(paths, &format!("backup done: {} ({size} bytes, {:.0} s, {skipped} left out)", p.display(), t0.elapsed().as_secs_f64()));
+            record(paths, entry(if skipped > 0 { "partial" } else { "ok" }, size, None, None, None, skipped, notes.clone()));
+            host.progress(&Progress { state: "done", step: "done", app: None, done_bytes: Some(ctx.total.get()), total_bytes: Some(ctx.total.get()), error: None, detail: None, skipped: Some(skipped), notes: Some(notes) });
+        }
+        Err(f) if was_cancelled => {
+            crate::log(paths, &format!("backup cancelled at {}{}", f.step, f.app.as_deref().map(|a| format!(" ({a})")).unwrap_or_default()));
+            record(paths, entry("cancelled", 0, Some(CANCELLED.into()), None, Some(f.step.into()), 0, vec![]));
+            host.progress(&Progress { state: "cancelled", step: f.step, app: f.app.clone(), done_bytes: None, total_bytes: None, error: Some(CANCELLED.into()), detail: None, skipped: None, notes: None });
         }
         Err(f) => {
             crate::log(paths, &format!("backup failed at {}{}: {}", f.step, f.app.as_deref().map(|a| format!(" ({a})")).unwrap_or_default(), redact(&f.error)));
             let (error, detail) = crate::redact::code_and_detail(&f.error, if f.step == "app" { "backup_app_failed" } else { "backup_failed" });
-            record(paths, HistoryEntry { file: file_for_history, created_unix: created, size_bytes: 0, apps: ids, status: "failed".into(), error: Some(error.clone()), detail: detail.clone(), step: Some(f.step.into()) });
-            host.progress(&Progress { state: "failed", step: f.step, app: f.app.clone(), done_bytes: None, total_bytes: None, error: Some(error), detail });
+            record(paths, entry("failed", 0, Some(error.clone()), detail.clone(), Some(f.step.into()), 0, vec![]));
+            host.progress(&Progress { state: "failed", step: f.step, app: f.app.clone(), done_bytes: None, total_bytes: None, error: Some(error), detail, skipped: None, notes: None });
         }
     }
-    result
+    result.map(|(p, _)| p)
 }
 
+/// Whether an error came from writing the backup file itself (then the file is unusable and the
+/// run fails), not from the app or the distro.
+fn is_write_error(e: &str) -> bool {
+    e.contains("backup_no_space") || e.contains("cannot write the backup file")
+}
+
+/// The run; on success the backup file and what it left out (from `checksums.json`, plus apps that
+/// were archived but did not start again).
 #[allow(clippy::too_many_arguments)]
-fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8, partial_out: &mut Option<PathBuf>, ids_out: &mut Vec<String>) -> Result<PathBuf, Failed> {
+fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8, partial_out: &mut Option<PathBuf>, ids_out: &mut Vec<String>) -> Result<(PathBuf, Vec<String>), Failed> {
     ctx.step("prepare", None, 0);
     let state = State::try_load(paths).map_err(|e| fail("prepare", e))?;
     if !state.done {
@@ -791,12 +1043,7 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
     let selected = included(&state, &s.backup.include.apps);
     *ids_out = selected.iter().map(|a| a.id.clone()).collect();
     let id_refs: Vec<&str> = ids_out.iter().map(String::as_str).collect();
-    let sizes = if id_refs.is_empty() {
-        vec![]
-    } else {
-        let out = shell::distro_script(&paths.distro, SIZES_SH, &id_refs);
-        parse_sizes(&out.text, &id_refs).map_err(|e| fail("prepare", e))?
-    };
+    let sizes = if id_refs.is_empty() { vec![] } else { apps.sizes(&id_refs).map_err(|e| fail("prepare", e))? };
     let photos = (s.backup.include.photos && paths.photos.is_dir()).then(|| folder_size(&paths.photos));
     let media = (s.backup.include.media && paths.media.is_dir()).then(|| folder_size(&paths.media));
     let app_bytes = |a: &AppSize| a.folder + a.volumes.iter().map(|v| v.bytes).sum::<u64>();
@@ -824,6 +1071,7 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
     let manifest = Manifest {
         format: fmt::FORMAT,
         konak_version: env!("CARGO_PKG_VERSION").into(),
+        install_id: Some(install_id(paths)),
         created_unix: created,
         apps: selected
             .iter()
@@ -859,43 +1107,27 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
     stored.backup.password_set = false;
     w.add_bytes("konak/settings.json", &serde_json::to_vec_pretty(&stored).unwrap(), 0o600, created).map_err(konak)?;
 
-    // Photos and Media before the apps: a restore reads the file in order and must have them in
-    // place before it starts an app that mounts them (Immich checks its folders at start).
-    for (step, root, on) in [("photos", &paths.photos, photos.is_some()), ("media", &paths.media, media.is_some())] {
-        if !on {
-            continue;
-        }
-        ctx.step(step, None, w.bytes());
-        let mut skipped = vec![];
-        walk(root, &mut skipped, step, &mut |rel, abs, meta| {
-            let mtime = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-            match std::fs::File::open(abs) {
-                Ok(f) => {
-                    let r = std::io::BufReader::with_capacity(1 << 20, f);
-                    w.add_reader(&format!("{step}/{rel}"), meta.len(), r, 0o644, mtime).map_err(write_error)?;
-                }
-                Err(e) => w.skip(format!("{step}/{rel} (unreadable: {e})")),
-            }
-            ctx.bytes(step, None, w.bytes());
-            Ok(())
-        })
-        .map_err(|e| fail(step, e))?;
-        if !skipped.is_empty() {
-            crate::log(paths, &format!("backup: {} entries of {step} left out, e.g. {}", skipped.len(), skipped[0]));
-        }
-        for s in skipped {
-            w.skip(s);
-        }
-    }
-
-    for z in &sizes {
+    // The apps first, each at rest; Photos and Media after them (see the module comment).
+    let mut not_started = vec![];
+    'apps: for z in &sizes {
         let id = z.id.as_str();
         let app_fail = |e: String| Failed { step: "app", app: Some(id.to_string()), error: e };
+        let left_out = |w: &mut Writer<_>, why: &str| {
+            crate::log(paths, &format!("backup: {id} left out: {why}"));
+            w.skip(format!("apps/{id} (left out: {})", crate::redact::Redactor::new(vec![]).apply(why)));
+        };
+        if cancelled() {
+            return Err(app_fail(CANCELLED.into()));
+        }
         ctx.step("app", Some(id), w.bytes());
         let deadline = Instant::now() + BUSY_WAIT;
         while !ctx.host.try_busy(id) {
+            if cancelled() {
+                return Err(app_fail(CANCELLED.into()));
+            }
             if Instant::now() >= deadline {
-                return Err(app_fail("busy".into()));
+                left_out(&mut w, "busy");
+                continue 'apps;
             }
             std::thread::sleep(Duration::from_secs(2));
         }
@@ -911,12 +1143,67 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
         if let Err(e) = settings::write_atomic(&inflight_file(paths), serde_json::json!({ "app": id }).to_string().as_bytes()) {
             let e = format!("cannot record the backup in progress: {e}");
             ctx.host.release(id, &Err(e.clone()));
-            return Err(app_fail(e));
+            left_out(&mut w, &e);
+            continue;
         }
-        let result = with_stopped(apps, id, || archive_app(paths, ctx, &mut w, z, created));
+        let before = w.bytes();
+        let archived = Cell::new(false);
+        let result = with_stopped(apps, id, || {
+            let r = archive_app(apps, ctx, &mut w, z, created);
+            archived.set(r.is_ok());
+            r
+        });
         let _ = std::fs::remove_file(inflight_file(paths));
         ctx.host.release(id, &result);
-        result.map_err(app_fail)?;
+        match result {
+            Ok(()) => {}
+            Err(e) if cancelled() => return Err(app_fail(e)),
+            // Its data is all in the file; the app is reported failed through `release`.
+            Err(e) if archived.get() => {
+                crate::log(paths, &format!("backup: {id} was backed up but did not start again: {e}"));
+                not_started.push(format!("apps/{id} (backed up, but did not start again: {e})"));
+            }
+            // Nothing of it was written (it could not be stopped, the distro could not list it):
+            // the file stays whole without it.
+            Err(e) if w.bytes() == before && !is_write_error(&e) => left_out(&mut w, &e),
+            Err(e) => return Err(app_fail(e)),
+        }
+    }
+
+    for (step, root, on) in [("photos", &paths.photos, photos.is_some()), ("media", &paths.media, media.is_some())] {
+        if !on {
+            continue;
+        }
+        ctx.step(step, None, w.bytes());
+        let mut skipped = vec![];
+        walk(root, &mut skipped, step, &mut |rel, abs, meta| {
+            if cancelled() {
+                return Err(CANCELLED.into());
+            }
+            let mtime = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+            match std::fs::File::open(abs) {
+                Ok(f) => {
+                    let r = std::io::BufReader::with_capacity(1 << 20, Cancellable(f));
+                    let whole = w.add_reader(&format!("{step}/{rel}"), meta.len(), r, 0o644, mtime).map_err(write_error)?;
+                    // A file still being written (an upload) grew or changed after its size was
+                    // taken: what was archived is its start only. (One that shrank is flagged by
+                    // the writer.)
+                    if whole && changed_since(abs, meta) {
+                        w.skip(format!("{step}/{rel} (changed while it was read)"));
+                    }
+                }
+                Err(e) => w.skip(format!("{step}/{rel} (unreadable: {e})")),
+            }
+            ctx.bytes(step, None, w.bytes());
+            Ok(())
+        })
+        .map_err(|e| fail(step, e))?;
+        if !skipped.is_empty() {
+            crate::log(paths, &format!("backup: {} entries of {step} left out, e.g. {}", skipped.len(), skipped[0]));
+        }
+        for s in skipped {
+            w.skip(s);
+        }
     }
 
     let (buf, sums) = w.finish(created).map_err(|e| fail("finish", write_error(e)))?;
@@ -927,8 +1214,11 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
         crate::log(paths, &format!("backup: {} files left out or changed while read", sums.skipped.len()));
     }
 
+    // The whole file read back (decrypted, every checksum) before it gets its final name.
     ctx.step("verify", None, ctx.total.get());
-    let (read_back, _) = fmt::verify(&partial, &pw).map_err(|e| fail("verify", e.to_string()))?;
+    let b = fmt::open(&partial, &pw).map_err(|e| fail("verify", e.to_string()))?;
+    let read_back = b.manifest.clone();
+    b.for_each_entry(|_, _, _| if cancelled() { Err(CANCELLED.into()) } else { Ok(()) }).map_err(|e| fail("verify", e.to_string()))?;
     if read_back != manifest {
         return Err(fail("verify", "backup_damaged: the manifest read back differs"));
     }
@@ -937,19 +1227,27 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
     std::fs::rename(&partial, &final_path).map_err(|e| fail("finish", format!("cannot rename the finished backup: {e}")))?;
     *partial_out = None;
     prune(paths, &dir, s.backup.keep as usize, &pw, &final_path);
-    Ok(final_path)
+    let mut left_out = sums.skipped;
+    left_out.extend(not_started);
+    Ok((final_path, left_out))
+}
+
+/// The file's size or write time differs from `meta` (taken before it was read).
+fn changed_since(path: &Path, meta: &std::fs::Metadata) -> bool {
+    match std::fs::metadata(path) {
+        Ok(now) => now.len() != meta.len() || now.modified().ok() != meta.modified().ok(),
+        Err(_) => true,
+    }
 }
 
 /// Streams one app's folder and named volumes out of the distro into the archive.
-fn archive_app<W: Write>(paths: &Paths, ctx: &Ctx, w: &mut Writer<W>, z: &AppSize, mtime: u64) -> Result<(), String> {
+fn archive_app<W: Write>(apps: &dyn Apps, ctx: &Ctx, w: &mut Writer<W>, z: &AppSize, mtime: u64) -> Result<(), String> {
     let id = z.id.as_str();
-    shell::distro_read(&paths.distro, FOLDER_SH, &[id], |out| w.add_stream(&format!("apps/{id}/folder"), out, mtime, &mut |n| ctx.bytes("app", Some(id), n)).map_err(write_error))
+    apps.read_folder(id, &mut |out| w.add_stream(&format!("apps/{id}/folder"), Cancellable(out), mtime, &mut |n| ctx.bytes("app", Some(id), n)).map(|_| ()).map_err(write_error))
         .map_err(|e| format!("archiving the folder of {id} failed: {e}"))?;
     for v in &z.volumes {
-        shell::distro_read(&paths.distro, VOLUME_SH, &[&v.podman_name], |out| {
-            w.add_stream(&format!("apps/{id}/volumes/{}", v.name), out, mtime, &mut |n| ctx.bytes("app", Some(id), n)).map_err(write_error)
-        })
-        .map_err(|e| format!("exporting volume {} of {id} failed: {e}", v.podman_name))?;
+        apps.read_volume(&v.podman_name, &mut |out| w.add_stream(&format!("apps/{id}/volumes/{}", v.name), Cancellable(out), mtime, &mut |n| ctx.bytes("app", Some(id), n)).map(|_| ()).map_err(write_error))
+            .map_err(|e| format!("exporting volume {} of {id} failed: {e}", v.podman_name))?;
     }
     Ok(())
 }
@@ -960,16 +1258,34 @@ pub(crate) mod tests {
     use std::cell::RefCell;
     use time::macros::datetime;
 
+    /// Apps without a distro: `sizes` as given, and every folder and volume stream is `data`.
+    /// `on_read` hears `folder <id>` / `volume <podman name>` before each stream is handed over.
     struct FakeApps {
         running: bool,
         fail_stop: bool,
+        /// Only this app's stop fails.
+        fail_stop_of: Option<&'static str>,
         fail_start: bool,
         calls: RefCell<Vec<String>>,
+        sizes: Vec<AppSize>,
+        data: Vec<u8>,
+        on_read: Option<ReadHook>,
     }
+
+    type ReadHook = Box<dyn Fn(&str)>;
+    /// What was read, and the inflight marker's app at that moment.
+    type Seen = std::rc::Rc<RefCell<Vec<(String, Option<String>)>>>;
 
     impl FakeApps {
         fn new(running: bool) -> Self {
-            FakeApps { running, fail_stop: false, fail_start: false, calls: RefCell::new(vec![]) }
+            FakeApps { running, fail_stop: false, fail_stop_of: None, fail_start: false, calls: RefCell::new(vec![]), sizes: vec![], data: b"tar".to_vec(), on_read: None }
+        }
+        fn read(&self, what: String, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String> {
+            if let Some(f) = &self.on_read {
+                f(&what);
+            }
+            self.calls.borrow_mut().push(format!("read {what}"));
+            read(&mut self.data.as_slice())
         }
     }
 
@@ -980,11 +1296,20 @@ pub(crate) mod tests {
         }
         fn stop(&self, id: &str) -> Result<(), String> {
             self.calls.borrow_mut().push(format!("stop {id}"));
-            if self.fail_stop { Err("stop failed".into()) } else { Ok(()) }
+            if self.fail_stop || self.fail_stop_of == Some(id) { Err("stop failed".into()) } else { Ok(()) }
         }
         fn start(&self, id: &str) -> Result<(), String> {
             self.calls.borrow_mut().push(format!("start {id}"));
             if self.fail_start { Err("start failed".into()) } else { Ok(()) }
+        }
+        fn sizes(&self, ids: &[&str]) -> Result<Vec<AppSize>, String> {
+            Ok(self.sizes.iter().filter(|s| ids.contains(&s.id.as_str())).cloned().collect())
+        }
+        fn read_folder(&self, id: &str, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String> {
+            self.read(format!("folder {id}"), read)
+        }
+        fn read_volume(&self, podman_name: &str, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String> {
+            self.read(format!("volume {podman_name}"), read)
         }
     }
 
@@ -1097,7 +1422,8 @@ pub(crate) mod tests {
         let dir = temp_dir("retention");
         let (pw_now, t) = ("the backup password", now());
         let day = 86_400;
-        // Real backups, made with the current password: (name, created).
+        let ours = |created: u64| Manifest { install_id: Some(install_id(&paths)), ..manifest(created) };
+        // Real backups of this install, made with the current password: (name, created).
         let real = [
             ("konak-20261120-030000.konakbackup", t - 4 * day),
             ("konak-20261121-030000.konakbackup", t - 3 * day),
@@ -1105,20 +1431,24 @@ pub(crate) mod tests {
             ("konak-20261123-030000.konakbackup", t - day),
         ];
         for (n, created) in real {
-            write_sample(&dir.join(n), pw_now, &manifest(created), b"x");
+            write_sample(&dir.join(n), pw_now, &ours(created), b"x");
         }
         // The one this run wrote, older by its manifest than the others (a clock that went back):
         // still never deleted.
         let written = dir.join("konak-20261124-030000.konakbackup");
-        write_sample(&written, pw_now, &manifest(t - 10 * day), b"x");
+        write_sample(&written, pw_now, &ours(t - 10 * day), b"x");
         // Old, but made with another password: not deleted, not counted.
-        write_sample(&dir.join("konak-20261101-030000.konakbackup"), "an earlier password", &manifest(t - 30 * day), b"x");
+        write_sample(&dir.join("konak-20261101-030000.konakbackup"), "an earlier password", &ours(t - 30 * day), b"x");
+        // Old, same password, but another install's (a shared NAS folder), or without an id and
+        // unknown to this install's history (copied in by hand): not deleted, not counted.
+        write_sample(&dir.join("konak-20261104-030000.konakbackup"), pw_now, &Manifest { install_id: Some("0".repeat(32)), ..manifest(t - 20 * day) }, b"x");
+        write_sample(&dir.join("konak-20261105-030000.konakbackup"), pw_now, &manifest(t - 20 * day), b"x");
         // Planted: names far in the future with only the magic line, and one that opens but claims
         // a future time. None of them takes a place or is deleted.
         for i in 1..=7 {
             std::fs::write(dir.join(format!("konak-9999010{i}-000000.konakbackup")), b"KONAK-BACKUP\n").unwrap();
         }
-        write_sample(&dir.join("konak-20991231-000000.konakbackup"), pw_now, &manifest(t + 365 * day), b"x");
+        write_sample(&dir.join("konak-20991231-000000.konakbackup"), pw_now, &ours(t + 365 * day), b"x");
         // Konak's name without Konak's content, and other files: never touched.
         std::fs::write(dir.join("konak-20261102-030000.konakbackup"), b"not a backup").unwrap();
         std::fs::write(dir.join("holiday.jpg"), b"jpg").unwrap();
@@ -1131,7 +1461,8 @@ pub(crate) mod tests {
         assert_eq!(deleted, ["konak-20261121-030000.konakbackup", "konak-20261120-030000.konakbackup"]);
         assert!(left.contains(&"konak-20261124-030000.konakbackup".to_string()));
         assert!(left.contains(&"konak-20261123-030000.konakbackup".to_string()) && left.contains(&"konak-20261122-030000.konakbackup".to_string()));
-        assert_eq!(left.len(), 17 - 2, "only the two oldest real ones are gone: {left:?}");
+        assert_eq!(left.len(), 19 - 2, "only the two oldest real ones are gone: {left:?}");
+        assert!(left.contains(&"konak-20261104-030000.konakbackup".to_string()) && left.contains(&"konak-20261105-030000.konakbackup".to_string()));
         assert_eq!(prune_candidates(vec![("a".into(), 1), ("b".into(), 3), ("c".into(), 2)], 1), ["c", "a"]);
         assert!(prune_candidates(vec![("a".into(), 1)], 5).is_empty());
     }
@@ -1142,7 +1473,10 @@ pub(crate) mod tests {
         let paths = crate::settings::tests::temp_paths("retention-one");
         let dir = temp_dir("retention-one");
         let t = now();
-        write_sample(&dir.join("konak-20261120-030000.konakbackup"), "the backup password", &manifest(t - 100), b"x");
+        // A file of an earlier build (no install id) that this install's history lists: its own.
+        let old = dir.join("konak-20261120-030000.konakbackup");
+        write_sample(&old, "the backup password", &manifest(t - 100), b"x");
+        record(&paths, HistoryEntry { file: old.to_string_lossy().to_string(), created_unix: t - 100, size_bytes: 1, apps: vec![], status: "ok".into(), error: None, detail: None, step: None, skipped: 0, notes: vec![], scheduled: false });
         let written = dir.join("konak-20261121-030000.konakbackup");
         write_sample(&written, "the backup password", &manifest(t), b"x");
         let deleted = prune(&paths, &dir, 1, &pw("the backup password"), &written);
@@ -1178,11 +1512,14 @@ pub(crate) mod tests {
         let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]) };
         let guard = test_guard();
         assert_eq!(Guard::acquire().err().as_deref(), Some("backup_running"));
-        let r = run(&paths, &host, &FakeApps::new(true), &guard, 10);
+        let r = run(&paths, &host, &FakeApps::new(true), &guard, 10, true);
         drop(guard);
         let listed = list(&paths);
         let history = load_history(&paths);
+        let last = last_scheduled(&paths);
         let _ = std::fs::remove_dir_all(&paths.home);
+        let last = last.unwrap();
+        assert_eq!((last.status.as_str(), last.error.as_deref()), ("failed", Some("backup_no_location")), "the scheduled run's result for the panel's notice");
         assert_eq!(r.unwrap_err(), fail("prepare", "backup_no_location"));
         let last = host.events.borrow().last().cloned().unwrap();
         assert_eq!((last.state, last.step, last.error.as_deref(), last.detail.as_deref()), ("failed", "prepare", Some("backup_no_location"), None));
@@ -1254,7 +1591,7 @@ pub(crate) mod tests {
         let before: Vec<bool> = ["vaultwarden", "nextcloud"].iter().map(|id| apps.running(id).unwrap()).collect();
         let t1 = Instant::now();
         let guard = Guard::acquire().unwrap();
-        let file = run(&paths, &Print, &apps, &guard, fmt::SCRYPT_LOG_N).unwrap();
+        let file = run(&paths, &Print, &apps, &guard, fmt::SCRYPT_LOG_N, false).unwrap();
         println!("backup took {:.1} s, {} bytes: {}", t1.elapsed().as_secs_f64(), std::fs::metadata(&file).unwrap().len(), file.display());
         let after: Vec<bool> = ["vaultwarden", "nextcloud"].iter().map(|id| apps.running(id).unwrap()).collect();
         assert_eq!(before, after, "apps back in their previous state");
@@ -1306,7 +1643,7 @@ pub(crate) mod tests {
         std::fs::write(out.join("konak-20200101-000000.konakbackup.partial"), b"").unwrap();
         let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]) };
         let guard = test_guard();
-        let r = run(&paths, &host, &FakeApps::new(true), &guard, 10);
+        let r = run(&paths, &host, &FakeApps::new(true), &guard, 10, false);
         drop(guard);
         let file = r.unwrap();
         let (m, sums) = fmt::verify(&file, &SecretString::from("a long enough secret".to_string())).unwrap();
@@ -1345,5 +1682,301 @@ pub(crate) mod tests {
         assert!(foreign.created_unix > 1_000_000_000 && foreign.apps.is_empty(), "the file's write time: {foreign:?}");
         let steps: Vec<&str> = host.events.borrow().iter().map(|e| e.step).collect();
         assert!(steps.starts_with(&["prepare", "konak", "photos"]) && steps.ends_with(&["verify", "finish", "done"]), "{steps:?}");
+    }
+
+    const PW: &str = "a long enough secret";
+
+    fn fake_host() -> FakeHost {
+        FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]) }
+    }
+
+    fn size(id: &str, volumes: &[&str]) -> AppSize {
+        AppSize { id: id.into(), folder: 3, volumes: volumes.iter().map(|v| VolumeSize { podman_name: format!("{id}_{v}"), name: v.to_string(), bytes: 3 }).collect() }
+    }
+
+    /// A set-up Konak with these apps installed (running unless listed as stopped), a backup folder,
+    /// a password and one photo. Returns the paths and the backup folder.
+    fn konak_with_apps(tag: &str, ids: &[&str]) -> (Paths, PathBuf) {
+        let paths = crate::settings::tests::temp_paths(tag);
+        let out = temp_dir(&format!("{tag}-out"));
+        std::fs::create_dir_all(&paths.photos).unwrap();
+        std::fs::write(paths.photos.join("p.jpg"), b"jpeg").unwrap();
+        let mut st = State::default();
+        st.done = true;
+        st.apps = ids.iter().map(|id| InstalledApp { id: id.to_string(), name: id.to_string(), installed_unix: 1, claimed: true, stopped: false }).collect();
+        st.save(&paths);
+        let mut s = settings::Settings::default();
+        s.backup.location = Some(out.to_string_lossy().to_string());
+        s.backup.schedule.kind = "off".into();
+        settings::save(&paths, &s).unwrap();
+        settings::set_password(&paths, None, PW).unwrap();
+        (paths, out)
+    }
+
+    fn cleanup(paths: &Paths, out: &Path) {
+        let _ = std::fs::remove_dir_all(out);
+        let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    fn files_in(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect()
+    }
+
+    #[test]
+    fn a_run_archives_each_app_at_rest_then_photos() {
+        let (paths, out) = konak_with_apps("run-apps", &["nextcloud", "jellyfin"]);
+        let seen: Seen = Default::default();
+        let mut apps = FakeApps::new(true);
+        apps.sizes = vec![size("nextcloud", &["db"]), size("jellyfin", &[])];
+        let (log, p2) = (seen.clone(), paths.clone());
+        apps.on_read = Some(Box::new(move |what| log.borrow_mut().push((what.to_string(), inflight_app(&p2)))));
+        let host = fake_host();
+        let guard = test_guard();
+        let r = run(&paths, &host, &apps, &guard, 10, false);
+        drop(guard);
+        let file = r.unwrap();
+        let mut settings_entry = String::new();
+        let b = fmt::open(&file, &SecretString::from(PW.to_string())).unwrap();
+        let manifest = b.manifest.clone();
+        let sums = b
+            .for_each_entry(|_, p, r| {
+                if p == "konak/settings.json" {
+                    r.read_to_string(&mut settings_entry).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let history = load_history(&paths);
+        let (left_inflight, id) = (inflight_app(&paths), install_id(&paths));
+        cleanup(&paths, &out);
+        let order: Vec<&str> = sums.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(order, ["manifest.json", "konak/state.json", "konak/settings.json", "apps/nextcloud/folder/000000", "apps/nextcloud/volumes/db/000000", "apps/jellyfin/folder/000000", "photos/p.jpg"], "apps first, Photos after them");
+        assert_eq!(
+            *apps.calls.borrow(),
+            ["running nextcloud", "stop nextcloud", "read folder nextcloud", "read volume nextcloud_db", "start nextcloud", "running jellyfin", "stop jellyfin", "read folder jellyfin", "start jellyfin"],
+            "each app stopped while it is read"
+        );
+        for (what, marker) in seen.borrow().iter() {
+            let app = what.split(' ').nth(1).unwrap().split('_').next().unwrap();
+            assert_eq!(marker.as_deref(), Some(app), "the inflight marker names the app while it is read ({what})");
+        }
+        assert_eq!(left_inflight, None);
+        assert!(settings_entry.contains("\"password_set\": false"), "{settings_entry}");
+        assert_eq!(manifest.install_id.as_deref(), Some(id.as_str()));
+        assert_eq!(*host.busy.borrow(), ["nextcloud", "jellyfin"]);
+        assert_eq!((history[0].status.as_str(), history[0].skipped), ("ok", 0));
+    }
+
+    #[test]
+    fn an_app_that_cannot_be_stopped_is_left_out_and_the_run_goes_on() {
+        let (paths, out) = konak_with_apps("run-partial", &["nextcloud", "jellyfin"]);
+        let mut apps = FakeApps::new(true);
+        apps.sizes = vec![size("nextcloud", &["db"]), size("jellyfin", &[])];
+        apps.fail_stop_of = Some("nextcloud");
+        let host = fake_host();
+        let guard = test_guard();
+        let r = run(&paths, &host, &apps, &guard, 10, false);
+        drop(guard);
+        let file = r.unwrap();
+        let (_, sums) = fmt::verify(&file, &SecretString::from(PW.to_string())).unwrap();
+        let listed = list(&paths);
+        let history = load_history(&paths);
+        cleanup(&paths, &out);
+        assert!(sums.entries.iter().all(|e| !e.path.starts_with("apps/nextcloud/")));
+        assert!(sums.entries.iter().any(|e| e.path == "apps/jellyfin/folder/000000"));
+        assert_eq!(sums.skipped, ["apps/nextcloud (left out: stop failed)"]);
+        assert_eq!((history[0].status.as_str(), history[0].skipped, history[0].notes.as_slice()), ("partial", 1, &["apps/nextcloud (left out: stop failed)".to_string()][..]));
+        assert_eq!((listed[0].status, listed[0].skipped), ("partial", 1));
+        let done = host.events.borrow().last().cloned().unwrap();
+        assert_eq!((done.state, done.skipped), ("done", Some(1)));
+        // Its stop was undone.
+        assert!(apps.calls.borrow().starts_with(&["running nextcloud".to_string(), "stop nextcloud".to_string(), "start nextcloud".to_string()]));
+    }
+
+    #[test]
+    fn a_file_damaged_after_writing_is_never_published() {
+        let (paths, out) = konak_with_apps("run-verify", &["nextcloud"]);
+        let mut apps = FakeApps::new(true);
+        apps.sizes = vec![size("nextcloud", &["db"])];
+        // Incompressible, so most of it is on disk when the volume is read; then one byte of what
+        // is already written changes (a bad disk, a sync tool).
+        let mut x = 0x2545_f491_u32;
+        apps.data = (0..3 << 20)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
+        let dir = out.clone();
+        apps.on_read = Some(Box::new(move |what| {
+            if what.starts_with("volume") {
+                let name = files_in(&dir).into_iter().find(|n| n.ends_with(PARTIAL)).unwrap();
+                let mut bytes = std::fs::read(dir.join(&name)).unwrap();
+                assert!(bytes.len() > 4096);
+                bytes[2000] ^= 1;
+                let mut f = std::fs::OpenOptions::new().write(true).open(dir.join(&name)).unwrap();
+                f.write_all(&bytes).unwrap();
+            }
+        }));
+        let host = fake_host();
+        let guard = test_guard();
+        let r = run(&paths, &host, &apps, &guard, 10, false);
+        drop(guard);
+        let left = files_in(&out);
+        cleanup(&paths, &out);
+        assert_eq!(r.unwrap_err().step, "verify");
+        assert!(left.is_empty(), "no backup file, no partial file: {left:?}");
+    }
+
+    #[test]
+    fn a_cancelled_run_restarts_the_app_and_leaves_no_file() {
+        {
+            let _g = test_guard();
+            assert_eq!(cancel().unwrap_err(), "backup_not_running", "nothing to cancel while no backup runs");
+        }
+        let (paths, out) = konak_with_apps("run-cancel", &["nextcloud"]);
+        let mut apps = FakeApps::new(true);
+        apps.sizes = vec![size("nextcloud", &["db"])];
+        apps.on_read = Some(Box::new(|what| {
+            if what.starts_with("folder") {
+                assert_eq!(running_op().as_deref(), Some("backup"));
+                cancel().unwrap();
+            }
+        }));
+        let host = fake_host();
+        let guard = test_guard();
+        let r = run(&paths, &host, &apps, &guard, 10, false);
+        let after = cancelled();
+        drop(guard);
+        let left = files_in(&out);
+        let history = load_history(&paths);
+        let inflight = inflight_app(&paths);
+        cleanup(&paths, &out);
+        assert!(r.is_err());
+        assert!(!after, "the cancel request is cleared for the next run");
+        assert!(left.is_empty(), "{left:?}");
+        assert_eq!(inflight, None);
+        assert_eq!((history[0].status.as_str(), history[0].error.as_deref()), ("cancelled", Some(CANCELLED)));
+        let last = host.events.borrow().last().cloned().unwrap();
+        assert_eq!((last.state, last.error.as_deref()), ("cancelled", Some(CANCELLED)));
+        assert_eq!(apps.calls.borrow().last().map(String::as_str), Some("start nextcloud"), "started again");
+    }
+
+    #[test]
+    fn recover_starts_only_an_app_the_user_had_running() {
+        let paths = crate::settings::tests::temp_paths("recover");
+        let mut st = State::default();
+        st.done = true;
+        st.apps = vec![
+            InstalledApp { id: "jellyfin".into(), name: "jellyfin".into(), installed_unix: 1, claimed: true, stopped: true },
+            InstalledApp { id: "immich".into(), name: "immich".into(), installed_unix: 1, claimed: true, stopped: false },
+        ];
+        st.save(&paths);
+        let apps = FakeApps::new(false);
+        let mark = |id: &str| settings::write_atomic(&inflight_file(&paths), serde_json::json!({ "app": id }).to_string().as_bytes()).unwrap();
+        let none = recover(&paths, &apps);
+        mark("jellyfin");
+        let stopped = recover(&paths, &apps);
+        let calls_after_stopped = apps.calls.borrow().clone();
+        mark("immich");
+        let running = recover(&paths, &apps);
+        let left = inflight_app(&paths);
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(none, None);
+        assert_eq!(stopped.as_deref(), Some("jellyfin"));
+        assert!(calls_after_stopped.is_empty(), "a user-stopped app stays stopped: {calls_after_stopped:?}");
+        assert_eq!(running.as_deref(), Some("immich"));
+        assert_eq!(*apps.calls.borrow(), ["start immich"]);
+        assert_eq!(left, None);
+    }
+
+    #[test]
+    fn schedule_checks_move_the_starting_point_only_when_they_should() {
+        let paths = crate::settings::tests::temp_paths("schedule-check");
+        let out = temp_dir("schedule-check-out");
+        let (t, day) = (now(), 86_400);
+        let mut s = settings::Settings::default();
+        assert_eq!(s.backup.schedule.kind, "daily");
+        // Not set up (no folder, no password): the slot is passed over, so setting them up later
+        // does not start a backup at once.
+        write_baseline(&paths, t - 3 * day);
+        let not_ready = schedule_check(&paths, &s, t);
+        let after_not_ready = read_baseline(&paths);
+        s.backup.location = Some(out.to_string_lossy().to_string());
+        s.backup.password_set = true;
+        let just_ready = schedule_check(&paths, &s, t);
+        // A due slot is consumed by the run that starts, not by the check.
+        write_baseline(&paths, t - 3 * day);
+        let due_now = schedule_check(&paths, &s, t);
+        let after_due = read_baseline(&paths);
+        consume_slot(&paths);
+        let consumed = read_baseline(&paths);
+        // A starting point in the future (a clock that was wrong) is reset to now.
+        write_baseline(&paths, t + 365 * day);
+        let future = schedule_check(&paths, &s, t);
+        let after_future = read_baseline(&paths);
+        // The folder's drive is not connected: kept due.
+        let free = (b'D'..=b'Z').rev().map(|l| format!("{}:\\konak-backups", l as char)).find(|l| drive_missing(l));
+        let missing = free.map(|loc| {
+            s.backup.location = Some(loc);
+            write_baseline(&paths, t - 3 * day);
+            (schedule_check(&paths, &s, t), read_baseline(&paths))
+        });
+        cleanup(&paths, &out);
+        assert!(!not_ready);
+        assert_eq!(after_not_ready, Some(t));
+        assert!(!just_ready, "the first scheduled run is the next slot");
+        assert!(due_now);
+        assert_eq!(after_due, Some(t - 3 * day));
+        assert!(consumed.is_some_and(|b| b >= t));
+        assert!(!future);
+        assert_eq!(after_future, Some(t));
+        if let Some((due, baseline)) = missing {
+            assert!(!due);
+            assert_eq!(baseline, Some(t - 3 * day), "still due once the drive is back");
+        }
+        assert!(!drive_missing(r"\\nas\share") && !drive_missing(r"C:\x"));
+    }
+
+    #[test]
+    fn a_file_that_grows_while_read_is_noticed() {
+        let dir = temp_dir("grow");
+        let f = dir.join("upload.jpg");
+        std::fs::write(&f, b"first part").unwrap();
+        let meta = std::fs::metadata(&f).unwrap();
+        let same = changed_since(&f, &meta);
+        std::fs::OpenOptions::new().append(true).open(&f).unwrap().write_all(b" and more").unwrap();
+        let grown = changed_since(&f, &meta);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!same && grown);
+    }
+
+    #[test]
+    fn keep_awake_holds_the_pc_up_for_its_thread_only_while_it_lives() {
+        use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED};
+        // SAFETY: this test thread's own execution state only.
+        let state = || unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+        state();
+        let during = {
+            let _awake = KeepAwake::new();
+            let s = state();
+            // Put it back for the rest of the block, as `state` cleared it.
+            unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+            s
+        };
+        let after = state();
+        assert_eq!(during & (ES_CONTINUOUS | ES_SYSTEM_REQUIRED), ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+        assert_eq!(after & ES_SYSTEM_REQUIRED, 0);
+    }
+
+    #[test]
+    fn the_install_id_is_made_once() {
+        let paths = crate::settings::tests::temp_paths("install-id");
+        let (a, b) = (install_id(&paths), install_id(&paths));
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(a, b);
+        assert!(a.len() == 32 && a.bytes().all(|c| c.is_ascii_hexdigit()));
     }
 }

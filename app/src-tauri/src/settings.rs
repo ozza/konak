@@ -98,12 +98,22 @@ pub fn parse_time(t: &str) -> Option<(u8, u8)> {
     (h < 24 && m < 60).then_some((h, m))
 }
 
+/// The damaged settings file last logged, by path and write time: `load` runs on every supervisor
+/// tick, and one file is logged once, not every 10 seconds.
+static DAMAGED_LOGGED: Mutex<Option<(PathBuf, Option<std::time::SystemTime>)>> = Mutex::new(None);
+
 /// The settings, with `password_set` filled in. A missing file gives the defaults; a damaged one too,
-/// with a line in the log (saving from the panel then replaces it).
+/// with a line in the log once per version of the file (saving from the panel then replaces it).
 pub fn load(paths: &Paths) -> Settings {
-    let mut s = match std::fs::read_to_string(file(paths)) {
+    let path = file(paths);
+    let mut s = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            crate::log(paths, &format!("settings.json unreadable, using the defaults: {e}"));
+            let key = (path.clone(), std::fs::metadata(&path).and_then(|m| m.modified()).ok());
+            let mut logged = DAMAGED_LOGGED.lock().unwrap_or_else(|e| e.into_inner());
+            if logged.as_ref() != Some(&key) {
+                *logged = Some(key);
+                crate::log(paths, &format!("settings.json unreadable, using the defaults: {e}"));
+            }
             Settings::default()
         }),
         Err(_) => Settings::default(),
@@ -173,6 +183,15 @@ pub fn check_location(paths: &Paths, location: &str) -> Result<(), String> {
 
 /// Validation of what the panel sends. Each error is a locale key under `errors.`.
 pub fn validate(paths: &Paths, s: &Settings) -> Result<(), String> {
+    validate_fields(s)?;
+    if let Some(loc) = &s.backup.location {
+        check_location(paths, loc)?;
+    }
+    Ok(())
+}
+
+/// `validate` without the location check.
+fn validate_fields(s: &Settings) -> Result<(), String> {
     if !["system", "tr", "en"].contains(&s.language.as_str()) {
         return Err("settings_language".into());
     }
@@ -192,9 +211,6 @@ pub fn validate(paths: &Paths, s: &Settings) -> Result<(), String> {
     if b.include.apps.iter().any(|id| crate::catalog::get(id).is_none()) {
         return Err("settings_unknown_app".into());
     }
-    if let Some(loc) = &b.location {
-        check_location(paths, loc)?;
-    }
     Ok(())
 }
 
@@ -203,15 +219,20 @@ static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Validates and stores the settings, applies the autostart choice when it changed, and resets the
 /// backup schedule's starting point when the schedule changed (so a new schedule starts with its
-/// next slot, not with one that passed before it was set). Returns the settings as now stored.
+/// next slot, not with one that passed before it was set). The location is checked only when it
+/// changed: a stored folder that is unavailable now (an unplugged USB disk, a sleeping NAS) does
+/// not block the other settings; a backup run checks it again. Returns the settings as now stored.
 pub fn save(paths: &Paths, new: &Settings) -> Result<Settings, String> {
     let mut new = new.clone();
     new.backup.location = new.backup.location.map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
     new.backup.include.apps.sort();
     new.backup.include.apps.dedup();
-    validate(paths, &new)?;
+    validate_fields(&new)?;
     let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let old = load(paths);
+    if let Some(loc) = new.backup.location.as_deref().filter(|l| old.backup.location.as_deref() != Some(*l)) {
+        check_location(paths, loc)?;
+    }
     if old.autostart != new.autostart {
         apply_autostart(new.autostart)?;
     }
@@ -481,6 +502,41 @@ pub(crate) mod tests {
         assert_eq!(saved.language, "en");
         assert!(text.contains("\"password_set\": false"));
         assert!(save(&paths, &Settings { language: "xx".into(), ..Settings::default() }).is_err());
+    }
+
+    #[test]
+    fn an_unavailable_backup_folder_does_not_block_other_settings() {
+        let paths = temp_paths("save-offline");
+        let out = std::env::temp_dir().join(format!("konak-settings-offline-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let mut s = Settings::default();
+        s.backup.location = Some(out.to_string_lossy().to_string());
+        let first = save(&paths, &s);
+        // The USB disk is unplugged.
+        std::fs::remove_dir_all(&out).unwrap();
+        s.language = "tr".into();
+        s.backup.keep = 3;
+        let other_change = save(&paths, &s);
+        // A new folder is still checked.
+        s.backup.location = Some(out.join("elsewhere").to_string_lossy().to_string());
+        let new_folder = save(&paths, &s);
+        let stored = load(&paths);
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert!(first.is_ok());
+        assert!(other_change.is_ok(), "{other_change:?}");
+        assert_eq!(new_folder.unwrap_err(), "settings_location_missing");
+        assert_eq!((stored.language.as_str(), stored.backup.keep), ("tr", 3));
+    }
+
+    #[test]
+    fn a_damaged_settings_file_is_logged_once() {
+        let paths = temp_paths("damaged");
+        std::fs::write(file(&paths), b"{ not json").unwrap();
+        let loaded: Vec<Settings> = (0..5).map(|_| load(&paths)).collect();
+        let log = std::fs::read_to_string(paths.install_log()).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert!(loaded.iter().all(|s| s.language == "system"), "the defaults");
+        assert_eq!(log.matches("settings.json unreadable").count(), 1, "{log}");
     }
 
     #[test]
