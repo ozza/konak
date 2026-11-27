@@ -24,7 +24,7 @@
   async function save(e: SubmitEvent) {
     e.preventDefault();
     saved = false;
-    if (next.length < MIN) return (error = t("panel.settings.password_short", { n: MIN }));
+    if ([...next].length < MIN) return (error = t("panel.settings.password_short", { n: MIN }));
     if (next !== repeat) return (error = t("panel.settings.password_mismatch"));
     saving = true;
     try {
@@ -56,6 +56,7 @@
   {:else}
     <form class="flex max-w-sm flex-col gap-3 rounded-lg border border-border bg-raised p-4" onsubmit={save} novalidate>
       <p class="rounded-md border border-warn-border bg-warn-bg p-2.5 text-xs text-warn-text">{t("panel.settings.password_warning")}</p>
+      {#if passwordSet}<p class="text-xs text-muted">{t("panel.settings.password_change_note")}</p>{/if}
       {#if passwordSet}
         <label class="flex flex-col gap-1 text-sm" for="{id}-current">{t("panel.settings.password_current")}
           <input id="{id}-current" type="password" autocomplete="current-password" bind:value={current} class="h-10 rounded-lg border border-control bg-surface px-3" />

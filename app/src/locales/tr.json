@@ -101,7 +101,11 @@
     "restore_app_unhealthy": "Uygulama geri yüklemeden sonra düzgün başlamadı, bu yüzden Konak önceki halini geri koydu.",
     "restore_app_failed": "Bu uygulama geri yüklenemedi; Konak önceki halini geri koydu.",
     "backup_app_failed": "Bu uygulama yedeklenemedi.",
-    "backup_failed": "Yedekleme tamamlanmadı."
+    "backup_failed": "Yedekleme tamamlanmadı.",
+    "restore_no_space": "Bu geri yükleme için yeterli boş disk alanı yok. Yer açın ya da daha az öğe geri yükleyin.",
+    "backup_path_refused": "Konak, Linux sisteminin içindeki bir dosyayı kullanamaz. Windows diskinde ya da paylaşımında bir dosya seçin.",
+    "settings_location_wsl": "Konak yedekleri Linux sisteminin içinde tutamaz. Windows diskinde ya da paylaşımında bir klasör seçin.",
+    "autostart_other_value": "Bu bilgisayardaki başka bir Konak kopyası hâlâ Windows ile başlayacak şekilde ayarlı. Konak o ayarı olduğu gibi bıraktı."
   },
   "tray": {
     "open": "Konak'ı aç",
@@ -483,7 +487,7 @@
       "location_hint": "Başka bir disk, bir USB bellek, bir ağ paylaşımı ya da bulut uygulamanızın eşitlediği bir klasör (OneDrive, Dropbox, Google Drive).",
       "password": "Yedek parolası",
       "password_not_set": "İlk yedekten önce bir parola belirleyin. Her yedek bu parolayla şifrelenir.",
-      "password_is_set": "Parola belirlendi. Yedeği geri yüklerken sorulur.",
+      "password_is_set": "Parola belirlendi. Konak bu bilgisayardaki yedekleme ve geri yüklemelerde onu kullanır.",
       "password_set": "Parola belirle",
       "password_change": "Parolayı değiştir",
       "password_saved": "Parola kaydedildi.",
@@ -516,7 +520,11 @@
       "weekday_5": "Cuma",
       "weekday_6": "Cumartesi",
       "schedule_hour": "Saat",
-      "schedule_minute": "Dakika"
+      "schedule_minute": "Dakika",
+      "language_apply": "Uygula ve yeniden yükle",
+      "location_clear": "Kaldır",
+      "schedule_not_ready": "Zamanlanmış yedekler, bir klasör ve parola belirlendiğinde başlar.",
+      "password_change_note": "Bu değişiklikten önce alınan yedekler yalnızca eski parolayla açılır. Konak onları kendiliğinden silmez."
     },
     "backup": {
       "now": "Şimdi yedekle",
@@ -542,7 +550,7 @@
         "done": "Tamamlandı",
         "restore_check": "Neyin geri yüklenebileceği kontrol ediliyor",
         "restore_verify": "Yedek dosyası kontrol ediliyor",
-        "restore_konak": "Konak'ın sertifikası geri yükleniyor",
+        "restore_konak": "Konak'ın sertifikası denetleniyor",
         "restore_app": "Uygulama geri yükleniyor",
         "restore_photos": "Fotoğraflar klasörü geri yükleniyor",
         "restore_media": "Medya klasörü geri yükleniyor",
@@ -561,11 +569,11 @@
       "photos": "Fotoğraflar klasörü ({size})",
       "media": "Medya klasörü ({size})",
       "folders_merge": "Dosyalar klasörlerinize eklenir. Orada zaten olan hiçbir şey silinmez.",
-      "replace": "Bu uygulamalar zaten kurulu: {apps}. Onları ve şu anki verilerini yedektekilerle değiştir.",
+      "replace": "Bu uygulamalar zaten kurulu: {apps}. Onları ve şu anki verilerini yedektekilerle değiştir. Şu anki verileri geri yükleme başarılı olunca silinir; bu geri alınamaz.",
       "start": "Geri yükle",
       "done": "Geri yükleme tamamlandı.",
       "failed": "Geri yükleme başarısız oldu.",
-      "password_hint": "Bu bilgisayarda kayıtlı yedek parolasını kullanmak için boş bırakın.",
+      "password_hint": "Bu bilgisayarda kayıtlı yedek parolasını kullanmak için boş bırakın. Başka bir parolayla alınmış yedek o parolayı ister.",
       "renamed": "{from}.local adı burada zaten kullanılıyor, bu yüzden artık {to}.local.",
       "photos_done": "Fotoğraflar klasörü",
       "media_done": "Medya klasörü",
@@ -575,10 +583,18 @@
         "restore_ca_kept": "Bu Konak'ın zaten kendi sertifikası vardı, o korundu. Eski sertifikaya güvenen cihazların bu bilgisayarın sertifikasını kurması gerekir.",
         "restore_ca_invalid": "Yedekteki sertifika geçerli değil, bu yüzden bu bilgisayarın sertifikası korundu.",
         "restore_ca_failed": "Yedekteki sertifika geri yüklenemedi; bu bilgisayarın sertifikası korundu.",
-        "restore_settings_kept": "Bu bilgisayardaki ayarlarınız korundu; yedekteki ayarlar uygulanmadı."
+        "restore_settings_kept": "Bu bilgisayardaki ayarlarınız korundu; yedekteki ayarlar uygulanmadı.",
+        "restore_volume_ignored": "Yedekte, uygulamanın bu sürümünün kullanmadığı veriler vardı; bunlar dışarıda bırakıldı."
       },
       "log_saved": "Uygulamanın kaydı şuraya kaydedildi:",
-      "immich_needs_photos": "Immich fotoğraflarını Fotoğraflar klasöründe tutar. Fotoğraflarınız zaten orada değilse Fotoğraflar klasörünü de geri yükleyin; yoksa Immich başlamaz."
+      "immich_needs_photos": "Immich fotoğraflarını Fotoğraflar klasöründe tutar. Fotoğraflarınız zaten orada değilse Fotoğraflar klasörünü de geri yükleyin; yoksa Immich başlamaz.",
+      "password_needed": "Bu yedeğin alındığı parolayı girin.",
+      "opening": "Yedek açılıyor…",
+      "starting": "Geri yükleme başlıyor…",
+      "ca": "Konak'ın sertifikasını da geri yükle",
+      "ca_hint": "Ona güvenen telefonlar ve tarayıcılar yeni bir sertifika kurmadan çalışmaya devam eder.",
+      "ca_not_empty": "Yalnızca burada hiç uygulama kurulu değilken yapılabilir. Bu bilgisayar kendi sertifikasını korur; cihazların ona bir kez güvenmesi gerekir.",
+      "ca_fingerprint": "Parmak izi (SHA-256): {fp}"
     }
   },
   "apps": {

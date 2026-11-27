@@ -101,7 +101,11 @@
     "restore_app_unhealthy": "The app did not start correctly after the restore, so Konak put back what was there before.",
     "restore_app_failed": "This app could not be restored; Konak put back what was there before.",
     "backup_app_failed": "This app could not be backed up.",
-    "backup_failed": "The backup did not finish."
+    "backup_failed": "The backup did not finish.",
+    "restore_no_space": "There is not enough free disk space for this restore. Free up space or restore fewer items.",
+    "backup_path_refused": "Konak cannot use a file inside its Linux system. Choose a file on a Windows disk or share.",
+    "settings_location_wsl": "Konak cannot keep backups inside its Linux system. Choose a folder on a Windows disk or share.",
+    "autostart_other_value": "Another copy of Konak on this PC is still set to start with Windows. Konak left that setting as it is."
   },
   "tray": {
     "open": "Open Konak",
@@ -483,7 +487,7 @@
       "location_hint": "Another disk, a USB drive, a network share or a folder your cloud app syncs (OneDrive, Dropbox, Google Drive).",
       "password": "Backup password",
       "password_not_set": "Set a password before the first backup. Every backup is encrypted with it.",
-      "password_is_set": "A password is set. Restoring a backup asks for it.",
+      "password_is_set": "A password is set. Konak uses it for backups and restores on this PC.",
       "password_set": "Set password",
       "password_change": "Change password",
       "password_saved": "Password saved.",
@@ -516,7 +520,11 @@
       "weekday_5": "Friday",
       "weekday_6": "Saturday",
       "schedule_hour": "Hour",
-      "schedule_minute": "Minute"
+      "schedule_minute": "Minute",
+      "language_apply": "Apply and reload",
+      "location_clear": "Remove",
+      "schedule_not_ready": "Scheduled backups start once a folder and a password are set.",
+      "password_change_note": "Backups made before this change still open only with the old password. Konak does not delete them automatically."
     },
     "backup": {
       "now": "Back up now",
@@ -542,7 +550,7 @@
         "done": "Done",
         "restore_check": "Checking what can be restored",
         "restore_verify": "Checking the backup file",
-        "restore_konak": "Restoring Konak's certificate",
+        "restore_konak": "Checking Konak's certificate",
         "restore_app": "Restoring app",
         "restore_photos": "Restoring the Photos folder",
         "restore_media": "Restoring the Media folder",
@@ -561,11 +569,11 @@
       "photos": "Photos folder ({size})",
       "media": "Media folder ({size})",
       "folders_merge": "Files are added to your folders. Nothing already there is deleted.",
-      "replace": "These apps are already installed: {apps}. Replace them and their current data with the backup.",
+      "replace": "These apps are already installed: {apps}. Replace them and their current data with the backup. Their current data is deleted once the restore succeeds; this cannot be undone.",
       "start": "Restore",
       "done": "Restore finished.",
       "failed": "Restore failed.",
-      "password_hint": "Leave it empty to use the backup password stored on this PC.",
+      "password_hint": "Leave it empty to use the backup password stored on this PC. A backup made with another password needs that password.",
       "renamed": "Its name {from}.local is already used here, so it is now {to}.local.",
       "photos_done": "Photos folder",
       "media_done": "Media folder",
@@ -575,10 +583,18 @@
         "restore_ca_kept": "This Konak already has its own certificate, so it was kept. Devices that trusted the old one need this PC's certificate.",
         "restore_ca_invalid": "The certificate in the backup is not valid, so this PC's certificate was kept.",
         "restore_ca_failed": "The certificate from the backup could not be restored; this PC's certificate was kept.",
-        "restore_settings_kept": "Your settings on this PC were kept; settings in the backup were not applied."
+        "restore_settings_kept": "Your settings on this PC were kept; settings in the backup were not applied.",
+        "restore_volume_ignored": "The backup had app data this version of the app does not use; it was left out."
       },
       "log_saved": "The app's log was saved to:",
-      "immich_needs_photos": "Immich keeps its photos in the Photos folder. Restore the Photos folder too, unless your photos are already there; otherwise Immich will not start."
+      "immich_needs_photos": "Immich keeps its photos in the Photos folder. Restore the Photos folder too, unless your photos are already there; otherwise Immich will not start.",
+      "password_needed": "Enter the password this backup was made with.",
+      "opening": "Opening the backup…",
+      "starting": "Starting the restore…",
+      "ca": "Also restore Konak's certificate",
+      "ca_hint": "Phones and browsers that trusted it keep working without installing a new one.",
+      "ca_not_empty": "Only possible while no app is installed here. This PC keeps its own certificate; devices need to trust it once.",
+      "ca_fingerprint": "Fingerprint (SHA-256): {fp}"
     }
   },
   "apps": {

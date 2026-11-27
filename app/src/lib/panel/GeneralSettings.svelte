@@ -4,20 +4,33 @@
   import type { Language, Settings } from "./api";
 
   // Theme lives in this browser profile (localStorage); language and autostart are Konak settings.
-  let { settings, onsave }: { settings: Settings; onsave: (next: Settings) => Promise<boolean> } = $props();
+  let { settings, onsave }: { settings: Settings; onsave: (patch: (s: Settings) => Settings) => Promise<string | null> } = $props();
 
   let theme = $state<Theme>(loadTheme());
   $effect(() => applyTheme(theme));
 
-  async function setLanguage(language: Language) {
-    // The new language applies on reload, so every text in the window switches at once.
-    if (!(await onsave({ ...settings, language }))) return;
+  // The list only picks; "Apply" saves and reloads, so moving through the list with the arrow keys
+  // does not reload the window on the first key press.
+  // svelte-ignore state_referenced_locally
+  let language = $state<Language>(settings.language);
+  let languageError = $state<string | null>(null);
+  let autostartError = $state<string | null>(null);
+
+  async function applyLanguage() {
+    languageError = await onsave((s) => ({ ...s, language }));
+    if (languageError) return;
     try {
       sessionStorage.setItem("konak.returnView", "settings");
     } catch {
       // Without storage the window reopens on its default page; the language still switches.
     }
     location.reload();
+  }
+
+  async function setAutostart(input: HTMLInputElement) {
+    const on = input.checked;
+    autostartError = await onsave((s) => ({ ...s, autostart: on }));
+    if (autostartError) input.checked = settings.autostart;
   }
 </script>
 
@@ -38,29 +51,33 @@
 
   <div class="flex flex-col gap-1.5">
     <label for="language" class="text-sm font-medium">{t("panel.settings.language")}</label>
-    <select
-      id="language"
-      value={settings.language}
-      onchange={(e) => setLanguage((e.currentTarget as HTMLSelectElement).value as Language)}
-      class="h-10 w-full max-w-xs rounded-lg border border-control bg-surface px-3 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-link"
-    >
-      <option value="system">{t("panel.settings.language_system")}</option>
-      <option value="tr">Türkçe</option>
-      <option value="en">English</option>
-    </select>
-    <p class="text-xs text-muted">{t("panel.settings.language_hint")}</p>
+    <div class="flex flex-wrap items-center gap-2">
+      <select
+        id="language"
+        bind:value={language}
+        aria-describedby="language-hint"
+        class="h-10 w-full max-w-xs rounded-lg border border-control bg-surface px-3 text-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-link"
+      >
+        <option value="system">{t("panel.settings.language_system")}</option>
+        <option value="tr">Türkçe</option>
+        <option value="en">English</option>
+      </select>
+      {#if language !== settings.language}
+        <button type="button" class="btn-primary" onclick={applyLanguage}>{t("panel.settings.language_apply")}</button>
+      {/if}
+    </div>
+    <p id="language-hint" class="text-xs text-muted">{t("panel.settings.language_hint")}</p>
+    {#if languageError}<p class="text-xs text-error" role="alert">{languageError}</p>{/if}
   </div>
 
-  <label class="flex items-start gap-3 text-sm">
-    <input
-      type="checkbox"
-      checked={settings.autostart}
-      onchange={(e) => onsave({ ...settings, autostart: (e.currentTarget as HTMLInputElement).checked })}
-      class="mt-0.5 size-4 shrink-0 accent-accent"
-    />
-    <span class="flex flex-col gap-0.5">
-      <span class="font-medium">{t("panel.settings.autostart")}</span>
-      <span class="text-xs text-muted">{t("panel.settings.autostart_hint")}</span>
-    </span>
-  </label>
+  <div class="flex flex-col gap-1.5">
+    <label class="flex items-start gap-3 text-sm">
+      <input type="checkbox" checked={settings.autostart} onchange={(e) => setAutostart(e.currentTarget as HTMLInputElement)} class="mt-0.5 size-4 shrink-0 accent-accent" />
+      <span class="flex flex-col gap-0.5">
+        <span class="font-medium">{t("panel.settings.autostart")}</span>
+        <span class="text-xs text-muted">{t("panel.settings.autostart_hint")}</span>
+      </span>
+    </label>
+    {#if autostartError}<p class="text-xs text-error" role="alert">{autostartError}</p>{/if}
+  </div>
 </section>

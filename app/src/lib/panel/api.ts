@@ -71,6 +71,11 @@ export type BackupManifest = {
   apps: { id: string; name: string; claimed: boolean; stopped: boolean; size_bytes: number }[];
   photos_bytes: number | null;
   media_bytes: number | null;
+  /** Konak files in the backup, e.g. "ca/root.crt". */
+  konak_files: string[];
+  /** SHA-256 of the backup root certificate, when it has one; `ca_valid`: it passes the restore check. */
+  ca_fingerprint: string | null;
+  ca_valid: boolean;
 };
 export type FolderResult = { written: number; identical: number; kept_both: number; failed: number; error: string | null };
 export type BackupProgress = {

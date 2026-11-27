@@ -213,9 +213,12 @@ export function installMock() {
             ],
             photos_bytes: 2.4 * GB,
             media_bytes: null,
+            konak_files: ["ca/root.crt", "ca/root.key", "state.json", "settings.json"],
+            ca_fingerprint: "3F:9A:12:C4:7B:E0:55:A1:9D:2C:44:6E:B8:01:7F:93:AA:5D:0C:E2:71:48:B6:3E:9F:22:D0:6A:85:1B:C7:E4",
+            ca_valid: true,
           };
         case "restore_backup":
-          progress("restore-progress", (a.apps as string[]).map((id) => ["app", id] as [string, string | null]));
+          progress("restore-progress", (a.apps as string[]).map((id) => ["restore_app", id] as [string, string | null]), 3000);
           return null;
         case "plugin:dialog|open":
           return a.options?.directory ? "E:\\KonakBackups" : "D:\\Backups\\Konak\\konak-20261125-030000.konakbackup";
