@@ -274,9 +274,17 @@ async fn refresh_network(app: AppHandle) -> Result<(), String> {
         }
         rt.firewall_missing = missing;
         drop(rt);
+        k.sup.set_lan_blocked(missing);
         emit(&handle);
     })
     .await
+}
+
+/// The programs setup and Repair give firewall rules, for the panel's "what will change" details.
+#[tauri::command]
+fn firewall_programs(app: AppHandle) -> Vec<String> {
+    let p = &app.state::<Konak>().paths;
+    [p.caddy(), p.mdns()].iter().map(|x| x.to_string_lossy().to_string()).collect()
 }
 
 /// "Repair network access" in the panel: the setup's elevated step again, so one UAC prompt, only
@@ -302,6 +310,7 @@ fn repair_network(app: AppHandle) {
         rt.firewall_missing = missing;
         rt.repair_error = result.err();
         drop(rt);
+        k.sup.set_lan_blocked(missing);
         emit(&app);
     });
 }
@@ -1044,7 +1053,12 @@ fn start_services_and_recover(app: AppHandle, sup: Arc<Supervisor>) {
                 Ok(s) if s == "nothing running" => {}
                 r => log(&paths, &format!("leftover processes: {r:?}")),
             },
-            || sup.start(),
+            || {
+                // Without Konak's firewall rules (a reinstall that kept the data, a moved install),
+                // Caddy and mDNS wait for Repair instead of triggering Windows' firewall prompt.
+                sup.set_lan_blocked(State::load(&paths).done && installer::firewall_missing(&paths));
+                sup.start()
+            },
             || {
                 if guard.is_none() {
                     return;
@@ -1241,6 +1255,7 @@ pub fn run() {
             get_status,
             start_install,
             refresh_network,
+            firewall_programs,
             repair_network,
             restart_pc,
             list_catalog,

@@ -105,6 +105,9 @@ pub struct Heartbeat {
     pub web_ports: WebPorts,
     #[serde(default)]
     pub port80_owner: Option<String>,
+    /// Caddy and mDNS kept off the LAN until Repair (Konak's firewall rules are missing).
+    #[serde(default)]
+    pub lan_blocked: bool,
 }
 
 impl Heartbeat {
@@ -852,6 +855,9 @@ pub fn port80(f: &Facts) -> Check {
     match relevant.first() {
         Some(l) => check("port80_owner", "ok", format!("Konak's caddy (pid {}) listens on {}:80", l.pid, l.address), "").msg("port80_owner.ok", &[]),
         None if wsl_service => check("port80_owner", "fail", wsl_evidence, WSL_FIX).msg("port80_owner.wsl_service", &[]),
+        None if f.heartbeat.as_ref().is_some_and(|h| !h.stale(f.now) && h.lan_blocked) => {
+            check("port80_owner", "warn", format!("nothing listens on {ip}:80: Konak keeps Caddy off the LAN while its firewall rules are missing"), "Use Repair network access in the panel (one administrator prompt).").msg("port80_owner.lan_blocked", &[])
+        }
         None => {
             let failures = f.heartbeat.as_ref().map_or(0, |h| h.caddy_failures);
             let why = if failures > 0 { format!("; Konak's caddy exited {failures} times in a row (see logs\\caddy.log)") } else { String::new() };
@@ -967,7 +973,7 @@ mod tests {
         Facts {
             now: 1000,
             distro: Distro { name: "konak".into(), exists: true, running: true, state: Some("Running".into()), version: Some(2) },
-            heartbeat: Some(Heartbeat { last_tick_unix: 995, lan_ip: Some("192.168.1.5".into()), names: vec!["konak".into()], pids: Pids { keepalive: Some(11), caddy: Some(22), mdns: Some(33) }, https_available: true, caddy_failures: 0, web_ports: WebPorts::STANDARD, port80_owner: None }),
+            heartbeat: Some(Heartbeat { last_tick_unix: 995, lan_ip: Some("192.168.1.5".into()), names: vec!["konak".into()], pids: Pids { keepalive: Some(11), caddy: Some(22), mdns: Some(33) }, https_available: true, caddy_failures: 0, web_ports: WebPorts::STANDARD, port80_owner: None, lan_blocked: false }),
             lan_ip: Some("192.168.1.5".into()),
             net: Ok(NetFacts {
                 adapter: Some(Adapter { alias: "Ethernet".into(), description: "Intel(R) Ethernet I225-V".into(), index: 7, category: "Private".into() }),
@@ -1346,6 +1352,11 @@ mod tests {
         // Bindable and nobody listens: Konak's Caddy is simply not running.
         f.port80_bindable = Some(true);
         assert_eq!(port80(&f).code, "port80_owner.nothing");
+        // Kept off the LAN while the firewall rules are missing: the advice is Repair, not a restart.
+        f.heartbeat.as_mut().unwrap().lan_blocked = true;
+        let blocked = port80(&f);
+        f.heartbeat.as_mut().unwrap().lan_blocked = false;
+        assert_eq!((blocked.status, blocked.code), ("warn", "port80_owner.lan_blocked"), "{blocked:?}");
         // Konak serves on the fallback meanwhile: a warning.
         let mut g = facts();
         g.net.as_mut().unwrap().port80.clear();

@@ -127,11 +127,17 @@
   },
   "panel": {
     "repair": {
-      "title": "Diğer cihazlar Konak'a ulaşamayabilir",
-      "body": "Konak'ın güvenlik duvarı kuralları eksik; örneğin Konak yeniden kurulduğunda bu olur. Bu kurallar olmadan Windows uygulamalarınızı diğer cihazlara kapatır ya da izin ister. Onarmak için bir kez yönetici izni gerekir.",
+      "title": "Diğer cihazlar Konak'a ulaşamıyor",
+      "body": "Konak'ın güvenlik duvarı kuralları eksik; örneğin Konak yeniden kurulduğunda bu olur. Kurallar geri gelene kadar Konak uygulamalarınızı ağa açmaz; böylece Windows onları her ağda açmak için izin istemez. Onarmak için bir kez yönetici izni gerekir.",
       "button": "Ağ erişimini onar",
       "running": "Ağ erişimi onarılıyor…",
-      "failed": "Onarım tamamlanmadı."
+      "failed": "Onarım tamamlanmadı.",
+      "details": "Neyin değişeceğini göster",
+      "details_intro": "Windows bir kez yönetici izni ister. Ardından Konak, Windows Defender Güvenlik Duvarı'na her biri tam programa bağlı şu gelen bağlantı kurallarını ekler:",
+      "rule_allow": "“{name}”: özel ağlarda (ev, iş) izin ver",
+      "rule_block": "“{name}”: ortak ağlarda (kafe, havalimanı) engelle",
+      "details_old": "Konak'ın önceki kuralları (güvenlik duvarındaki “Konak” grubu) önce silinir.",
+      "details_nothing_else": "Başka hiçbir şey değişmez: başka program, Windows özelliği ya da ağ ayarı yok. Kuralları Windows Defender Güvenlik Duvarı › Gelişmiş ayarlar › Gelen Kuralları altında kontrol edebilirsiniz."
     },
     "home_link_label": "Konak ana sayfasını aç, {host}",
     "loading": "Yükleniyor…",
@@ -400,7 +406,8 @@
         "returning": "80 numaralı port yeniden boş. Konak yaklaşık iki dakika içinde ona geri döner.",
         "ok": "Konak'ın web sunucusu 80 numaralı portta yanıt veriyor.",
         "nothing": "80 numaralı portta yanıt veren yok.",
-        "wsl_service": "80 numaralı port dolu, büyük olasılıkla bir WSL dağıtımındaki bir servis tarafından; bu yüzden Windows programın adını veremiyor."
+        "wsl_service": "80 numaralı port dolu, büyük olasılıkla bir WSL dağıtımındaki bir servis tarafından; bu yüzden Windows programın adını veremiyor.",
+        "lan_blocked": "Güvenlik duvarı kuralları geri gelene kadar Konak web sunucusunu ağa açmıyor."
       },
       "lan_adapter": {
         "virtual": "Kullanılan bağlantı sanal bir bağdaştırıcı ({adapter}), bu yüzden diğer cihazlar bu bilgisayara ulaşamayabilir.",
@@ -436,7 +443,8 @@
         "fallback": "80 numaralı portu boşaltmak için o programı durdurun ya da ayarını değiştirin. Konak sonra kendiliğinden geri döner.",
         "taken": "80 numaralı portu boşaltmak için o programı durdurun ya da ayarını değiştirin. Konak web sunucusunu birkaç saniye içinde başlatır.",
         "nothing": "Konak'ı sistem tepsisindeki simgesinden kapatıp yeniden açın.",
-        "wsl_service": "Diğer WSL dağıtımınızdaki web sunucusunu durdurun ya da başka bir porta taşıyın. Konak sonra 80 numaralı portu kendiliğinden alır."
+        "wsl_service": "Diğer WSL dağıtımınızdaki web sunucusunu durdurun ya da başka bir porta taşıyın. Konak sonra 80 numaralı portu kendiliğinden alır.",
+        "lan_blocked": "Panelin üstündeki Ağ erişimini onar düğmesini kullanın; Windows bir kez yönetici izni ister."
       },
       "lan_adapter": {
         "virtual": "Bağlantıyı tutan VPN'i ya da sanal ağı kapatın.",

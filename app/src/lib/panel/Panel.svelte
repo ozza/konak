@@ -88,6 +88,9 @@
     host = await invoke<HostInfo>("host_info").catch(() => host);
   }
 
+  /** After a repair: a supervisor tick (10 s) plus Caddy's start. */
+  const REPAIR_DIAG_MS = 15_000;
+
   async function diagnose() {
     diagnosing = true;
     diagError = null;
@@ -175,6 +178,14 @@
 
   $effect(() => {
     if ((diagReady || host?.ready) && checks === null && !diagnosing && !diagError) diagnose();
+  });
+
+  // Once a repair brings the firewall rules back, Caddy starts within a tick: the checks taken while
+  // it was held off are stale, so they run again a little later.
+  let wasMissing = false;
+  $effect(() => {
+    if (wasMissing && !firewallMissing && checks !== null) setTimeout(() => diagnose(), REPAIR_DIAG_MS);
+    wasMissing = firewallMissing;
   });
 </script>
 
