@@ -105,7 +105,7 @@ let settings = {
 const day = 86400;
 let backups = [
   { file: "konak-20261125-030000.konakbackup", created_unix: 1795575600, size_bytes: 3.2 * GB, apps: ["jellyfin", "nextcloud", "forgejo"], status: "ok", error: null },
-  { file: "konak-20261124-030000.konakbackup", created_unix: 1795575600 - day, size_bytes: 3.1 * GB, apps: ["jellyfin", "nextcloud"], status: "failed", error: "backup_no_space" },
+  { file: "", created_unix: 1795575600 - day, size_bytes: 0, apps: ["jellyfin", "nextcloud"], status: "failed", error: "backup_no_space" },
 ];
 
 function progress(event: string, steps: [string, string | null][], ms = 600) {
