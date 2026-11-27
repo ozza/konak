@@ -8,17 +8,19 @@
 //!   is ChaCha20-Poly1305 in 64 KiB chunks, each authenticated, the last one marked, so any changed
 //!   byte or a truncation fails decryption at that point;
 //! - inside it, a zstd stream; inside that, a tar stream (ustar/GNU headers) of regular files only,
-//!   written in this order (files of earlier builds have the apps right after the manifest; readers
-//!   take any order between the manifest and the checksums):
+//!   written in this order (files of some earlier builds have Photos and Media before the apps;
+//!   readers take any order between the manifest and the checksums):
 //!   - `manifest.json`, always the first entry (`Manifest`);
 //!   - `konak/ca/root.crt`, `konak/ca/root.key`, `konak/state.json` (apps, rendered ports),
 //!     `konak/settings.json` (never the password);
-//!   - `photos/<relative path>`, `media/<relative path>`: the Windows folders' files, one entry each,
-//!     before the apps, so a restore has them in place before it starts an app that mounts them;
 //!   - `apps/<id>/folder/<NNNNNN>`: consecutive chunks (at most `CHUNK` bytes each) of GNU tar's
 //!     output for the app's folder, `tar -C /var/lib/konak/apps -cpf - <id>` (members start with
 //!     `<id>/`, numeric owners, xattrs, ACLs); concatenated in order, they are that tar stream;
 //!   - `apps/<id>/volumes/<name>/<NNNNNN>`: the same for `podman volume export <podman_name>`;
+//!   - `photos/<relative path>`, `media/<relative path>`: the Windows folders' files, one entry each,
+//!     after the apps, so an app's database never refers to a file the archive misses (Immich keeps
+//!     taking uploads while Photos is read); a restore puts them in place before it starts an app
+//!     that mounts them;
 //!   - `checksums.json`, always the last entry (`Checksums`): size and SHA-256 of every entry
 //!     before it, in archive order (manifest included).
 //!
@@ -54,6 +56,10 @@ const ZSTD_LEVEL: i32 = 3;
 pub struct Manifest {
     pub format: u32,
     pub konak_version: String,
+    /// The Konak install that wrote the file (`backup::install_id`); retention deletes only its own
+    /// files. `None` in files of earlier builds.
+    #[serde(default)]
+    pub install_id: Option<String>,
     pub created_unix: u64,
     pub apps: Vec<AppManifest>,
     /// Estimated size of the Photos folder at the start of the backup; `None` when not included.
@@ -503,6 +509,7 @@ pub(crate) mod tests {
         Manifest {
             format: FORMAT,
             konak_version: "0.1.0".into(),
+            install_id: None,
             created_unix: created,
             apps: vec![AppManifest {
                 id: "nextcloud".into(),
@@ -666,6 +673,89 @@ pub(crate) mod tests {
         let r = open(&path, &pw("the backup password")).err().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(r.code, "backup_newer_format");
+    }
+
+    /// A file whose tar part after the manifest is built by `f` by hand (`f` gets the manifest's
+    /// checksum entry), closed without `finish`.
+    fn write_raw(path: &Path, f: &dyn Fn(&mut tar::Builder<Inner<std::fs::File>>, EntrySum)) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut w = Writer::new(file, &pw("the backup password"), &manifest(1), TEST_LOG_N).unwrap();
+        let manifest_sum = w.sums.remove(0);
+        f(&mut w.tar, manifest_sum);
+        let counting = w.tar.into_inner().unwrap();
+        counting.inner.finish().unwrap().finish().unwrap();
+    }
+
+    fn append_checksums(b: &mut tar::Builder<Inner<std::fs::File>>, entries: Vec<EntrySum>) {
+        let body = serde_json::to_vec(&Checksums { entries, skipped: vec![] }).unwrap();
+        b.append_data(&mut header(body.len() as u64, 0o600, 1), CHECKSUMS, body.as_slice()).unwrap();
+    }
+
+    fn empty_sum(path: &str) -> EntrySum {
+        EntrySum { path: path.into(), size: 0, sha256: hex(&Sha256::digest(b"")) }
+    }
+
+    #[test]
+    fn structural_surprises_are_refused() {
+        let dir = temp("structure");
+        let path = dir.join("b.konakbackup");
+        let check = |f: &dyn Fn(&mut tar::Builder<Inner<std::fs::File>>, EntrySum)| {
+            write_raw(&path, f);
+            verify(&path, &pw("the backup password")).err().map(|e| (e.code, e.detail))
+        };
+        // Listed in the checksums like any entry, so only the type check refuses them.
+        let link = check(&|b, m| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            b.append_link(&mut h, "photos/link.jpg", "/etc/passwd").unwrap();
+            append_checksums(b, vec![m, empty_sum("photos/link.jpg")]);
+        });
+        let folder = check(&|b, m| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_size(0);
+            b.append_data(&mut h, "photos/2026", io::empty()).unwrap();
+            append_checksums(b, vec![m, empty_sum("photos/2026")]);
+        });
+        let after = check(&|b, m| {
+            append_checksums(b, vec![m]);
+            b.append_data(&mut header(0, 0o600, 1), "photos/late.jpg", io::empty()).unwrap();
+        });
+        let none = check(&|b, _| {
+            b.append_data(&mut header(0, 0o600, 1), "photos/a.jpg", io::empty()).unwrap();
+        });
+        let good = check(&|b, m| append_checksums(b, vec![m]));
+        let _ = std::fs::remove_dir_all(&dir);
+        let detail = |r: &Option<(&str, String)>, want: &str| matches!(r, Some(("backup_damaged", d)) if d.contains(want));
+        assert!(detail(&link, "not a regular file"), "{link:?}");
+        assert!(detail(&folder, "not a regular file"), "{folder:?}");
+        assert!(detail(&after, "entries after checksums.json"), "{after:?}");
+        assert!(detail(&none, "no checksums.json"), "{none:?}");
+        assert_eq!(good, None, "the hand-built file itself is fine");
+    }
+
+    #[test]
+    fn a_work_factor_above_the_cap_is_refused_before_scrypt_runs() {
+        const { assert!(SCRYPT_LOG_N <= MAX_LOG_N, "new files must open in this build") };
+        let dir = temp("workfactor");
+        let path = dir.join("b.konakbackup");
+        write_sample(&path, "the backup password", &manifest(1), b"x");
+        // The stanza is `-> scrypt <salt> <log_n>`; claim one more than the cap (the header MAC then
+        // no longer matches, but the work factor is checked first).
+        let raw = std::fs::read(&path).unwrap();
+        let text_end = raw.windows(4).position(|w| w == b"\n---").unwrap();
+        let head = String::from_utf8(raw[..text_end].to_vec()).unwrap();
+        let edited = head.replace(&format!(" {TEST_LOG_N}\n"), &format!(" {}\n", MAX_LOG_N + 1));
+        assert_ne!(edited, head);
+        let mut bytes = edited.into_bytes();
+        bytes.extend_from_slice(&raw[text_end..]);
+        std::fs::write(&path, bytes).unwrap();
+        let t = std::time::Instant::now();
+        let r = open(&path, &pw("the backup password")).err().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(r.code, "backup_damaged", "{}", r.detail);
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "no scrypt run at 2^{}", MAX_LOG_N + 1);
     }
 
     #[test]
