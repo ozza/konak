@@ -1,7 +1,7 @@
 {
   "id": "vaultwarden",
   "default_name": "vaultwarden",
-  "port": 47104,
+  "port": 17104,
   "https": true,
   "health_path": "/alive",
   "secrets": [],

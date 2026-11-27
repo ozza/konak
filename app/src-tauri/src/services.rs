@@ -739,15 +739,15 @@ mod tests {
         let (storage, site, cert, key) =
             (PathBuf::from(r"C:\K\caddy"), PathBuf::from(r"C:\K\site"), PathBuf::from(r"C:\K\ca\root.crt"), PathBuf::from(r"C:\K\ca\root.key"));
         let files = CaddyFiles { storage: &storage, site: &site, ca: Some((&cert, &key)) };
-        let routes = [route("jellyfin", 47101, false), route("vault", 47103, true)];
+        let routes = [route("jellyfin", 17101, false), route("vault", 17103, true)];
         let c = caddyfile("192.168.1.5", &routes, &files, WebPorts::STANDARD);
         assert!(c.contains("skip_install_trust") && c.contains("persist_config off"));
         assert!(c.contains("storage file_system \"C:/K/caddy\""));
         assert!(c.contains("\t\t\troot {\n\t\t\t\tcert \"C:/K/ca/root.crt\"\n\t\t\t\tkey \"C:/K/ca/root.key\"\n"));
         assert!(c.contains("http://konak.local:80 {\n\tbind 192.168.1.5\n\troot * \"C:/K/site\"\n\tfile_server\n}"));
         let proxy = |port: u16| format!("\treverse_proxy 127.0.0.1:{port} {{\n\t\theader_up X-Real-IP {{remote_host}}\n\t}}\n}}");
-        assert!(c.contains(&format!("http://jellyfin.local:80 {{\n\tbind 192.168.1.5\n{}", proxy(47101))));
-        assert!(c.contains(&format!("https://vault.local:443 {{\n\tbind 192.168.1.5\n\ttls internal\n{}", proxy(47103))));
+        assert!(c.contains(&format!("http://jellyfin.local:80 {{\n\tbind 192.168.1.5\n{}", proxy(17101))));
+        assert!(c.contains(&format!("https://vault.local:443 {{\n\tbind 192.168.1.5\n\ttls internal\n{}", proxy(17103))));
         assert!(c.contains("http://vault.local:80 {\n\tbind 192.168.1.5\n\tredir https://vault.local{uri} permanent\n}"));
         assert!(c.ends_with("http://:80 {\n\tbind 192.168.1.5\n\trespond 404\n}\nhttps://:443 {\n\tbind 192.168.1.5\n\ttls internal\n\trespond 404\n}\n"));
         assert_eq!(c.matches('{').count(), c.matches('}').count());
@@ -765,10 +765,10 @@ mod tests {
     fn caddyfile_on_the_fallback_ports() {
         let (storage, site, cert, key) = (PathBuf::from("s"), PathBuf::from("w"), PathBuf::from("c"), PathBuf::from("k"));
         let files = CaddyFiles { storage: &storage, site: &site, ca: Some((&cert, &key)) };
-        let routes = [route("jellyfin", 47101, false), route("vault", 47103, true)];
+        let routes = [route("jellyfin", 17101, false), route("vault", 17103, true)];
         let c = caddyfile("192.168.1.5", &routes, &files, WebPorts::FALLBACKS[0]);
         assert!(c.contains("http://konak.local:18080 {\n\tbind 192.168.1.5\n"));
-        assert!(c.contains("http://jellyfin.local:18080 {\n\tbind 192.168.1.5\n\treverse_proxy 127.0.0.1:47101 "));
+        assert!(c.contains("http://jellyfin.local:18080 {\n\tbind 192.168.1.5\n\treverse_proxy 127.0.0.1:17101 "));
         assert!(c.contains("https://vault.local:18443 {\n\tbind 192.168.1.5\n\ttls internal\n"));
         // The redirect keeps the visitor on the fallback HTTPS port.
         assert!(c.contains("http://vault.local:18080 {\n\tbind 192.168.1.5\n\tredir https://vault.local:18443{uri} permanent\n}"));
@@ -779,14 +779,14 @@ mod tests {
 
     #[test]
     fn urls_carry_the_port_only_on_the_fallback() {
-        assert_eq!(route("movies", 47101, false).url(WebPorts::STANDARD), "http://movies.local");
-        assert_eq!(route("vault", 47104, true).url(WebPorts::STANDARD), "https://vault.local");
+        assert_eq!(route("movies", 17101, false).url(WebPorts::STANDARD), "http://movies.local");
+        assert_eq!(route("vault", 17104, true).url(WebPorts::STANDARD), "https://vault.local");
         let fb = WebPorts::FALLBACKS[1];
-        assert_eq!(route("movies", 47101, false).url(fb), "http://movies.local:28080");
-        assert_eq!(route("vault", 47104, true).url(fb), "https://vault.local:28443");
+        assert_eq!(route("movies", 17101, false).url(fb), "http://movies.local:28080");
+        assert_eq!(route("vault", 17104, true).url(fb), "https://vault.local:28443");
         assert!(!WebPorts::STANDARD.is_fallback() && WebPorts::FALLBACKS.iter().all(|p| p.is_fallback()));
         assert_eq!(WebPorts::default(), WebPorts::STANDARD);
-        let page = home_page(&[route("movies", 47101, false)], fb, &|k: &str| k.to_string());
+        let page = home_page(&[route("movies", 17101, false)], fb, &|k: &str| k.to_string());
         assert!(page.contains("<a href=\"http://movies.local:28080\">"));
     }
 
@@ -864,7 +864,7 @@ mod tests {
     #[test]
     fn home_page_lists_apps_escaped() {
         let text = |k: &str| if k == "apps.jellyfin.name" { "Jelly<fin>".to_string() } else { k.to_string() };
-        let page = home_page(&[route("jellyfin", 47101, false)], WebPorts::STANDARD, &text);
+        let page = home_page(&[route("jellyfin", 17101, false)], WebPorts::STANDARD, &text);
         assert!(page.contains("<a href=\"http://jellyfin.local\">Jelly&lt;fin&gt;</a>"));
         assert!(page.contains("/konak-root.crt"));
         assert!(home_page(&[], WebPorts::STANDARD, &text).contains("home.no_apps"));

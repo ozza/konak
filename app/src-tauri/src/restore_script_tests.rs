@@ -429,7 +429,7 @@ fn install_writes_never_go_through_what_sits_at_compose_yml_and_env() {
     std::fs::write(dir.join(".env.new"), b"left over").unwrap();
     let env = [("KONAK_APPS_DIR", slash(&apps_dir))];
     let (compose_b64, env_b64) = (b64("services: {}"), b64("KONAK_HOST=git.local"));
-    let args = ["forgejo", "47101", "/", &compose_b64, &env_b64, "FORGEJO_SECRET_KEY", "-", "-", "render"];
+    let args = ["forgejo", "17101", "/", &compose_b64, &env_b64, "FORGEJO_SECRET_KEY", "-", "-", "render"];
     let (code, text) = run(&bash, &base, install_sh, &args, &env, &[]);
     let (victim_after, victim_env_after) = (std::fs::read_to_string(&victim).unwrap(), std::fs::read_to_string(&victim_env).unwrap());
     let (compose, dotenv) = (std::fs::read_to_string(dir.join("compose.yml")).unwrap(), std::fs::read_to_string(dir.join(".env")).unwrap());
@@ -438,7 +438,7 @@ fn install_writes_never_go_through_what_sits_at_compose_yml_and_env() {
     // A folder named compose.yml: refused, nothing written into it, no temp file left.
     let dir2 = apps_dir.join("vaultwarden");
     std::fs::create_dir_all(dir2.join("compose.yml")).unwrap();
-    let args2 = ["vaultwarden", "47104", "/", &compose_b64, "-", "-", "-", "-", "render"];
+    let args2 = ["vaultwarden", "17104", "/", &compose_b64, "-", "-", "-", "-", "render"];
     let (code2, text2) = run(&bash, &base, install_sh, &args2, &env, &[]);
     let inside: Vec<_> = std::fs::read_dir(dir2.join("compose.yml")).unwrap().flatten().collect();
     let left2: Vec<String> = std::fs::read_dir(&dir2).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();

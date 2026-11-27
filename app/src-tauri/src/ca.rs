@@ -439,7 +439,7 @@ mod tests {
         ensure(&paths).unwrap();
         println!("fingerprint {}", fingerprint(&paths).unwrap());
         println!("serial {}", serial_hex(&paths).unwrap());
-        let routes = [Route { id: "test".into(), name: "test".into(), port: 47199, https: true }];
+        let routes = [Route { id: "test".into(), name: "test".into(), port: 17199, https: true }];
         let (cert, key, site) = (paths.ca_cert(), paths.ca_key(), paths.site_dir());
         let files = CaddyFiles { storage: &paths.caddy_storage(), site: &site, ca: Some((&cert, &key)) };
         let c = caddyfile("127.0.0.1", &routes, &files, WebPorts { http: 18080, https: 18443 });

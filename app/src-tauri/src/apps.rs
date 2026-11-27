@@ -913,7 +913,7 @@ mod tests {
         let net = shell::distro_script(&distro, script, &[]);
         println!("forgejo networks: {}", net.text.trim());
         assert!(net.ok && net.text.trim().starts_with("10.234."), "{}", net.text);
-        let mut s = std::net::TcpStream::connect("127.0.0.1:47105").unwrap();
+        let mut s = std::net::TcpStream::connect("127.0.0.1:17105").unwrap();
         s.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
         write!(s, "GET /api/healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").unwrap();
         let mut reply = String::new();
@@ -1009,7 +1009,7 @@ time="2026-11-24" level=warning msg="something""#;
         m.env.insert("PUBLIC_URL".into(), "${KONAK_URL}/x".into());
         m.env.insert("HOST".into(), "${KONAK_HOST}".into());
         let env = env_lines(&m, "movies", true, WebPorts::STANDARD);
-        assert!(env.contains("KONAK_HOST=movies.local\nKONAK_HOSTPORT=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=47101\nKONAK_PROXY_NET=10.234.0.0/16"));
+        assert!(env.contains("KONAK_HOST=movies.local\nKONAK_HOSTPORT=movies.local\nKONAK_URL=http://movies.local\nKONAK_PORT=17101\nKONAK_PROXY_NET=10.234.0.0/16"));
         assert!(env.contains("PUBLIC_URL=http://movies.local/x"));
         assert!(env.contains("HOST=movies.local"));
     }

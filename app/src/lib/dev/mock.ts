@@ -11,11 +11,11 @@ const port = q.has("port80") ? ":18080" : "";
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const catalog: Manifest[] = [
-  { id: "jellyfin", default_name: "jellyfin", port: 47101, https: false, min_ram_mb: 2048 },
-  { id: "immich", default_name: "photos", port: 47102, https: false, min_ram_mb: 4096 },
-  { id: "vaultwarden", default_name: "vault", port: 47103, https: true, min_ram_mb: 256 },
-  { id: "nextcloud", default_name: "cloud", port: 47104, https: false, min_ram_mb: 1536 },
-  { id: "forgejo", default_name: "git", port: 47105, https: false, min_ram_mb: 1024 },
+  { id: "jellyfin", default_name: "jellyfin", port: 17101, https: false, min_ram_mb: 2048 },
+  { id: "immich", default_name: "photos", port: 17102, https: false, min_ram_mb: 4096 },
+  { id: "vaultwarden", default_name: "vault", port: 17103, https: true, min_ram_mb: 256 },
+  { id: "nextcloud", default_name: "cloud", port: 17104, https: false, min_ram_mb: 1536 },
+  { id: "forgejo", default_name: "git", port: 17105, https: false, min_ram_mb: 1024 },
 ];
 
 // Container names as compose shows them; health only where the image defines a check.
@@ -47,7 +47,7 @@ const hostInfo = () => ({
 });
 const checks = () => [
   { check: "forward_policy", status: "ok", evidence: "no FORWARD chain with a DROP policy", fix: "", code: "forward_policy.ok" },
-  { check: "stale_netavark", status: q.has("stale") ? "fail" : "ok", evidence: q.has("stale") ? "DNAT jump for port 47104 points at a dead network" : "every netavark rule belongs to a live network", fix: "In Konak's distro as root, delete only that network's rules, then run `podman network reload --all`.", code: q.has("stale") ? "stale_netavark.foreign" : "stale_netavark.ok", args: q.has("stale") ? { ports: "47104" } : { containers: "6", open: "5" } },
+  { check: "stale_netavark", status: q.has("stale") ? "fail" : "ok", evidence: q.has("stale") ? "DNAT jump for port 17104 points at a dead network" : "every netavark rule belongs to a live network", fix: "In Konak's distro as root, delete only that network's rules, then run `podman network reload --all`.", code: q.has("stale") ? "stale_netavark.foreign" : "stale_netavark.ok", args: q.has("stale") ? { ports: "17104" } : { containers: "6", open: "5" } },
   { check: "keepalive", status: "ok", evidence: "keepalive pid 1234 alive, distro konak-podman running", fix: "", code: "keepalive.ok" },
   { check: "port80_owner", status: "ok", evidence: "Konak's caddy (pid 4321) listens on 192.168.1.20:80", fix: "", code: "port80_owner.ok" },
   { check: "lan_adapter", status: "ok", evidence: "LAN IP 192.168.1.20 on Ethernet (Intel Ethernet)", fix: "", code: "lan_adapter.ok", args: { ip: "192.168.1.20", adapter: "Ethernet" } },

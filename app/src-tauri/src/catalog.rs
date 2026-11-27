@@ -15,9 +15,13 @@ macro_rules! entry {
 /// Adding an app: create `catalog/<id>/` and add one line here.
 const ENTRIES: &[(&str, &str, &str)] = &[entry!("jellyfin"), entry!("immich"), entry!("nextcloud"), entry!("vaultwarden"), entry!("forgejo")];
 
-/// Host ports for apps come from this block: below the Windows dynamic range (49152+) and away from
-/// ports that other software on the PC commonly holds (3000, 8080, 8096, ...).
-pub const PORT_RANGE: std::ops::RangeInclusive<u16> = 47100..=47199;
+/// Host ports for apps come from this block, chosen like the fallback web ports
+/// (`WebPorts::FALLBACKS`): below 32768, where Linux's default ephemeral range starts, so outside it
+/// in NAT mode and outside the 44620-48715 range mirrored WSL reserves on Windows (the old 47100-47199
+/// block lay inside it); below the Windows dynamic range (49152+); outside the dev PC's
+/// `excludedportrange` entries (5357, 13508, blocks from 50000 up); away from the fallback web ports
+/// and from ports other software commonly holds (3000, 8080, 8096, ...).
+pub const PORT_RANGE: std::ops::RangeInclusive<u16> = 17100..=17199;
 
 /// Windows folders an app may mount. Keys are what manifests write in `mounts`.
 pub const MOUNT_KINDS: [&str; 2] = ["media", "photos"];
@@ -75,7 +79,7 @@ pub fn parse(id: &str, json: &str, compose: &'static str) -> Result<Manifest, St
         return err("default_name must be a DNS label other than konak");
     }
     if !PORT_RANGE.contains(&m.port) {
-        return err("port must be inside 47100-47199");
+        return err("port must be inside 17100-17199");
     }
     // It ends up in a curl URL inside the distro: no query strings, quotes or shell characters.
     let path_char = |c: char| c.is_ascii_alphanumeric() || "/._-".contains(c);
@@ -164,14 +168,14 @@ impl Manifest {
 mod tests {
     use super::*;
 
-    const GOOD: &str = r#"{"id":"demo","default_name":"demo","port":47150,"health_path":"/","min_ram_mb":256,
+    const GOOD: &str = r#"{"id":"demo","default_name":"demo","port":17150,"health_path":"/","min_ram_mb":256,
         "secrets":["DB_PASSWORD"],"mounts":{"MEDIA_DIR":"media"},"env":{"URL":"${KONAK_URL}"}}"#;
     const COMPOSE: &str = "services:\n  a:\n    image: x/y@sha256:abc\n    ports:\n      - 127.0.0.1:${KONAK_PORT}:80\n";
 
     #[test]
     fn parses_a_valid_manifest() {
         let m = parse("demo", GOOD, COMPOSE).unwrap();
-        assert_eq!(m.port, 47150);
+        assert_eq!(m.port, 17150);
         assert!(!m.https);
         assert_eq!(m.mounts["MEDIA_DIR"], "media");
         assert!(m.claimed_env.is_empty());
@@ -180,10 +184,24 @@ mod tests {
     }
 
     #[test]
+    fn the_app_port_block_avoids_reserved_and_taken_ranges() {
+        let (lo, hi) = (*PORT_RANGE.start(), *PORT_RANGE.end());
+        assert!(hi < 32768, "below Linux's default ephemeral range (NAT mode)");
+        assert!(hi < 44620 || lo > 48715, "outside the range mirrored WSL reserves on Windows");
+        for ports in crate::services::WebPorts::FALLBACKS {
+            assert!(!PORT_RANGE.contains(&ports.http) && !PORT_RANGE.contains(&ports.https), "{ports:?}");
+        }
+        for m in all() {
+            assert!(PORT_RANGE.contains(&m.port), "{}", m.id);
+        }
+    }
+
+    #[test]
     fn rejects_bad_manifests() {
         let bad = |from: &str, to: &str| parse("demo", &GOOD.replace(from, to), COMPOSE).is_err();
         assert!(parse("other", GOOD, COMPOSE).is_err(), "id must match folder");
-        assert!(bad("47150", "8096"), "port outside block");
+        assert!(bad("17150", "8096"), "port outside block");
+        assert!(bad("17150", "47150"), "the old block, inside mirrored WSL's reserved range");
         assert!(bad(r#""default_name":"demo""#, r#""default_name":"konak""#));
         assert!(bad(r#""health_path":"/""#, r#""health_path":"health""#));
         for path in ["/a b", "/x?y=1", "/x&y", "/$(id)", "/a;b", "/a'b", "/a\\\"b", "/ü"] {

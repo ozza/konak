@@ -37,9 +37,9 @@ table inet netavark {
 	}
 
 	chain NETAVARK-HOSTPORT-DNAT {
-		ip daddr 127.0.0.1 tcp dport 47105 jump nv_872ecb86_10_234_0_0_nm24_dnat
+		ip daddr 127.0.0.1 tcp dport 17105 jump nv_872ecb86_10_234_0_0_nm24_dnat
 		tcp dport 8000 jump nv_ff1513d2_10_89_2_0_nm24_dnat
-		ip daddr 127.0.0.1 tcp dport 47105 jump nv_655c363a_10_234_1_0_nm24_dnat
+		ip daddr 127.0.0.1 tcp dport 17105 jump nv_655c363a_10_234_1_0_nm24_dnat
 	}
 
 	chain NETAVARK-HOSTPORT-SETMARK {
@@ -79,9 +79,9 @@ table inet netavark {
 	}
 
 	chain nv_872ecb86_10_234_0_0_nm24_dnat {
-		ip saddr 10.234.0.0/24 ip daddr 127.0.0.1 tcp dport 47105 jump NETAVARK-HOSTPORT-SETMARK
-		ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport 47105 jump NETAVARK-HOSTPORT-SETMARK
-		ip daddr 127.0.0.1 tcp dport 47105 dnat ip to 10.234.0.2:3000
+		ip saddr 10.234.0.0/24 ip daddr 127.0.0.1 tcp dport 17105 jump NETAVARK-HOSTPORT-SETMARK
+		ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport 17105 jump NETAVARK-HOSTPORT-SETMARK
+		ip daddr 127.0.0.1 tcp dport 17105 dnat ip to 10.234.0.2:3000
 	}
 
 	chain nv_655c363a_10_234_1_0_nm24 {
@@ -90,8 +90,8 @@ table inet netavark {
 	}
 
 	chain nv_655c363a_10_234_1_0_nm24_dnat {
-		ip saddr 10.234.1.0/24 ip daddr 127.0.0.1 tcp dport 47105 jump NETAVARK-HOSTPORT-SETMARK
-		ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport 47105 jump NETAVARK-HOSTPORT-SETMARK
-		ip daddr 127.0.0.1 tcp dport 47105 dnat ip to 10.234.1.2:3000
+		ip saddr 10.234.1.0/24 ip daddr 127.0.0.1 tcp dport 17105 jump NETAVARK-HOSTPORT-SETMARK
+		ip saddr 127.0.0.1 ip daddr 127.0.0.1 tcp dport 17105 jump NETAVARK-HOSTPORT-SETMARK
+		ip daddr 127.0.0.1 tcp dport 17105 dnat ip to 10.234.1.2:3000
 	}
 }

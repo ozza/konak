@@ -978,9 +978,9 @@ mod tests {
             keepalive_image: Some(r"C:\Windows\System32\wsl.exe".into()),
             caddy: r"C:\Konak\bin\caddy.exe".into(),
             forward: Some("## nft\n\t\ttype filter hook forward priority filter; policy accept;\n".into()),
-            netavark: Some("table present\ncontainer jellyfin\nport jellyfin 47101\n".into()),
+            netavark: Some("table present\ncontainer jellyfin\nport jellyfin 17101\n".into()),
             wsl_net: Some("mode nat\nrange 32768\t60999\n".into()),
-            probes: vec![probe("jellyfin", 47101, true)],
+            probes: vec![probe("jellyfin", 17101, true)],
             port80_bindable: Some(false),
         }
     }
@@ -1006,8 +1006,8 @@ mod tests {
     fn problems_are_reported_with_a_fix() {
         let mut f = facts();
         f.forward = Some("## nft\n\t\ttype filter hook forward priority filter; policy drop;\n## iptables-legacy\n-P FORWARD DROP\n".into());
-        f.netavark = Some("table missing\ncontainer jellyfin\nport jellyfin 47101\n".into());
-        f.probes = vec![probe("jellyfin", 47101, false)];
+        f.netavark = Some("table missing\ncontainer jellyfin\nport jellyfin 17101\n".into());
+        f.probes = vec![probe("jellyfin", 17101, false)];
         f.keepalive_image = None;
         f.net.as_mut().unwrap().port80 = vec![Listener { address: "0.0.0.0".into(), pid: 4, image: Some(r"C:\Windows\System32\httpd.exe".into()) }];
         f.net.as_mut().unwrap().adapter = Some(Adapter { alias: "vEthernet (WSL)".into(), description: "Hyper-V Virtual Ethernet Adapter".into(), index: 3, category: "Public".into() });
@@ -1023,14 +1023,14 @@ mod tests {
 
         // Only a closed port while the table exists: a warning (container may still be starting).
         let mut f = facts();
-        f.netavark = Some("table present\ncontainer immich\nport immich 47102\n".into());
-        f.probes = vec![probe("immich", 47102, false)];
+        f.netavark = Some("table present\ncontainer immich\nport immich 17102\n".into());
+        f.probes = vec![probe("immich", 17102, false)];
         assert_eq!(stale_netavark(&f).status, "warn");
-        assert!(stale_netavark(&f).evidence.contains("immich:47102"));
+        assert!(stale_netavark(&f).evidence.contains("immich:17102"));
     }
 
     // Run 3 of the spike (finding N1): the dead konak-subnettest network 872ecb86 still forwards
-    // 47105, in front of the forgejo network 655c363a of Konak's own Podman.
+    // 17105, in front of the forgejo network 655c363a of Konak's own Podman.
     const N1_BEFORE: &str = include_str!("testdata/nft-stale-before-forgejo.txt");
     const N1_AFTER: &str = include_str!("testdata/nft-after-stale-cleanup.txt");
     const FORGEJO_NET: &str = "655c363a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6";
@@ -1042,20 +1042,20 @@ mod tests {
         assert!(t.chains.contains(&"nv_872ecb86_10_234_0_0_nm24_dnat".to_string()));
         let dnat: Vec<&NftRule> = t.rules.iter().filter(|r| r.chain == "NETAVARK-HOSTPORT-DNAT").collect();
         assert_eq!(dnat.len(), 3);
-        assert_eq!(dnat[0], &NftRule { chain: "NETAVARK-HOSTPORT-DNAT".into(), handle: None, dports: vec![47105], jump: Some("nv_872ecb86_10_234_0_0_nm24_dnat".into()) });
+        assert_eq!(dnat[0], &NftRule { chain: "NETAVARK-HOSTPORT-DNAT".into(), handle: None, dports: vec![17105], jump: Some("nv_872ecb86_10_234_0_0_nm24_dnat".into()) });
 
         let found = foreign_konak_dnat(&t, &[FORGEJO_NET, DEFAULT_NET]);
         assert_eq!(
             found,
             vec![ForeignNetwork {
                 id: "872ecb86".into(),
-                ports: vec![47105],
+                ports: vec![17105],
                 jumps: vec![("POSTROUTING".into(), None), ("NETAVARK-HOSTPORT-DNAT".into(), None)],
                 chains: vec!["nv_872ecb86_10_234_0_0_nm24".into(), "nv_872ecb86_10_234_0_0_nm24_dnat".into()],
             }]
         );
         // The spike's 8000 forward (network ff1513d2, another distro) is outside Konak's ports.
-        // Without forgejo's network known, its 47105 forward is foreign too.
+        // Without forgejo's network known, its 17105 forward is foreign too.
         assert_eq!(foreign_konak_dnat(&t, &[DEFAULT_NET]).iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["872ecb86", "655c363a"]);
         // After the manual cleanup nothing is left to report.
         assert!(foreign_konak_dnat(&parse_nft_text(N1_AFTER), &[DEFAULT_NET]).is_empty());
@@ -1063,7 +1063,7 @@ mod tests {
 
     #[test]
     fn reads_handles_from_text_and_json() {
-        let text = "table inet netavark { # handle 7\n\tchain NETAVARK-HOSTPORT-DNAT { # handle 4\n\t\tip daddr 127.0.0.1 tcp dport 47105 jump nv_872ecb86_10_234_0_0_nm24_dnat # handle 105\n\t}\n\tchain POSTROUTING { # handle 2\n\t\ttype nat hook postrouting priority srcnat; policy accept;\n\t\tip saddr 10.234.0.0/24 jump nv_872ecb86_10_234_0_0_nm24 # handle 103\n\t}\n\tchain nv_872ecb86_10_234_0_0_nm24 { # handle 50\n\t\tip daddr 10.234.0.0/24 accept # handle 51\n\t}\n\tchain nv_872ecb86_10_234_0_0_nm24_dnat { # handle 52\n\t\tip daddr 127.0.0.1 tcp dport 47105 dnat ip to 10.234.0.2:3000 # handle 53\n\t}\n}\n";
+        let text = "table inet netavark { # handle 7\n\tchain NETAVARK-HOSTPORT-DNAT { # handle 4\n\t\tip daddr 127.0.0.1 tcp dport 17105 jump nv_872ecb86_10_234_0_0_nm24_dnat # handle 105\n\t}\n\tchain POSTROUTING { # handle 2\n\t\ttype nat hook postrouting priority srcnat; policy accept;\n\t\tip saddr 10.234.0.0/24 jump nv_872ecb86_10_234_0_0_nm24 # handle 103\n\t}\n\tchain nv_872ecb86_10_234_0_0_nm24 { # handle 50\n\t\tip daddr 10.234.0.0/24 accept # handle 51\n\t}\n\tchain nv_872ecb86_10_234_0_0_nm24_dnat { # handle 52\n\t\tip daddr 127.0.0.1 tcp dport 17105 dnat ip to 10.234.0.2:3000 # handle 53\n\t}\n}\n";
         let json = r#"{"nftables": [{"metainfo": {"version": "1.0.9", "json_schema_version": 1}},
             {"table": {"family": "inet", "name": "netavark", "handle": 7}},
             {"chain": {"family": "inet", "table": "netavark", "name": "NETAVARK-HOSTPORT-DNAT", "handle": 4}},
@@ -1072,14 +1072,14 @@ mod tests {
             {"chain": {"family": "inet", "table": "netavark", "name": "nv_872ecb86_10_234_0_0_nm24_dnat", "handle": 52}},
             {"rule": {"family": "inet", "table": "netavark", "chain": "NETAVARK-HOSTPORT-DNAT", "handle": 105, "expr": [
                 {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.1"}},
-                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 47105}},
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 17105}},
                 {"jump": {"target": "nv_872ecb86_10_234_0_0_nm24_dnat"}}]}},
             {"rule": {"family": "inet", "table": "netavark", "chain": "POSTROUTING", "handle": 103, "expr": [
                 {"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": {"prefix": {"addr": "10.234.0.0", "len": 24}}}},
                 {"jump": {"target": "nv_872ecb86_10_234_0_0_nm24"}}]}},
             {"rule": {"family": "inet", "table": "netavark", "chain": "nv_872ecb86_10_234_0_0_nm24", "handle": 51, "expr": [{"accept": null}]}},
             {"rule": {"family": "inet", "table": "netavark", "chain": "nv_872ecb86_10_234_0_0_nm24_dnat", "handle": 53, "expr": [
-                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 47105}},
+                {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 17105}},
                 {"dnat": {"family": "ip", "addr": "10.234.0.2", "port": 3000}}]}}]}"#;
         let from_json = parse_nft_json(json).unwrap();
         assert_eq!(parse_nft_text(text), from_json);
@@ -1095,41 +1095,41 @@ mod tests {
     #[test]
     fn stale_netavark_reports_a_foreign_network_as_fail() {
         let mut f = facts();
-        let probes = "table present\ncontainer forgejo\nport forgejo 47105\n";
-        f.probes = vec![probe("forgejo", 47105, false)];
+        let probes = "table present\ncontainer forgejo\nport forgejo 17105\n";
+        f.probes = vec![probe("forgejo", 17105, false)];
         f.netavark = Some(format!("{probes}## podman networks\n{FORGEJO_NET}\n{DEFAULT_NET}\n## nft text\n{N1_BEFORE}"));
         let c = stale_netavark(&f);
         assert_eq!(c.status, "fail");
-        assert!(c.evidence.contains("network 872ecb86") && c.evidence.contains("47105") && !c.evidence.contains("655c363a"), "{c:?}");
+        assert!(c.evidence.contains("network 872ecb86") && c.evidence.contains("17105") && !c.evidence.contains("655c363a"), "{c:?}");
         assert!(c.fix.contains("nft delete chain inet netavark nv_872ecb86_10_234_0_0_nm24_dnat") && !c.fix.contains("655c363a") && !c.fix.contains("delete table"), "{c:?}");
         // Without Konak's network list, nothing is called foreign: back to the closed-port warning.
         f.netavark = Some(format!("{probes}## nft text\n{N1_BEFORE}"));
         assert_eq!(stale_netavark(&f).status, "warn");
         // After the cleanup: ok.
-        f.probes = vec![probe("forgejo", 47105, true)];
-        f.netavark = Some(format!("table present\ncontainer forgejo\nport forgejo 47105\n## podman networks\n{FORGEJO_NET}\n## nft text\n{N1_AFTER}"));
+        f.probes = vec![probe("forgejo", 17105, true)];
+        f.netavark = Some(format!("table present\ncontainer forgejo\nport forgejo 17105\n## podman networks\n{FORGEJO_NET}\n## nft text\n{N1_AFTER}"));
         assert_eq!(stale_netavark(&f).status, "ok");
     }
 
     #[test]
     fn a_port_answered_without_a_konak_forward_is_not_konaks() {
-        // Konak's forgejo network forwards 47105; 47101 answers but has no forward at all (03 R3:
+        // Konak's forgejo network forwards 17105; 17101 answers but has no forward at all (03 R3:
         // another distro or a Windows program answers there).
-        let dump = "table inet netavark {\n\tchain NETAVARK-HOSTPORT-DNAT {\n\t\tip daddr 127.0.0.1 tcp dport 47105 jump nv_655c363a_10_234_1_0_nm24_dnat\n\t\ttcp dport 8000 jump nv_ff1513d2_10_89_2_0_nm24_dnat\n\t}\n}\n";
-        assert_eq!(own_dnat_ports(&parse_nft_text(dump), &[FORGEJO_NET]), vec![47105]);
+        let dump = "table inet netavark {\n\tchain NETAVARK-HOSTPORT-DNAT {\n\t\tip daddr 127.0.0.1 tcp dport 17105 jump nv_655c363a_10_234_1_0_nm24_dnat\n\t\ttcp dport 8000 jump nv_ff1513d2_10_89_2_0_nm24_dnat\n\t}\n}\n";
+        assert_eq!(own_dnat_ports(&parse_nft_text(dump), &[FORGEJO_NET]), vec![17105]);
         let mut f = facts();
-        let head = "table present\ncontainer forgejo\nport forgejo 47105\ncontainer jellyfin\nport jellyfin 47101\n";
+        let head = "table present\ncontainer forgejo\nport forgejo 17105\ncontainer jellyfin\nport jellyfin 17101\n";
         f.netavark = Some(format!("{head}## podman networks\n{FORGEJO_NET}\n## nft text\n{dump}"));
-        f.probes = vec![probe("forgejo", 47105, true), probe("jellyfin", 47101, true)];
+        f.probes = vec![probe("forgejo", 17105, true), probe("jellyfin", 17101, true)];
         let c = stale_netavark(&f);
-        assert_eq!((c.status, c.code, c.args["ports"].as_str()), ("warn", "stale_netavark.closed", "jellyfin:47101"), "{c:?}");
+        assert_eq!((c.status, c.code, c.args["ports"].as_str()), ("warn", "stale_netavark.closed", "jellyfin:17101"), "{c:?}");
         assert!(c.evidence.contains("another program answers"), "{c:?}");
         // With both forwarded into Konak's networks: ok.
-        let both = dump.replace("tcp dport 8000 jump nv_ff1513d2_10_89_2_0_nm24_dnat", "tcp dport 47101 jump nv_655c363a_10_234_1_0_nm24_dnat");
+        let both = dump.replace("tcp dport 8000 jump nv_ff1513d2_10_89_2_0_nm24_dnat", "tcp dport 17101 jump nv_655c363a_10_234_1_0_nm24_dnat");
         f.netavark = Some(format!("{head}## podman networks\n{FORGEJO_NET}\n## nft text\n{both}"));
         assert_eq!(stale_netavark(&f).status, "ok");
         // Only Konak's app ports are probed at all.
-        assert_eq!(published_ports("port db 5432\nport forgejo 47105\nport web 8080\n"), vec![("forgejo".to_string(), 47105)]);
+        assert_eq!(published_ports("port db 5432\nport forgejo 17105\nport web 8080\n"), vec![("forgejo".to_string(), 17105)]);
     }
 
     #[test]
@@ -1255,17 +1255,17 @@ mod tests {
     #[test]
     fn published_ports_are_probed_from_windows() {
         // Evidence 21/26 (mirrored mode): two apps, both answering from Windows.
-        let out = "table present\ncontainer jellyfin\nport jellyfin 47101\ncontainer vaultwarden\nport vaultwarden 47104\ncontainer db\n## podman networks\nport not-a-probe 1\n";
-        assert_eq!(published_ports(out), vec![("jellyfin".to_string(), 47101), ("vaultwarden".to_string(), 47104)]);
+        let out = "table present\ncontainer jellyfin\nport jellyfin 17101\ncontainer vaultwarden\nport vaultwarden 17104\ncontainer db\n## podman networks\nport not-a-probe 1\n";
+        assert_eq!(published_ports(out), vec![("jellyfin".to_string(), 17101), ("vaultwarden".to_string(), 17104)]);
         let mut f = facts();
         f.netavark = Some(out.into());
-        f.probes = vec![probe("jellyfin", 47101, true), probe("vaultwarden", 47104, true)];
+        f.probes = vec![probe("jellyfin", 17101, true), probe("vaultwarden", 17104, true)];
         let c = stale_netavark(&f);
         assert_eq!((c.status, c.code), ("ok", "stale_netavark.ok"), "{c:?}");
         assert_eq!((c.args["containers"].as_str(), c.args["open"].as_str()), ("3", "2"));
         f.probes[1].open = false;
         let c = stale_netavark(&f);
-        assert_eq!((c.status, c.code, c.args["ports"].as_str()), ("warn", "stale_netavark.closed", "vaultwarden:47104"));
+        assert_eq!((c.status, c.code, c.args["ports"].as_str()), ("warn", "stale_netavark.closed", "vaultwarden:17104"));
         assert!(c.evidence.contains("from Windows"), "{c:?}");
     }
 

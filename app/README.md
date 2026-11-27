@@ -8,7 +8,7 @@ What it does today:
   - a reboot when WSL needs one, after which it resumes on its own;
   - its own Debian WSL distro with systemd, Podman, pinned docker-compose and Konak's boot unit;
   - Caddy and the mDNS responder on the LAN IP, serving Konak's home page at `http://konak.local`.
-- **Installs apps from the embedded catalog** (`src-tauri/catalog/<id>/`: `app.json` + upstream `compose.yml`, images pinned by digest). Each app gets a fixed host port in 47100–47199 bound to 127.0.0.1 in the distro and a `.local` name proxied by Caddy. Apps with `"https": true` are served with `tls internal` from Konak's own root CA, which is name-constrained to `.local`.
+- **Installs apps from the embedded catalog** (`src-tauri/catalog/<id>/`: `app.json` + upstream `compose.yml`, images pinned by digest). Each app gets a fixed host port in 17100–17199 bound to 127.0.0.1 in the distro and a `.local` name proxied by Caddy. Apps with `"https": true` are served with `tls internal` from Konak's own root CA, which is name-constrained to `.local`.
 - **Then stays in the tray** and supervises the distro keepalive, Caddy and mDNS every 10 s, including when the LAN IP or the app list changes.
 
 ## Build

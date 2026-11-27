@@ -1,7 +1,7 @@
 {
   "id": "immich",
   "default_name": "immich",
-  "port": 47102,
+  "port": 17102,
   "https": false,
   "health_path": "/api/server/ping",
   "secrets": ["DB_PASSWORD"],

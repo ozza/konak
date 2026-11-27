@@ -1,7 +1,7 @@
 {
   "id": "forgejo",
   "default_name": "forgejo",
-  "port": 47105,
+  "port": 17105,
   "https": false,
   "health_path": "/api/healthz",
   "secrets": ["FORGEJO_SECRET_KEY"],

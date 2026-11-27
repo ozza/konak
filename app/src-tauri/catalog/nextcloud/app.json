@@ -1,7 +1,7 @@
 {
   "id": "nextcloud",
   "default_name": "nextcloud",
-  "port": 47103,
+  "port": 17103,
   "https": false,
   "health_path": "/status.php",
   "secrets": ["POSTGRES_PASSWORD"],
