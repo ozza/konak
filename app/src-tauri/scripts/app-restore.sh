@@ -124,6 +124,8 @@ case "$cmd" in
     rm -rf --one-file-system "$staging"
     # A fresh install has no app folder yet.
     mkdir -p "$staging" "$apps"
+    # A refused or failed extract leaves no staging folder behind.
+    trap 'rm -rf --one-file-system "$staging"' EXIT
     # GNU tar refuses members with "..", strips leading "/", and creates symlinks only at the end, so
     # nothing is written outside the staging folder. Only user.* xattrs (and POSIX ACLs) come back:
     # trusted.* and security.* (file capabilities) are not taken from a backup file.
@@ -165,6 +167,7 @@ case "$cmd" in
     done
     mv "$staging/$id" "$dir"
     rmdir "$staging"
+    trap - EXIT
     echo extracted
     ;;
   import)

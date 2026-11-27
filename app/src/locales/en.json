@@ -91,7 +91,7 @@
     "backup_unreadable": "Konak cannot read this file.",
     "backup_restore_failed": "The restore did not finish.",
     "restore_nothing_chosen": "Choose at least one thing to restore.",
-    "restore_app_exists": "This app is already installed. Tick 'Replace' to restore it over the current one.",
+    "restore_app_exists": "This app is already installed. To restore it over the current one, tick the box above that names it and start the restore again.",
     "restore_app_not_in_backup": "This app is not in the backup.",
     "restore_aside_exists": "An earlier restore of this app did not finish and could not be undone automatically. Restart Konak. If this message stays, the log at %LOCALAPPDATA%\\Konak\\logs\\install.log says why.",
     "restore_no_free_name": "No free name was found for this app on your network.",
@@ -108,7 +108,7 @@
     "autostart_other_value": "Another copy of Konak on this PC is still set to start with Windows. Konak left that setting as it is.",
     "backup_cancelled": "The backup was cancelled. No file was kept.",
     "backup_not_running": "No backup is running.",
-    "restore_app_data_left": "Data from an earlier copy of this app is still on this PC. Tick 'Replace' to restore over it; replacing deletes that data.",
+    "restore_app_data_left": "Data from an earlier copy of this app is still on this PC. To restore over it, tick the box above that names it and start the restore again; that data is then deleted.",
     "restore_app_newer": "This backup was made with a newer version of the app than this Konak has. Update Konak, then restore it."
   },
   "tray": {

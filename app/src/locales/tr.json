@@ -91,7 +91,7 @@
     "backup_unreadable": "Konak bu dosyayı okuyamıyor.",
     "backup_restore_failed": "Geri yükleme tamamlanmadı.",
     "restore_nothing_chosen": "Geri yüklenecek en az bir şey seçin.",
-    "restore_app_exists": "Bu uygulama zaten kurulu. Mevcut olanın üzerine geri yüklemek için 'Değiştir'i işaretleyin.",
+    "restore_app_exists": "Bu uygulama zaten kurulu. Mevcut olanın üzerine geri yüklemek için yukarıda adının geçtiği kutuyu işaretleyip geri yüklemeyi yeniden başlatın.",
     "restore_app_not_in_backup": "Bu uygulama yedekte yok.",
     "restore_aside_exists": "Bu uygulamanın önceki bir geri yüklemesi bitmedi ve kendiliğinden geri alınamadı. Konak'ı yeniden başlatın. Bu ileti kalırsa nedenini %LOCALAPPDATA%\\Konak\\logs\\install.log günlüğü söyler.",
     "restore_no_free_name": "Bu uygulama için ağınızda boş bir ad bulunamadı.",
@@ -108,7 +108,7 @@
     "autostart_other_value": "Bu bilgisayardaki başka bir Konak kopyası hâlâ Windows ile başlayacak şekilde ayarlı. Konak o ayarı olduğu gibi bıraktı.",
     "backup_cancelled": "Yedekleme iptal edildi. Dosya tutulmadı.",
     "backup_not_running": "Çalışan bir yedekleme yok.",
-    "restore_app_data_left": "Bu uygulamanın önceki bir kopyasının verileri hâlâ bu bilgisayarda. Üzerine geri yüklemek için 'Değiştir'i işaretleyin; değiştirmek o verileri siler.",
+    "restore_app_data_left": "Bu uygulamanın önceki bir kopyasının verileri hâlâ bu bilgisayarda. Üzerine geri yüklemek için yukarıda adının geçtiği kutuyu işaretleyip geri yüklemeyi yeniden başlatın; o veriler o zaman silinir.",
     "restore_app_newer": "Bu yedek, uygulamanın bu Konak'takinden daha yeni bir sürümüyle alınmış. Konak'ı güncelleyin, sonra geri yükleyin."
   },
   "tray": {

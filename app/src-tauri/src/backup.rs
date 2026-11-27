@@ -501,7 +501,7 @@ pub struct BackupEntry {
     pub size_bytes: u64,
     pub apps: Vec<String>,
     /// ok (verified when written) | partial (verified, but some files or apps were left out:
-    /// `skipped`, `notes`) | failed (no file) | unverified (a Konak file this PC has no record of,
+    /// `skipped`, `notes`) | failed or cancelled (no file, `file` empty) | unverified (a Konak file this PC has no record of,
     /// e.g. copied from another PC)
     pub status: &'static str,
     /// A failed run's locale code, and its technical text.
@@ -542,7 +542,8 @@ fn konak_files(dir: &Path) -> Vec<(String, std::fs::Metadata)> {
         .collect()
 }
 
-/// The backup files in the location, plus the recent failed runs, newest first. A file this PC has
+/// The backup files in the location, plus the recent failed and cancelled runs (no file, so an
+/// empty `file`), newest first. A file this PC has
 /// no record of (another install's, copied here) shows its manifest's time and apps when the stored
 /// password opens it (one scrypt and the manifest, not a full read: it stays `unverified`), and
 /// otherwise its write time and no apps.
@@ -573,8 +574,13 @@ pub fn list(paths: &Paths) -> Vec<BackupEntry> {
             out.push(BackupEntry { file, created_unix, size_bytes: meta.len(), apps, status, error: None, detail: None, skipped, notes });
         }
     }
-    for h in history.iter().filter(|h| h.status == "failed") {
-        out.push(BackupEntry { file: h.file.clone(), created_unix: h.created_unix, size_bytes: 0, apps: h.apps.clone(), status: "failed", error: h.error.clone(), detail: h.detail.clone(), skipped: 0, notes: vec![] });
+    for h in history.iter() {
+        let status = match h.status.as_str() {
+            "failed" => "failed",
+            "cancelled" => "cancelled",
+            _ => continue,
+        };
+        out.push(BackupEntry { file: String::new(), created_unix: h.created_unix, size_bytes: 0, apps: h.apps.clone(), status, error: h.error.clone(), detail: h.detail.clone(), skipped: 0, notes: vec![] });
     }
     out.sort_by_key(|e| std::cmp::Reverse(e.created_unix));
     out
@@ -1154,7 +1160,9 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
             r
         });
         let _ = std::fs::remove_file(inflight_file(paths));
-        ctx.host.release(id, &result);
+        // A cancel is not the app's failure; one whose restart failed too (text after the code) is.
+        let user_cancel = matches!(&result, Err(e) if e.ends_with(CANCELLED));
+        ctx.host.release(id, if user_cancel { &Ok(()) } else { &result });
         match result {
             Ok(()) => {}
             Err(e) if cancelled() => return Err(app_fail(e)),
@@ -1490,6 +1498,7 @@ pub(crate) mod tests {
     struct FakeHost {
         events: RefCell<Vec<Progress>>,
         busy: RefCell<Vec<String>>,
+        released: RefCell<Vec<(String, Result<(), String>)>>,
     }
 
     impl Host for FakeHost {
@@ -1500,7 +1509,9 @@ pub(crate) mod tests {
             self.busy.borrow_mut().push(id.into());
             true
         }
-        fn release(&self, _: &str, _: &Result<(), String>) {}
+        fn release(&self, id: &str, r: &Result<(), String>) {
+            self.released.borrow_mut().push((id.into(), r.clone()));
+        }
     }
 
     #[test]
@@ -1509,7 +1520,7 @@ pub(crate) mod tests {
         let mut st = State::default();
         st.done = true;
         st.save(&paths);
-        let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]) };
+        let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]), released: RefCell::new(vec![]) };
         let guard = test_guard();
         assert_eq!(Guard::acquire().err().as_deref(), Some("backup_running"));
         let r = run(&paths, &host, &FakeApps::new(true), &guard, 10, true);
@@ -1641,7 +1652,7 @@ pub(crate) mod tests {
         settings::set_password(&paths, None, "a long enough secret").unwrap();
         // A partial left by an earlier run is cleared.
         std::fs::write(out.join("konak-20200101-000000.konakbackup.partial"), b"").unwrap();
-        let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]) };
+        let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]), released: RefCell::new(vec![]) };
         let guard = test_guard();
         let r = run(&paths, &host, &FakeApps::new(true), &guard, 10, false);
         drop(guard);
@@ -1687,7 +1698,7 @@ pub(crate) mod tests {
     const PW: &str = "a long enough secret";
 
     fn fake_host() -> FakeHost {
-        FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]) }
+        FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]), released: RefCell::new(vec![]) }
     }
 
     fn size(id: &str, volumes: &[&str]) -> AppSize {
@@ -1852,10 +1863,13 @@ pub(crate) mod tests {
         drop(guard);
         let left = files_in(&out);
         let history = load_history(&paths);
+        let listed = list(&paths);
         let inflight = inflight_app(&paths);
         cleanup(&paths, &out);
         assert!(r.is_err());
         assert!(!after, "the cancel request is cleared for the next run");
+        assert_eq!(*host.released.borrow(), [("nextcloud".to_string(), Ok(()))], "a cancel is not shown as the app's failure");
+        assert_eq!(listed.iter().map(|e| (e.status, e.file.as_str(), e.error.as_deref())).collect::<Vec<_>>(), [("cancelled", "", Some(CANCELLED))], "listed, with no file name");
         assert!(left.is_empty(), "{left:?}");
         assert_eq!(inflight, None);
         assert_eq!((history[0].status.as_str(), history[0].error.as_deref()), ("cancelled", Some(CANCELLED)));

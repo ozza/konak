@@ -306,12 +306,14 @@ fn extract_keeps_files_and_folders_and_refuses_the_rest() {
         let (code, text) = run(&bash, &base, RESTORE_SH, &["extract", "forgejo", "forgejo"], &restore_env(&base), &archive(members));
         let dir = root.join("apps").join("forgejo");
         let placed = dir.is_dir();
+        let staging_left = root.join("restore-staging").join("forgejo").exists();
         let b = std::fs::read(dir.join("forgejo").join("b")).ok();
         let top = if placed { names(&dir) } else { vec![] };
         let _ = std::fs::remove_dir_all(&base);
         assert_eq!(code, want_code, "{tag}: {text}");
         assert!(text.contains(want_text), "{tag}: {text}");
         assert_eq!(placed, want_code == 0, "{tag}: the folder is moved into place only when it passes");
+        assert!(!staging_left, "{tag}: no staging folder is left");
         if want_code == 0 {
             assert_eq!(b.as_deref(), Some(&b"data"[..]));
             assert_eq!(top, [".env", "forgejo"], "the archive's compose.yml and install leftovers are dropped");

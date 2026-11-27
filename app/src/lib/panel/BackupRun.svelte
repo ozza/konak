@@ -111,14 +111,14 @@
     <p class="text-[13px] text-muted">{t("panel.backup.none")}</p>
   {:else}
     <ul class="flex flex-col">
-      {#each history as h (h.file)}
+      {#each history as h (`${h.created_unix}:${h.file}`)}
         <li class="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-b border-border-soft py-2.5 text-[13px] last:border-0">
           <span class="w-4 {h.status === 'ok' ? 'text-ok' : h.status === 'failed' ? 'text-error' : h.status === 'cancelled' ? 'text-muted' : 'text-warn'}" aria-hidden="true">{h.status === "ok" ? "●" : h.status === "failed" ? "✕" : h.status === "cancelled" ? "–" : "!"}</span>
           <span class="font-medium">{when(h.created_unix)}</span>
           <span class="text-muted">{formatBytes(h.size_bytes)}</span>
           <span class="text-muted">{h.apps.map(appName).join(", ")}</span>
           <span class="sr-only">{t(`panel.backup.status_${h.status}`)}</span>
-          {#if h.error}<span class="w-full pl-7 text-xs text-error">{message(h.error)}</span>{/if}
+          {#if h.error}<span class="w-full pl-7 text-xs {h.status === 'cancelled' ? 'text-muted' : 'text-error'}">{message(h.error)}</span>{/if}
           {#if h.status === "partial"}
             <details class="w-full pl-7 text-xs text-warn-text"><summary class="cursor-pointer">{t("panel.backup.status_partial")} ({h.skipped ?? 0})</summary>
               <ul class="mt-1 font-mono break-all text-muted">{#each h.notes ?? [] as n, i (i)}<li>{n}</li>{/each}</ul></details>

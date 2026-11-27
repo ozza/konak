@@ -38,6 +38,8 @@
   let caAllowed = $derived(apps.length === 0);
   let pct = $derived(progress?.total_bytes ? Math.min(100, Math.round(((progress.done_bytes ?? 0) / progress.total_bytes) * 100)) : null);
   const message = (e: unknown) => errorText(e).message ?? errorText(e).details;
+  // A refusal the summary already lists per app is not repeated in the status line.
+  const inSummary = (code: string) => !!progress?.summary?.failed.some((f) => f.error === code);
   const stepText = (step: string) => (has(`panel.backup.step.${step}`) ? t(`panel.backup.step.${step}`) : step);
 
   $effect(() => {
@@ -141,7 +143,7 @@
         <p class="text-xs text-muted">{t("panel.restore.note.restore_ca_invalid")}</p>
       {/if}
     </fieldset>
-    {#if clashes.length > 0}
+    {#if clashes.length > 0 && (canStart || running)}
       <label class="flex items-start gap-2.5 rounded-lg border border-error-border bg-error-bg p-3 text-sm">
         <input type="checkbox" bind:checked={replace} disabled={running} class="mt-0.5 size-4 shrink-0 accent-error" />
         <span class="flex flex-col gap-1">
@@ -154,7 +156,7 @@
       {#if starting && !progress}{t("panel.restore.starting")}
       {:else if progress?.state === "running"}{stepText(progress.step)}{#if progress.app} · {appName(progress.app)}{/if}
       {:else if progress?.state === "done"}<span class="text-ok">{t("panel.restore.done")}</span>
-      {:else if progress}<span class="text-error">{t("panel.restore.failed")} {progress.error ? message(progress.error) : ""}</span>
+      {:else if progress}<span class="text-error">{t("panel.restore.failed")} {progress.error && !inSummary(progress.error) ? message(progress.error) : ""}</span>
         {#if progress.detail}<details class="mt-1 text-xs"><summary class="cursor-pointer text-muted">{t("errors.details")}</summary><pre class="mt-1 font-mono break-all whitespace-pre-wrap">{progress.detail}</pre></details>{/if}{/if}
       {#if progress?.state === "running"}
         <div class="h-1.5 overflow-hidden rounded-full bg-border" role="progressbar" aria-label={stepText(progress.step)} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? undefined}>
