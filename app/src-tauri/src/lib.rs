@@ -851,7 +851,7 @@ fn start_backup(app: AppHandle, why: &'static str) -> Result<(), String> {
             if let Some(id) = backup::recover(&k.paths, &apps) {
                 backup::Host::release(&host,&id, &Err("internal error".into()));
             }
-            let _ = app.emit("backup-progress", backup::Progress { state: "failed", step: "prepare", app: None, done_bytes: None, total_bytes: None, error: Some("internal error".into()) });
+            let _ = app.emit("backup-progress", backup::Progress { state: "failed", step: "prepare", app: None, done_bytes: None, total_bytes: None, error: Some("backup_failed".into()), detail: Some("internal error".into()) });
         }
         drop(guard);
     });

@@ -4,7 +4,7 @@
 //! Consistency, "the safe way" of the plan: apps are archived one at a time, each stopped
 //! (`docker-compose stop`) while its folder and named volumes stream out of the distro, then started
 //! again if it was running. Every database is thus copied at rest. The Windows Photos and Media
-//! folders are plain files, copied after every app's part while the apps run.
+//! folders are plain files, copied before the apps' parts while the apps run.
 //!
 //! A run writes `<location>\konak-<YYYYMMDD-HHMMSS>.konakbackup.partial`, re-reads all of it
 //! (decrypt and checksums), and only then renames it to `.konakbackup`. A failure removes the
@@ -103,7 +103,11 @@ pub struct Progress {
     pub app: Option<String>,
     pub done_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
+    /// A locale code (`errors.<code>`): `backup_app_failed` and `backup_failed` stand for any
+    /// error without a code of its own.
     pub error: Option<String>,
+    /// The technical text behind `error`, redacted; for details on demand.
+    pub detail: Option<String>,
 }
 
 /// The running Konak: progress events and the busy set the panel's app operations use.
@@ -309,7 +313,10 @@ struct HistoryEntry {
     apps: Vec<String>,
     /// ok | failed
     status: String,
+    /// A locale code, as in `Progress`.
     error: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
     step: Option<String>,
 }
 
@@ -343,7 +350,9 @@ pub struct BackupEntry {
     /// ok (verified when written) | failed (no file) | unverified (a Konak file this PC has no
     /// record of, e.g. copied from another PC)
     pub status: &'static str,
+    /// A failed run's locale code, and its technical text.
     pub error: Option<String>,
+    pub detail: Option<String>,
 }
 
 fn same_file(a: &str, b: &str) -> bool {
@@ -362,27 +371,33 @@ fn konak_files(dir: &Path) -> Vec<(String, std::fs::Metadata)> {
         .collect()
 }
 
-/// The backup files in the location, plus the recent failed runs, newest first.
+/// The backup files in the location, plus the recent failed runs, newest first. A file this PC has
+/// no record of (another install's, copied here) shows its manifest's time and apps when the stored
+/// password opens it (one scrypt and the manifest, not a full read: it stays `unverified`), and
+/// otherwise its write time and no apps.
 pub fn list(paths: &Paths) -> Vec<BackupEntry> {
     let history = load_history(paths);
     let mut out = vec![];
     if let Some(loc) = settings::load(paths).backup.location {
+        let mut pw: Option<Option<SecretString>> = None;
         for (name, meta) in konak_files(Path::new(&loc)) {
             let file = Path::new(&loc).join(&name).to_string_lossy().to_string();
             let known = history.iter().find(|h| h.status == "ok" && same_file(&h.file, &file));
-            let mtime = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-            out.push(BackupEntry {
-                file,
-                created_unix: known.map_or(mtime, |h| h.created_unix),
-                size_bytes: meta.len(),
-                apps: known.map(|h| h.apps.clone()).unwrap_or_default(),
-                status: if known.is_some() { "ok" } else { "unverified" },
-                error: None,
-            });
+            let (created_unix, apps) = match known {
+                Some(h) => (h.created_unix, h.apps.clone()),
+                None => {
+                    let pw = pw.get_or_insert_with(|| settings::password(paths).ok().flatten());
+                    match pw.as_ref().and_then(|pw| fmt::open(Path::new(&file), pw).ok()) {
+                        Some(b) => (b.manifest.created_unix, b.manifest.apps.iter().map(|a| a.id.clone()).collect()),
+                        None => (meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs()), vec![]),
+                    }
+                }
+            };
+            out.push(BackupEntry { file, created_unix, size_bytes: meta.len(), apps, status: if known.is_some() { "ok" } else { "unverified" }, error: None, detail: None });
         }
     }
     for h in history.iter().filter(|h| h.status == "failed") {
-        out.push(BackupEntry { file: h.file.clone(), created_unix: h.created_unix, size_bytes: 0, apps: h.apps.clone(), status: "failed", error: h.error.clone() });
+        out.push(BackupEntry { file: h.file.clone(), created_unix: h.created_unix, size_bytes: 0, apps: h.apps.clone(), status: "failed", error: h.error.clone(), detail: h.detail.clone() });
     }
     out.sort_by_key(|e| std::cmp::Reverse(e.created_unix));
     out
@@ -400,8 +415,9 @@ pub struct Inspected {
 }
 
 /// The manifest of a backup file and its root CA. An empty `password` uses the stored one. The CA
-/// files come after the apps in the file, so this reads (and decrypts) up to them; the rest of the
-/// file is not checked here, a restore verifies all of it first.
+/// files come right after the manifest (after the apps in files written before Photos and Media
+/// came first), so this reads (and decrypts) up to them; the rest of the file is not checked here,
+/// a restore verifies all of it first.
 pub fn inspect(paths: &Paths, path: &str, password: &str) -> Result<Inspected, String> {
     if settings::wsl_path(path) {
         return Err("backup_path_refused".into());
@@ -641,7 +657,7 @@ struct Ctx<'a> {
 impl Ctx<'_> {
     fn step(&self, step: &'static str, app: Option<&str>, done: u64) {
         self.last.set(Some(Instant::now()));
-        self.host.progress(&Progress { state: "running", step, app: app.map(String::from), done_bytes: Some(done.min(self.total.get())), total_bytes: Some(self.total.get()), error: None });
+        self.host.progress(&Progress { state: "running", step, app: app.map(String::from), done_bytes: Some(done.min(self.total.get())), total_bytes: Some(self.total.get()), error: None, detail: None });
     }
     fn bytes(&self, step: &'static str, app: Option<&str>, done: u64) {
         if self.last.get().is_none_or(|t| t.elapsed() >= Duration::from_millis(500)) {
@@ -745,14 +761,14 @@ pub fn run(paths: &Paths, host: &dyn Host, apps: &dyn Apps, _guard: &Guard, log_
         Ok(p) => {
             let size = std::fs::metadata(p).map_or(0, |m| m.len());
             crate::log(paths, &format!("backup done: {} ({size} bytes, {:.0} s)", p.display(), t0.elapsed().as_secs_f64()));
-            record(paths, HistoryEntry { file: file_for_history, created_unix: created, size_bytes: size, apps: ids, status: "ok".into(), error: None, step: None });
-            host.progress(&Progress { state: "done", step: "done", app: None, done_bytes: Some(ctx.total.get()), total_bytes: Some(ctx.total.get()), error: None });
+            record(paths, HistoryEntry { file: file_for_history, created_unix: created, size_bytes: size, apps: ids, status: "ok".into(), error: None, detail: None, step: None });
+            host.progress(&Progress { state: "done", step: "done", app: None, done_bytes: Some(ctx.total.get()), total_bytes: Some(ctx.total.get()), error: None, detail: None });
         }
         Err(f) => {
-            let error = redact(&f.error);
-            crate::log(paths, &format!("backup failed at {}{}: {error}", f.step, f.app.as_deref().map(|a| format!(" ({a})")).unwrap_or_default()));
-            record(paths, HistoryEntry { file: file_for_history, created_unix: created, size_bytes: 0, apps: ids, status: "failed".into(), error: Some(error.clone()), step: Some(f.step.into()) });
-            host.progress(&Progress { state: "failed", step: f.step, app: f.app.clone(), done_bytes: None, total_bytes: None, error: Some(error) });
+            crate::log(paths, &format!("backup failed at {}{}: {}", f.step, f.app.as_deref().map(|a| format!(" ({a})")).unwrap_or_default(), redact(&f.error)));
+            let (error, detail) = crate::redact::code_and_detail(&f.error, if f.step == "app" { "backup_app_failed" } else { "backup_failed" });
+            record(paths, HistoryEntry { file: file_for_history, created_unix: created, size_bytes: 0, apps: ids, status: "failed".into(), error: Some(error.clone()), detail: detail.clone(), step: Some(f.step.into()) });
+            host.progress(&Progress { state: "failed", step: f.step, app: f.app.clone(), done_bytes: None, total_bytes: None, error: Some(error), detail });
         }
     }
     result
@@ -828,6 +844,49 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
     crate::log(paths, &format!("backup started: {} ({} apps, about {total} bytes)", partial.display(), manifest.apps.len()));
     let mut w = Writer::new(BufWriter::with_capacity(1 << 20, file), &pw, &manifest, log_n).map_err(|e| fail("prepare", write_error(e)))?;
 
+    ctx.step("konak", None, w.bytes());
+    let konak = |e| fail("konak", write_error(e));
+    for (rel, path) in &ca {
+        if path.is_file() {
+            let body = std::fs::read(path).map_err(|e| fail("konak", format!("cannot read {}: {e}", path.display())))?;
+            w.add_bytes(&format!("konak/{rel}"), &body, 0o600, created).map_err(konak)?;
+        }
+    }
+    let essentials = serde_json::json!({ "apps": state.apps, "rendered_ports": state.rendered_ports });
+    w.add_bytes("konak/state.json", &serde_json::to_vec_pretty(&essentials).unwrap(), 0o600, created).map_err(konak)?;
+    let mut stored = s.clone();
+    stored.backup.password_set = false;
+    w.add_bytes("konak/settings.json", &serde_json::to_vec_pretty(&stored).unwrap(), 0o600, created).map_err(konak)?;
+
+    // Photos and Media before the apps: a restore reads the file in order and must have them in
+    // place before it starts an app that mounts them (Immich checks its folders at start).
+    for (step, root, on) in [("photos", &paths.photos, photos.is_some()), ("media", &paths.media, media.is_some())] {
+        if !on {
+            continue;
+        }
+        ctx.step(step, None, w.bytes());
+        let mut skipped = vec![];
+        walk(root, &mut skipped, step, &mut |rel, abs, meta| {
+            let mtime = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+            match std::fs::File::open(abs) {
+                Ok(f) => {
+                    let r = std::io::BufReader::with_capacity(1 << 20, f);
+                    w.add_reader(&format!("{step}/{rel}"), meta.len(), r, 0o644, mtime).map_err(write_error)?;
+                }
+                Err(e) => w.skip(format!("{step}/{rel} (unreadable: {e})")),
+            }
+            ctx.bytes(step, None, w.bytes());
+            Ok(())
+        })
+        .map_err(|e| fail(step, e))?;
+        if !skipped.is_empty() {
+            crate::log(paths, &format!("backup: {} entries of {step} left out, e.g. {}", skipped.len(), skipped[0]));
+        }
+        for s in skipped {
+            w.skip(s);
+        }
+    }
+
     for z in &sizes {
         let id = z.id.as_str();
         let app_fail = |e: String| Failed { step: "app", app: Some(id.to_string()), error: e };
@@ -857,47 +916,6 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
         let _ = std::fs::remove_file(inflight_file(paths));
         ctx.host.release(id, &result);
         result.map_err(app_fail)?;
-    }
-
-    ctx.step("konak", None, w.bytes());
-    let konak = |e| fail("konak", write_error(e));
-    for (rel, path) in &ca {
-        if path.is_file() {
-            let body = std::fs::read(path).map_err(|e| fail("konak", format!("cannot read {}: {e}", path.display())))?;
-            w.add_bytes(&format!("konak/{rel}"), &body, 0o600, created).map_err(konak)?;
-        }
-    }
-    let essentials = serde_json::json!({ "apps": state.apps, "rendered_ports": state.rendered_ports });
-    w.add_bytes("konak/state.json", &serde_json::to_vec_pretty(&essentials).unwrap(), 0o600, created).map_err(konak)?;
-    let mut stored = s.clone();
-    stored.backup.password_set = false;
-    w.add_bytes("konak/settings.json", &serde_json::to_vec_pretty(&stored).unwrap(), 0o600, created).map_err(konak)?;
-
-    for (step, root, on) in [("photos", &paths.photos, photos.is_some()), ("media", &paths.media, media.is_some())] {
-        if !on {
-            continue;
-        }
-        ctx.step(step, None, w.bytes());
-        let mut skipped = vec![];
-        walk(root, &mut skipped, step, &mut |rel, abs, meta| {
-            let mtime = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-            match std::fs::File::open(abs) {
-                Ok(f) => {
-                    let r = std::io::BufReader::with_capacity(1 << 20, f);
-                    w.add_reader(&format!("{step}/{rel}"), meta.len(), r, 0o644, mtime).map_err(write_error)?;
-                }
-                Err(e) => w.skip(format!("{step}/{rel} (unreadable: {e})")),
-            }
-            ctx.bytes(step, None, w.bytes());
-            Ok(())
-        })
-        .map_err(|e| fail(step, e))?;
-        if !skipped.is_empty() {
-            crate::log(paths, &format!("backup: {} entries of {step} left out, e.g. {}", skipped.len(), skipped[0]));
-        }
-        for s in skipped {
-            w.skip(s);
-        }
     }
 
     let (buf, sums) = w.finish(created).map_err(|e| fail("finish", write_error(e)))?;
@@ -1166,8 +1184,8 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&paths.home);
         assert_eq!(r.unwrap_err(), fail("prepare", "backup_no_location"));
         let last = host.events.borrow().last().cloned().unwrap();
-        assert_eq!((last.state, last.step, last.error.as_deref()), ("failed", "prepare", Some("backup_no_location")));
-        assert_eq!(history[0].status, "failed");
+        assert_eq!((last.state, last.step, last.error.as_deref(), last.detail.as_deref()), ("failed", "prepare", Some("backup_no_location"), None));
+        assert_eq!((history[0].status.as_str(), history[0].error.as_deref()), ("failed", Some("backup_no_location")));
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].status, "failed");
         assert!(host.busy.borrow().is_empty());
@@ -1295,6 +1313,17 @@ pub(crate) mod tests {
         let inspected = inspect(&paths, &file.to_string_lossy(), "").unwrap();
         let wrong = inspect(&paths, &file.to_string_lossy(), "wrong password!");
         let names: Vec<String> = std::fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        // Files this PC has no record of: one the stored password opens (copied from another
+        // install), one it does not.
+        let mut other = m.clone();
+        other.created_unix = 5;
+        other.apps = vec![AppManifest { id: "forgejo".into(), name: "git".into(), claimed: true, stopped: false, size_bytes: 1, volumes: vec![] }];
+        for (name, password) in [("konak-20250101-000000.konakbackup", "a long enough secret"), ("konak-20240101-000000.konakbackup", "another password!")] {
+            let w = std::io::BufWriter::new(std::fs::File::create(out.join(name)).unwrap());
+            let (mut f, _) = Writer::new(w, &SecretString::from(password.to_string()), &other, 10).unwrap().finish(5).unwrap();
+            f.flush().unwrap();
+        }
+        let unknown = list(&paths);
         let _ = std::fs::remove_dir_all(&out);
         let _ = std::fs::remove_dir_all(&paths.home);
         assert_eq!(names.len(), 1, "{names:?}");
@@ -1308,6 +1337,11 @@ pub(crate) mod tests {
         assert_eq!(wrong.unwrap_err(), "backup_wrong_password");
         assert_eq!(listed.len(), 1);
         assert_eq!((listed[0].status, listed[0].error.as_deref()), ("ok", None));
+        let row = |name: &str| unknown.iter().find(|e| e.file.ends_with(name)).cloned().unwrap();
+        let (copied, foreign) = (row("konak-20250101-000000.konakbackup"), row("konak-20240101-000000.konakbackup"));
+        assert_eq!((copied.status, copied.created_unix, copied.apps.as_slice()), ("unverified", 5, &["forgejo".to_string()][..]), "the manifest's time and apps");
+        assert_eq!(foreign.status, "unverified");
+        assert!(foreign.created_unix > 1_000_000_000 && foreign.apps.is_empty(), "the file's write time: {foreign:?}");
         let steps: Vec<&str> = host.events.borrow().iter().map(|e| e.step).collect();
         assert!(steps.starts_with(&["prepare", "konak", "photos"]) && steps.ends_with(&["verify", "finish", "done"]), "{steps:?}");
     }

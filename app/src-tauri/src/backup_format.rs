@@ -7,15 +7,18 @@
 //! - an age v1 file (<https://age-encryption.org/v1>) with one scrypt passphrase stanza: the payload
 //!   is ChaCha20-Poly1305 in 64 KiB chunks, each authenticated, the last one marked, so any changed
 //!   byte or a truncation fails decryption at that point;
-//! - inside it, a zstd stream; inside that, a tar stream (ustar/GNU headers) of regular files only:
+//! - inside it, a zstd stream; inside that, a tar stream (ustar/GNU headers) of regular files only,
+//!   written in this order (files of earlier builds have the apps right after the manifest; readers
+//!   take any order between the manifest and the checksums):
 //!   - `manifest.json`, always the first entry (`Manifest`);
+//!   - `konak/ca/root.crt`, `konak/ca/root.key`, `konak/state.json` (apps, rendered ports),
+//!     `konak/settings.json` (never the password);
+//!   - `photos/<relative path>`, `media/<relative path>`: the Windows folders' files, one entry each,
+//!     before the apps, so a restore has them in place before it starts an app that mounts them;
 //!   - `apps/<id>/folder/<NNNNNN>`: consecutive chunks (at most `CHUNK` bytes each) of GNU tar's
 //!     output for the app's folder, `tar -C /var/lib/konak/apps -cpf - <id>` (members start with
 //!     `<id>/`, numeric owners, xattrs, ACLs); concatenated in order, they are that tar stream;
 //!   - `apps/<id>/volumes/<name>/<NNNNNN>`: the same for `podman volume export <podman_name>`;
-//!   - `konak/ca/root.crt`, `konak/ca/root.key`, `konak/state.json` (apps, rendered ports),
-//!     `konak/settings.json` (never the password);
-//!   - `photos/<relative path>`, `media/<relative path>`: the Windows folders' files, one entry each;
 //!   - `checksums.json`, always the last entry (`Checksums`): size and SHA-256 of every entry
 //!     before it, in archive order (manifest included).
 //!
