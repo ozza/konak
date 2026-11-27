@@ -131,7 +131,13 @@
       "body": "Konak'ın güvenlik duvarı kuralları eksik; örneğin Konak yeniden kurulduğunda bu olur. Kurallar geri gelene kadar Konak uygulamalarınızı ağa açmaz; böylece Windows onları her ağda açmak için izin istemez. Onarmak için bir kez yönetici izni gerekir.",
       "button": "Ağ erişimini onar",
       "running": "Ağ erişimi onarılıyor…",
-      "failed": "Onarım tamamlanmadı."
+      "failed": "Onarım tamamlanmadı.",
+      "details": "Neyin değişeceğini göster",
+      "details_intro": "Windows bir kez yönetici izni ister. Ardından Konak, Windows Defender Güvenlik Duvarı'na her biri tam programa bağlı şu gelen bağlantı kurallarını ekler:",
+      "rule_allow": "“{name}”: özel ağlarda (ev, iş) izin ver",
+      "rule_block": "“{name}”: ortak ağlarda (kafe, havalimanı) engelle",
+      "details_old": "Konak'ın önceki kuralları (güvenlik duvarındaki “Konak” grubu) önce silinir.",
+      "details_nothing_else": "Başka hiçbir şey değişmez: başka program, Windows özelliği ya da ağ ayarı yok. Kuralları Windows Defender Güvenlik Duvarı › Gelişmiş ayarlar › Gelen Kuralları altında kontrol edebilirsiniz."
     },
     "home_link_label": "Konak ana sayfasını aç, {host}",
     "loading": "Yükleniyor…",

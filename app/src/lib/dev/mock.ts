@@ -194,6 +194,8 @@ export function installMock() {
           if (settings.backup.password_set && a.current !== "correct horse battery") throw "password_current_wrong";
           settings = { ...settings, backup: { ...settings.backup, password_set: true } };
           return null;
+        case "firewall_programs":
+          return ["C:\\Users\\me\\AppData\\Local\\Konak\\bin\\caddy.exe", "C:\\Users\\me\\AppData\\Local\\Konak\\bin\\mdns-responder.exe"];
         case "list_backups":
           return backups;
         case "backup_status":

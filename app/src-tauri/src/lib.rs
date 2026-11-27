@@ -280,6 +280,13 @@ async fn refresh_network(app: AppHandle) -> Result<(), String> {
     .await
 }
 
+/// The programs setup and Repair give firewall rules, for the panel's "what will change" details.
+#[tauri::command]
+fn firewall_programs(app: AppHandle) -> Vec<String> {
+    let p = &app.state::<Konak>().paths;
+    [p.caddy(), p.mdns()].iter().map(|x| x.to_string_lossy().to_string()).collect()
+}
+
 /// "Repair network access" in the panel: the setup's elevated step again, so one UAC prompt, only
 /// ever on this click. Progress and result arrive as `status` events.
 #[tauri::command]
@@ -1248,6 +1255,7 @@ pub fn run() {
             get_status,
             start_install,
             refresh_network,
+            firewall_programs,
             repair_network,
             restart_pc,
             list_catalog,

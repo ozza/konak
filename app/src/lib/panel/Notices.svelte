@@ -23,6 +23,12 @@
   } = $props();
   let backupReason = $derived(backupFailure ? (errorText(backupFailure.error ?? "").message ?? backupFailure.detail ?? backupFailure.error ?? "") : "");
   let repairFailure = $derived(repairError ? errorText(repairError) : null);
+  // The exact programs the repair gives rules, so the user can check what the UAC prompt will do.
+  let programs = $state<string[]>([]);
+  const leaf = (path: string) => path.split(/[\\/]/).pop() ?? path;
+  $effect(() => {
+    if (firewallMissing && programs.length === 0) invoke<string[]>("firewall_programs").then((p) => (programs = p)).catch(() => {});
+  });
 </script>
 
 {#if webPorts && webPorts.http !== 80}
@@ -45,6 +51,25 @@
     <div class="flex min-w-0 flex-[1_1_320px] flex-col gap-1.5">
       <h2 id="repair-title" class="font-semibold text-warn-title">{t("panel.repair.title")}</h2>
       <p class="text-[13px] text-warn-text">{t("panel.repair.body")}</p>
+      <details class="text-[13px] text-warn-text">
+        <summary class="cursor-pointer font-medium">{t("panel.repair.details")}</summary>
+        <div class="mt-2 flex flex-col gap-2">
+          <p>{t("panel.repair.details_intro")}</p>
+          <ul class="flex flex-col gap-2">
+            {#each programs as prog (prog)}
+              <li>
+                <span class="font-mono text-xs break-all">{prog}</span>
+                <ul class="mt-1 list-disc pl-5">
+                  <li>{t("panel.repair.rule_allow", { name: `Konak ${leaf(prog)} (Private allow)` })}</li>
+                  <li>{t("panel.repair.rule_block", { name: `Konak ${leaf(prog)} (Public block)` })}</li>
+                </ul>
+              </li>
+            {/each}
+          </ul>
+          <p>{t("panel.repair.details_old")}</p>
+          <p>{t("panel.repair.details_nothing_else")}</p>
+        </div>
+      </details>
       {#if repairFailure}
         <div class="text-[13px] text-error" role="alert">
           <p class="font-medium">{t("panel.repair.failed")}</p>

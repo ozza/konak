@@ -131,7 +131,13 @@
       "body": "Konak's firewall rules are missing, for example after Konak was reinstalled. Until they are back, Konak keeps your apps off the network, so Windows does not ask to open them on every network. Repairing needs administrator permission once.",
       "button": "Repair network access",
       "running": "Repairing network access…",
-      "failed": "Repair did not finish."
+      "failed": "Repair did not finish.",
+      "details": "Show what will change",
+      "details_intro": "Windows asks for administrator permission once. Konak then adds these incoming-connection rules to Windows Defender Firewall, each tied to the exact program:",
+      "rule_allow": "“{name}”: allow on private networks (home, work)",
+      "rule_block": "“{name}”: block on public networks (cafés, airports)",
+      "details_old": "Earlier Konak rules (the “Konak” group in the firewall) are removed first.",
+      "details_nothing_else": "Nothing else changes: no other programs, Windows features or network settings. You can check the rules in Windows Defender Firewall › Advanced settings › Inbound Rules."
     },
     "home_link_label": "Open Konak's home page, {host}",
     "loading": "Loading…",
