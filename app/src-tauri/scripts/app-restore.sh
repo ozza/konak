@@ -1,14 +1,18 @@
 # Restore helpers for one app (see restore.rs). Args: command id [more]
 #   probe id [podman volume names]   what exists: the folder, set-aside copies, the app's volumes
-#   aside id                         removes the containers, moves the folder to <id>.before-restore
-#                                    and every volume's content to <id>.before-restore-volumes/<vol>
+#   aside id                         removes the containers, records the app's volumes in
+#                                    <id>.before-restore-volumes/.volumes, then moves the folder to
+#                                    <id>.before-restore and every volume's content to
+#                                    <id>.before-restore-volumes/<vol>
 #   extract id [bind sources]        stdin: GNU tar of the app folder (members <id>/...), unpacked in
-#                                    a staging folder, checked (files and folders only; compose.yml
-#                                    and .env files, the catalog's bind sources folders) and moved
-#                                    into place
+#                                    a staging folder, checked (files and folders only; at the top
+#                                    only .env and the catalog's bind sources, which must be folders)
+#                                    and moved into place. The archive's compose.yml is dropped:
+#                                    app-install.sh renders it from the catalog.
 #   import id compose_name podman_name   stdin: `podman volume export` output for that volume
 #   rollback id had_old              removes what the restore made; with had_old=1 moves the set-aside
-#                                    folder and volume content back
+#                                    folder and volume content back (refused when the set-aside
+#                                    folder has no record of the volumes)
 #   commit id                        deletes the set-aside copies
 #   stop id                          ends a still running extract or import of the app (Konak cut
 #                                    its stream) and waits until it has ended
@@ -27,6 +31,8 @@ staging=$root/restore-staging/$id
 run=${KONAK_RUN_DIR:-/run}
 lockf=$run/konak-restore-$id.lock pidf=$run/konak-restore-$id.pid
 export DOCKER_HOST=unix:///run/podman/podman.sock
+# docker-compose reads only the compose.yml Konak rendered (`-f`), never a file the environment names.
+unset COMPOSE_FILE COMPOSE_PATH_SEPARATOR
 label="label=com.docker.compose.project=$id"
 
 project_volumes() { podman volume ls -q --filter "$label" </dev/null; }
@@ -70,7 +76,7 @@ stop_running() {
 remove_containers() {
   if [ -f "$dir/compose.yml" ]; then
     # Up to a minute per container for a clean database shutdown, as a backup stops them.
-    (cd "$dir" && docker-compose -p "$id" down --remove-orphans -t 60 </dev/null)
+    (cd "$dir" && docker-compose -f compose.yml -p "$id" down --remove-orphans -t 60 </dev/null)
   fi
   # Whatever is left without a compose file (an extract that failed before it was in place).
   local c n
@@ -93,12 +99,21 @@ case "$cmd" in
   aside)
     [ ! -e "$aside" ] && [ ! -e "$vaside" ] || { echo "an earlier restore left $aside" >&2; exit 3; }
     remove_containers
-    mkdir -p "$vaside"
-    if [ -e "$dir" ]; then mv "$dir" "$aside"; else touch "$vaside/.no-folder"; fi
-    for v in $(project_volumes); do
+    # The app's volumes are recorded before anything moves, in a folder renamed into place whole:
+    # $vaside never exists without the record. A rollback removes only volumes not in it.
+    rm -rf --one-file-system "$vaside.new"
+    mkdir -p "$vaside.new"
+    project_volumes > "$vaside.new/.volumes"
+    [ -e "$dir" ] || touch "$vaside.new/.no-folder"
+    mv -T "$vaside.new" "$vaside"
+    if [ -e "$dir" ]; then mv "$dir" "$aside"; fi
+    while IFS= read -r v; do
+      mp=$(mountpoint_of "$v")
       mkdir "$vaside/$v"
-      move_content "$(mountpoint_of "$v")" "$vaside/$v"
-    done
+      move_content "$mp" "$vaside/$v"
+    done < "$vaside/.volumes"
+    # Everything is moved: from here a volume's content may be the restore's.
+    touch "$vaside/.complete"
     echo aside
     ;;
   extract)
@@ -136,6 +151,18 @@ case "$cmd" in
       p="$staging/$id/$b"
       [ ! -e "$p" ] || [ -d "$p" ] || { echo "$b is not a folder" >&2; exit 4; }
     done
+    # app-install.sh renders compose.yml and .env from the catalog (keeping .env's secrets). The
+    # archive's compose.yml, and what an interrupted install left, never reach a compose call.
+    rm -f -- "$staging/$id/compose.yml" "$staging/$id/.env.new" "$staging/$id"/.compose.yml.?????? "$staging/$id"/.env.??????
+    # Nothing else at the top: docker-compose would take a compose.yaml or compose.override.yml
+    # there over or on top of the catalog's file, and a Konak app folder holds nothing else.
+    for p in "$staging/$id"/* "$staging/$id"/.[!.]* "$staging/$id"/..?*; do
+      n=${p##*/}
+      [ "$n" != .env ] || continue
+      for b in "$@"; do [ "$n" != "$b" ] || continue 2; done
+      echo "the archive holds $n, which is not part of a Konak app folder" >&2
+      exit 4
+    done
     mv "$staging/$id" "$dir"
     rmdir "$staging"
     echo extracted
@@ -158,6 +185,11 @@ case "$cmd" in
   rollback)
     had_old="$3"
     stop_running
+    # Without the record, which volumes the restore made is unknown: nothing is changed.
+    if [ "$had_old" = 1 ] && [ -d "$vaside" ] && [ ! -f "$vaside/.volumes" ]; then
+      echo "$vaside has no record of the app's volumes; nothing was changed" >&2
+      exit 7
+    fi
     remove_containers
     rm -rf --one-file-system "$staging"
     if [ "$had_old" != 1 ]; then
@@ -173,24 +205,27 @@ case "$cmd" in
       elif [ -e "$vaside/.no-folder" ]; then
         rm -rf --one-file-system "$dir"
       fi
-      # Volumes the restore created, which the app did not have before.
+      # Volumes the restore created, which the app did not have before. A recorded volume that
+      # `aside` did not reach yet still holds its own content and stays as it is.
       for v in $(project_volumes); do
-        if [ ! -d "$vaside/$v" ]; then podman volume rm -f "$v" </dev/null >/dev/null; fi
+        if ! grep -qxF -- "$v" "$vaside/.volumes"; then podman volume rm -f "$v" </dev/null >/dev/null; fi
       done
       for d in "$vaside"/*/; do
         v=$(basename "$d")
         mp=$(mountpoint_of "$v")
-        empty "$mp"
+        # Before `aside` completed nothing was imported, and what it had not moved yet is the
+        # app's own: only moved back, never emptied first.
+        if [ -e "$vaside/.complete" ]; then empty "$mp"; fi
         move_content "$d" "$mp"
         rmdir "$d"
       done
-      rm -f "$vaside/.no-folder"
+      rm -f "$vaside/.no-folder" "$vaside/.volumes" "$vaside/.complete"
       rmdir "$vaside"
     fi
     echo rolled back
     ;;
   commit)
-    rm -rf --one-file-system "$aside" "$vaside"
+    rm -rf --one-file-system "$aside" "$vaside" "$vaside.new"
     echo committed
     ;;
   stop)

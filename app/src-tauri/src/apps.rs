@@ -612,8 +612,13 @@ pub fn rerender_for_ports(paths: &Paths, ports: WebPorts, on_app: &dyn Fn(&str, 
 
 /// Runs a docker-compose command for an installed app in its directory.
 pub(crate) fn compose(paths: &Paths, id: &str, args: &str) -> shell::Out {
-    let script = format!("set -e\ncd /var/lib/konak/apps/\"$1\"\nexport DOCKER_HOST=unix:///run/podman/podman.sock\ndocker-compose -p \"$1\" {args}\n");
-    shell::distro_script(&paths.distro, &script, &[id])
+    shell::distro_script(&paths.distro, &compose_script(args), &[id])
+}
+
+/// The script behind `compose`: only the compose.yml Konak rendered (`-f`), never a compose.yaml or
+/// compose.override.yml next to it, nor a file the environment names.
+pub(crate) fn compose_script(args: &str) -> String {
+    format!("set -e\ncd /var/lib/konak/apps/\"$1\"\nexport DOCKER_HOST=unix:///run/podman/podman.sock\nunset COMPOSE_FILE COMPOSE_PATH_SEPARATOR\ndocker-compose -f compose.yml -p \"$1\" {args}\n")
 }
 
 fn set_stopped(paths: &Paths, id: &str, stopped: bool) -> Result<(), String> {
