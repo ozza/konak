@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Konak: turn a Windows PC into a home server"
 authors = ["Konak contributors"]
 edition = "2021"
+license = "GPL-3.0-only"
 
 [lib]
 # The `_lib` suffix keeps the lib name distinct from the bin name (cargo#8519 on Windows).
