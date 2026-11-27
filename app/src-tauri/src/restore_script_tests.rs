@@ -229,6 +229,74 @@ fn a_rollback_of_a_half_moved_volume_never_empties_it() {
     assert_eq!(after, [("nextcloud_nextcloud/a.txt".to_string(), "moved".to_string()), ("nextcloud_nextcloud/b.txt".to_string(), "not moved yet".to_string())]);
 }
 
+#[test]
+fn a_rollback_cut_off_while_moving_back_never_empties_the_volume_again() {
+    let Some(bash) = git_bash() else {
+        eprintln!("Git for Windows' bash not found: skipped");
+        return;
+    };
+    // `aside` completed and the restore imported its data; the rollback's move back is cut after the
+    // first entry (a fake `mv`), then the rollback runs again at the next start.
+    let base = temp("rollback-twice");
+    let mut env = fake_env(&base, "-");
+    std::fs::write(base.join("shim").join("mv"), "#!/bin/bash
+if [ \"$FAKE_MV_CUT\" = 1 ] && [ \"$1\" = -t ]; then /usr/bin/mv -t \"$2\" \"$3\"; exit 1; fi
+exec /usr/bin/mv \"$@\"
+").unwrap();
+    let vols = base.join("vols");
+    let vaside = base.join("root").join("apps").join("nextcloud.before-restore-volumes");
+    write_tree(&vols, &[("nextcloud_db/restored.txt", "restored")]);
+    write_tree(&vaside, &[(".volumes", "nextcloud_db
+"), (".no-folder", ""), (".complete", ""), ("nextcloud_db/a.txt", "old a"), ("nextcloud_db/b.txt", "old b")]);
+    // Git's bash puts /usr/bin first; BASH_ENV runs before the script and puts the fake `mv` first.
+    std::fs::write(base.join("bash_env"), format!("export PATH=\"$(cygpath -u '{}'):$PATH\"
+", slash(&base.join("shim")))).unwrap();
+    env.push(("BASH_ENV", slash(&base.join("bash_env"))));
+    env.push(("FAKE_MV_CUT", "1".into()));
+    let (code1, text1) = run(&bash, &base, RESTORE_SH, &["rollback", "nextcloud", "1"], &env, &[]);
+    let half = tree(&vols);
+    env.pop();
+    let (code2, text2) = run(&bash, &base, RESTORE_SH, &["rollback", "nextcloud", "1"], &env, &[]);
+    let after = tree(&vols);
+    let vaside_left = vaside.exists();
+    let _ = std::fs::remove_dir_all(&base);
+    assert_ne!(code1, 0, "the first run is cut: {text1}");
+    assert_eq!(half.len(), 1, "one entry was moved back before the cut: {half:?}");
+    assert_eq!(code2, 0, "{text2}");
+    assert_eq!(after, [("nextcloud_db/a.txt".to_string(), "old a".to_string()), ("nextcloud_db/b.txt".to_string(), "old b".to_string())], "both halves of the old data");
+    assert!(!vaside_left);
+}
+
+#[test]
+fn aside_keeps_a_volume_the_backup_has_no_data_for() {
+    let Some(bash) = git_bash() else {
+        eprintln!("Git for Windows' bash not found: skipped");
+        return;
+    };
+    let base = temp("aside-keep");
+    let env = fake_env(&base, "-");
+    let vols = base.join("vols");
+    let vaside = base.join("root").join("apps").join("nextcloud.before-restore-volumes");
+    write_tree(&vols, &[("nextcloud_db/pg.txt", "old db"), ("nextcloud_nextcloud/user.txt", "user files")]);
+    let (code, text) = run(&bash, &base, RESTORE_SH, &["aside", "nextcloud", "nextcloud_nextcloud"], &env, &[]);
+    let set_aside = tree(&vaside);
+    let in_place = tree(&vols);
+    // A rollback leaves the kept volume as it is; a commit too.
+    let (rcode, rtext) = run(&bash, &base, RESTORE_SH, &["rollback", "nextcloud", "1"], &env, &[]);
+    let rolled = tree(&vols);
+    let (bad, _) = run(&bash, &base, RESTORE_SH, &["aside", "nextcloud", "../x"], &env, &[]);
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(code, 0, "{text}");
+    let s = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
+    assert_eq!(set_aside, s(&[(".complete", ""), (".no-folder", ""), (".volumes", "nextcloud_db
+nextcloud_nextcloud
+"), ("nextcloud_db/pg.txt", "old db")]));
+    assert_eq!(in_place, s(&[("nextcloud_nextcloud/user.txt", "user files")]), "the kept volume is not moved");
+    assert_eq!(rcode, 0, "{rtext}");
+    assert_eq!(rolled, s(&[("nextcloud_db/pg.txt", "old db"), ("nextcloud_nextcloud/user.txt", "user files")]));
+    assert_eq!(bad, 2, "kept names are checked like volume names");
+}
+
 /// Every docker-compose call Konak makes names compose.yml (`-f`), with `COMPOSE_FILE` unset:
 /// without `-f`, docker-compose prefers a compose.yaml and merges a compose.override.yml.
 #[test]

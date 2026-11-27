@@ -14,7 +14,9 @@
   let password = $state("");
   let manifest = $state<BackupManifest | null>(null);
   let chosen = $state<string[]>([]);
-  let replace = $state(false);
+  // The apps the Replace box named when it was ticked: the consent covers exactly those, so a box
+  // that names other apps (another choice, or data a refusal found) is unticked again.
+  let replaceFor = $state<string[] | null>(null);
   let photos = $state(false);
   let media = $state(false);
   let ca = $state(false);
@@ -30,6 +32,7 @@
   let installedClashes = $derived(chosen.filter((a) => apps.some((x) => x.id === a)));
   let dataClashes = $derived(chosen.filter((a) => leftData.includes(a) && !installedClashes.includes(a)));
   let clashes = $derived([...installedClashes, ...dataClashes]);
+  let replace = $derived(!!replaceFor && replaceFor.length === clashes.length && clashes.every((a) => replaceFor!.includes(a)));
   // After a run that failed before changing anything, the choices stay and it can be started again.
   let canStart = $derived(!progress || progress.state === "failed");
   let running = $derived(starting || progress?.state === "running");
@@ -46,7 +49,8 @@
     if (!open) return;
     file = manifest = progress = error = null;
     password = "";
-    replace = photos = media = ca = starting = false;
+    photos = media = ca = starting = false;
+    replaceFor = null;
     leftData = [];
     const off = listen<BackupProgress>("restore-progress", ({ payload }) => {
       progress = payload;
@@ -84,7 +88,7 @@
     progress = null;
     starting = true;
     try {
-      await invoke("restore_backup", { path: file, password, apps: chosen, replace, photos, media, ca: ca && caAllowed });
+      await invoke("restore_backup", { path: file, password, apps: chosen, replace: replace ? clashes : [], photos, media, ca: ca && caAllowed });
     } catch (err) {
       starting = false;
       error = message(err);
@@ -145,7 +149,7 @@
     </fieldset>
     {#if clashes.length > 0 && (canStart || running)}
       <label class="flex items-start gap-2.5 rounded-lg border border-error-border bg-error-bg p-3 text-sm">
-        <input type="checkbox" bind:checked={replace} disabled={running} class="mt-0.5 size-4 shrink-0 accent-error" />
+        <input type="checkbox" checked={replace} onchange={(e) => (replaceFor = e.currentTarget.checked ? [...clashes] : null)} disabled={running} class="mt-0.5 size-4 shrink-0 accent-error" />
         <span class="flex flex-col gap-1">
           {#if installedClashes.length}<span>{t("panel.restore.replace", { apps: installedClashes.map(appName).join(", ") })}</span>{/if}
           {#if dataClashes.length}<span>{t("panel.restore.replace_data_left", { apps: dataClashes.map(appName).join(", ") })}</span>{/if}

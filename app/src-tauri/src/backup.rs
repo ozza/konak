@@ -213,6 +213,9 @@ pub trait Apps {
     fn read_folder(&self, id: &str, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String>;
     /// Hands `podman volume export <podman_name>` to `read`.
     fn read_volume(&self, podman_name: &str, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String>;
+    /// Masks the installed apps' secrets (and the generic patterns) in texts for the log and the
+    /// history: stop and start errors carry docker-compose output.
+    fn redactor(&self) -> crate::redact::Redactor;
 }
 
 /// `Apps` through docker-compose in Konak's distro.
@@ -246,6 +249,9 @@ impl Apps for DistroApps<'_> {
     }
     fn read_volume(&self, podman_name: &str, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String> {
         shell::distro_read(&self.0.distro, VOLUME_SH, &[podman_name], |out| read(out))
+    }
+    fn redactor(&self) -> crate::redact::Redactor {
+        crate::redact::Redactor::load(self.0)
     }
 }
 
@@ -610,7 +616,13 @@ pub fn inspect(paths: &Paths, path: &str, password: &str) -> Result<Inspected, S
         crate::log(paths, &format!("inspect backup: {e}"));
         e.code.to_string()
     })?;
-    let manifest = b.manifest.clone();
+    let mut manifest = b.manifest.clone();
+    // The manifest is written before the apps: one this PC left out of the file (busy, could not be
+    // stopped) is in it too. The history knows which apps the file holds.
+    let history = load_history(paths);
+    if let Some(h) = history.iter().find(|h| has_file(&h.status) && same_file(&h.file, path)) {
+        manifest.apps.retain(|a| h.apps.contains(&a.id));
+    }
     let (mut crt, mut key) = (None, None);
     if manifest.konak_files.iter().any(|f| f == "ca/root.crt") {
         // Stopped with an error once both are read, or at the first Photos/Media entry.
@@ -986,7 +998,8 @@ pub fn run(paths: &Paths, host: &dyn Host, apps: &dyn Apps, _guard: &Guard, log_
             }
         }
     }
-    let redact = |e: &str| crate::redact::Redactor::new(vec![]).apply(e);
+    let redactor = std::cell::OnceCell::new();
+    let redact = |e: &str| redactor.get_or_init(|| apps.redactor()).apply(e);
     let entry = |status: &str, size_bytes: u64, error: Option<String>, detail: Option<String>, step: Option<String>, skipped: u64, notes: Vec<String>| HistoryEntry {
         file: file_for_history.clone(),
         created_unix: created,
@@ -1115,12 +1128,18 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
 
     // The apps first, each at rest; Photos and Media after them (see the module comment).
     let mut not_started = vec![];
+    // Apps with no data in the file: the history lists only the others, and `inspect` offers only those.
+    let mut absent: Vec<String> = vec![];
+    let redactor = std::cell::OnceCell::new();
+    let redact = |t: &str| redactor.get_or_init(|| apps.redactor()).apply(t);
     'apps: for z in &sizes {
         let id = z.id.as_str();
         let app_fail = |e: String| Failed { step: "app", app: Some(id.to_string()), error: e };
-        let left_out = |w: &mut Writer<_>, why: &str| {
+        let mut left_out = |w: &mut Writer<_>, why: &str| {
+            let why = redact(why);
             crate::log(paths, &format!("backup: {id} left out: {why}"));
-            w.skip(format!("apps/{id} (left out: {})", crate::redact::Redactor::new(vec![]).apply(why)));
+            w.skip(format!("apps/{id} (left out: {why})"));
+            absent.push(id.to_string());
         };
         if cancelled() {
             return Err(app_fail(CANCELLED.into()));
@@ -1143,6 +1162,7 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
             ctx.host.release(id, &Ok(()));
             crate::log(paths, &format!("backup: {id} was removed during the backup; left out"));
             w.skip(format!("apps/{id} (removed during the backup)"));
+            absent.push(id.to_string());
             continue;
         }
         // Without the marker, a Konak that ended now would leave the app stopped: it is not stopped then.
@@ -1168,6 +1188,7 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
             Err(e) if cancelled() => return Err(app_fail(e)),
             // Its data is all in the file; the app is reported failed through `release`.
             Err(e) if archived.get() => {
+                let e = redact(&e);
                 crate::log(paths, &format!("backup: {id} was backed up but did not start again: {e}"));
                 not_started.push(format!("apps/{id} (backed up, but did not start again: {e})"));
             }
@@ -1237,6 +1258,7 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
     prune(paths, &dir, s.backup.keep as usize, &pw, &final_path);
     let mut left_out = sums.skipped;
     left_out.extend(not_started);
+    ids_out.retain(|i| !absent.contains(i));
     Ok((final_path, left_out))
 }
 
@@ -1274,6 +1296,8 @@ pub(crate) mod tests {
         /// Only this app's stop fails.
         fail_stop_of: Option<&'static str>,
         fail_start: bool,
+        /// Appended to a failed stop's text (docker-compose output).
+        stop_detail: &'static str,
         calls: RefCell<Vec<String>>,
         sizes: Vec<AppSize>,
         data: Vec<u8>,
@@ -1286,7 +1310,7 @@ pub(crate) mod tests {
 
     impl FakeApps {
         fn new(running: bool) -> Self {
-            FakeApps { running, fail_stop: false, fail_stop_of: None, fail_start: false, calls: RefCell::new(vec![]), sizes: vec![], data: b"tar".to_vec(), on_read: None }
+            FakeApps { running, fail_stop: false, fail_stop_of: None, fail_start: false, stop_detail: "", calls: RefCell::new(vec![]), sizes: vec![], data: b"tar".to_vec(), on_read: None }
         }
         fn read(&self, what: String, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String> {
             if let Some(f) = &self.on_read {
@@ -1304,7 +1328,7 @@ pub(crate) mod tests {
         }
         fn stop(&self, id: &str) -> Result<(), String> {
             self.calls.borrow_mut().push(format!("stop {id}"));
-            if self.fail_stop || self.fail_stop_of == Some(id) { Err("stop failed".into()) } else { Ok(()) }
+            if self.fail_stop || self.fail_stop_of == Some(id) { Err(format!("stop failed{}", self.stop_detail)) } else { Ok(()) }
         }
         fn start(&self, id: &str) -> Result<(), String> {
             self.calls.borrow_mut().push(format!("start {id}"));
@@ -1319,7 +1343,13 @@ pub(crate) mod tests {
         fn read_volume(&self, podman_name: &str, read: &mut dyn FnMut(&mut dyn std::io::Read) -> Result<(), String>) -> Result<(), String> {
             self.read(format!("volume {podman_name}"), read)
         }
+        fn redactor(&self) -> crate::redact::Redactor {
+            crate::redact::Redactor::new(vec![FAKE_SECRET.into()])
+        }
     }
+
+    /// A secret of an installed app, as `FakeApps::redactor` knows it.
+    const FAKE_SECRET: &str = "s3cret-of-the-app";
 
     #[test]
     fn apps_come_back_to_their_previous_state() {
@@ -1784,6 +1814,7 @@ pub(crate) mod tests {
         let mut apps = FakeApps::new(true);
         apps.sizes = vec![size("nextcloud", &["db"]), size("jellyfin", &[])];
         apps.fail_stop_of = Some("nextcloud");
+        apps.stop_detail = ": .env line 3: s3cret-of-the-app";
         let host = fake_host();
         let guard = test_guard();
         let r = run(&paths, &host, &apps, &guard, 10, false);
@@ -1792,11 +1823,17 @@ pub(crate) mod tests {
         let (_, sums) = fmt::verify(&file, &SecretString::from(PW.to_string())).unwrap();
         let listed = list(&paths);
         let history = load_history(&paths);
+        let offered: Vec<String> = inspect(&paths, &file.to_string_lossy(), PW).unwrap().manifest.apps.iter().map(|a| a.id.clone()).collect();
+        let log = std::fs::read_to_string(paths.install_log()).unwrap_or_default();
         cleanup(&paths, &out);
+        assert!(!log.contains(FAKE_SECRET) && log.contains("nextcloud left out: stop failed: .env line 3: [redacted]"), "{log}");
+        assert_eq!(history[0].apps, ["jellyfin"], "the history lists only the apps in the file");
+        assert_eq!(listed[0].apps, ["jellyfin"]);
+        assert_eq!(offered, ["jellyfin"], "a restore does not offer the left-out app");
         assert!(sums.entries.iter().all(|e| !e.path.starts_with("apps/nextcloud/")));
         assert!(sums.entries.iter().any(|e| e.path == "apps/jellyfin/folder/000000"));
-        assert_eq!(sums.skipped, ["apps/nextcloud (left out: stop failed)"]);
-        assert_eq!((history[0].status.as_str(), history[0].skipped, history[0].notes.as_slice()), ("partial", 1, &["apps/nextcloud (left out: stop failed)".to_string()][..]));
+        assert_eq!(sums.skipped, ["apps/nextcloud (left out: stop failed: .env line 3: [redacted])"]);
+        assert_eq!((history[0].status.as_str(), history[0].skipped, history[0].notes.as_slice()), ("partial", 1, &["apps/nextcloud (left out: stop failed: .env line 3: [redacted])".to_string()][..]));
         assert_eq!((listed[0].status, listed[0].skipped), ("partial", 1));
         let done = host.events.borrow().last().cloned().unwrap();
         assert_eq!((done.state, done.skipped), ("done", Some(1)));

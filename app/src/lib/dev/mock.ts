@@ -226,6 +226,13 @@ export function installMock() {
             ca_valid: true,
           };
         case "restore_backup":
+          console.info("[mock] restore", a.apps, "replace", a.replace);
+          // ?restorerefuse: Vaultwarden has data a removal kept; refused unless Replace names it.
+          if (new URLSearchParams(location.search).has("restorerefuse") && (a.apps as string[]).includes("vaultwarden") && !(a.replace as string[]).includes("vaultwarden")) {
+            const failed = [{ id: "vaultwarden", error: "restore_app_data_left", detail: null, log: null }];
+            setTimeout(() => emit("restore-progress", { state: "failed", step: "check", app: null, done_bytes: null, total_bytes: null, error: "restore_app_data_left", summary: { restored: [], failed, photos: null, media: null, notes: [] } }), 300);
+            return null;
+          }
           progress("restore-progress", (a.apps as string[]).map((id) => ["restore_app", id] as [string, string | null]), 3000);
           return null;
         case "plugin:dialog|open":

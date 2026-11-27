@@ -600,7 +600,7 @@
         "restore_settings_kept": "Bu bilgisayardaki ayarlarınız korundu; yedekteki ayarlar uygulanmadı.",
         "restore_volume_ignored": "Yedekte, uygulamanın bu sürümünün kullanmadığı veriler vardı; bunlar dışarıda bırakıldı.",
         "restore_app_older": "Bir uygulama, daha eski bir veritabanı sürümüyle alınmış bir yedekten geri yüklendi. Başlamazsa, yedeği alan Konak sürümüyle geri yükleyin.",
-        "restore_volume_missing": "Yedekte, uygulamanın bu sürümünün eklediği bir bölümün verisi yok; o bölüm boş başlar."
+        "restore_volume_missing": "Yedekte, uygulamanın bu sürümünün eklediği bir bölümün verisi yok; o bölüm buradaki verisini korur, yoksa boş başlar."
       },
       "log_saved": "Uygulamanın kaydı şuraya kaydedildi:",
       "immich_needs_photos": "Immich fotoğraflarını Fotoğraflar klasöründe tutar. Fotoğraflarınız zaten orada değilse Fotoğraflar klasörünü de geri yükleyin; yoksa Immich başlamaz.",

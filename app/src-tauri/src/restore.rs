@@ -93,7 +93,9 @@ pub struct Request {
     /// Empty: the stored backup password.
     pub password: String,
     pub apps: Vec<String>,
-    pub replace: bool,
+    /// The apps the user agreed to restore over what is here (an installed app, or data a removal
+    /// kept), each named in the dialog's Replace box. Any other app with data here is refused.
+    pub replace: Vec<String>,
     pub photos: bool,
     pub media: bool,
     /// Restore the backup's root CA too (an explicit choice; only on a Konak with no apps).
@@ -254,8 +256,9 @@ impl Sink for ScriptSink {
 /// What a restore changes for one app; `DistroTarget` in Konak's distro.
 pub trait Target {
     fn probe(&self, id: &str, volumes: &[&str]) -> Result<Probe, String>;
-    /// Removes the app's containers and moves its folder and volume content aside.
-    fn set_aside(&self, id: &str) -> Result<(), String>;
+    /// Removes the app's containers and moves its folder and volume content aside, but the
+    /// content of the `kept` volumes (Podman names), which the backup has no data for.
+    fn set_aside(&self, id: &str, kept: &[String]) -> Result<(), String>;
     /// Removes what the restore made; with `had_old`, puts the set-aside data back.
     fn roll_back(&self, id: &str, had_old: bool) -> Result<(), String>;
     /// Deletes the set-aside data.
@@ -328,8 +331,10 @@ impl Target for DistroTarget<'_> {
         args.extend_from_slice(volumes);
         parse_probe(&self.script(&args)?)
     }
-    fn set_aside(&self, id: &str) -> Result<(), String> {
-        self.script(&["aside", id]).map(|_| ())
+    fn set_aside(&self, id: &str, kept: &[String]) -> Result<(), String> {
+        let mut args = vec!["aside", id];
+        args.extend(kept.iter().map(String::as_str));
+        self.script(&args).map(|_| ())
     }
     fn roll_back(&self, id: &str, had_old: bool) -> Result<(), String> {
         self.script(&["rollback", id, if had_old { "1" } else { "0" }]).map(|_| ())
@@ -922,7 +927,7 @@ fn refusals(target: &dyn Target, state: &State, m: &Manifest, req: &Request) -> 
             return Some(format!("restore_app_newer: {newer}"));
         }
         catalog_volumes(cm, &mut am);
-        if req.replace {
+        if req.replace.iter().any(|r| r == id) {
             return None;
         }
         if state.apps.iter().any(|a| a.id == id) {
@@ -986,7 +991,7 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
 
     ctx.step(VERIFY, None, 0);
     let v = verify(backup, ctx)?;
-    log(paths, &format!("restore: {} verified ({} apps in it; chosen {:?}, replace {}, photos {}, media {})", file.display(), v.manifest.apps.len(), req.apps, req.replace, req.photos, req.media));
+    log(paths, &format!("restore: {} verified ({} apps in it; chosen {:?}, replace {:?}, photos {}, media {})", file.display(), v.manifest.apps.len(), req.apps, req.replace, req.photos, req.media));
     check_space(paths, target, req, &v.sizes).map_err(|e| fail(CHECK, e))?;
 
     ctx.step(KONAK, None, 0);
@@ -1247,7 +1252,7 @@ impl Walk<'_> {
             }
         }
         if !missing_volumes.is_empty() {
-            log(self.ctx.paths, &format!("restore {id}: the backup has no volumes {missing_volumes:?} (made before the catalog declared them); they start empty"));
+            log(self.ctx.paths, &format!("restore {id}: the backup has no volumes {missing_volumes:?} (made before the catalog declared them); they keep their current data, or start empty"));
             if !self.summary.notes.contains(&"restore_volume_missing") {
                 self.summary.notes.push("restore_volume_missing");
             }
@@ -1266,7 +1271,7 @@ impl Walk<'_> {
                 return Err(format!("restore_aside_exists: {id}: data an earlier restore set aside is still in the distro"));
             }
             let had_old = old.is_some() || probe.folder || probe.volumes;
-            if had_old && !self.req.replace {
+            if had_old && !self.req.replace.iter().any(|r| r == id) {
                 return Err(if old.is_some() { "restore_app_exists" } else { "restore_app_data_left" }.to_string());
             }
             let (name, reservation) = pick_name(self.ctx.paths, &state, &am, old.as_ref().map(|a| a.name.as_str()), self.target)?;
@@ -1292,7 +1297,8 @@ impl Walk<'_> {
         }
         self.current = Current::Turn(Box::new(Turn { am, name, renamed_from, _reservation: reservation, old, had_old, sink: None, next_index: 0, folder_done: false, volumes_done: vec![], ignored_volumes, up_tried: false }));
         if had_old {
-            if let Err(e) = self.target.set_aside(id) {
+            let kept: Vec<String> = missing_volumes.iter().map(|v| format!("{id}_{v}")).collect();
+            if let Err(e) = self.target.set_aside(id, &kept) {
                 self.fail_current(e);
                 return std::mem::replace(&mut self.current, Current::None);
             }
@@ -1640,8 +1646,8 @@ mod tests {
             self.call(format!("probe {id}"));
             Ok(self.probes.get(id).cloned().unwrap_or_default())
         }
-        fn set_aside(&self, id: &str) -> Result<(), String> {
-            self.call(format!("aside {id}"));
+        fn set_aside(&self, id: &str, kept: &[String]) -> Result<(), String> {
+            self.call(format!("aside {id}{}", kept.iter().map(|k| format!(" {k}")).collect::<String>()));
             Ok(())
         }
         fn roll_back(&self, id: &str, had_old: bool) -> Result<(), String> {
@@ -1829,7 +1835,7 @@ mod tests {
     }
 
     fn request(file: &Path, apps: &[&str], replace: bool, photos: bool) -> Request {
-        Request { path: file.to_string_lossy().to_string(), password: "the backup password".into(), apps: apps.iter().map(|a| a.to_string()).collect(), replace, photos, media: false, ca: false }
+        Request { path: file.to_string_lossy().to_string(), password: "the backup password".into(), apps: apps.iter().map(|a| a.to_string()).collect(), replace: if replace { apps.iter().map(|a| a.to_string()).collect() } else { vec![] }, photos, media: false, ca: false }
     }
 
     fn restore(paths: &Paths, host: &FakeHost, target: &FakeTarget, req: &Request) -> Result<Summary, Failed> {
@@ -1933,6 +1939,10 @@ mod tests {
         let refused = restore(&paths, &host, &target, &request(&file, &["vaultwarden", "forgejo", "jellyfin", "immich"], false, false));
         // Media chosen, but the backup has none: nothing left to restore.
         let nothing = restore(&paths, &FakeHost::default(), &FakeTarget::default(), &Request { media: true, ..request(&file, &[], false, false) });
+        // Replace agreed for Vaultwarden only: Jellyfin's kept data is still refused.
+        let host2 = FakeHost::default();
+        let target2 = FakeTarget { probes: target.probes.clone(), ..Default::default() };
+        let one = restore(&paths, &host2, &target2, &Request { replace: vec!["vaultwarden".into()], ..request(&file, &["vaultwarden", "jellyfin"], false, false) });
         let state = State::load(&paths);
         let _ = std::fs::remove_dir_all(&paths.home);
         assert_eq!(refused.unwrap_err(), fail(CHECK, "restore_app_exists"));
@@ -1946,6 +1956,9 @@ mod tests {
         assert_eq!(state.apps.len(), 1);
         assert_eq!((last.state, last.step, last.error.as_deref()), ("failed", CHECK, Some("restore_app_exists")));
         assert!(!host.events.borrow().iter().any(|e| e.step == VERIFY), "no verify step");
+        assert_eq!(one.unwrap_err(), fail(CHECK, "restore_app_data_left"));
+        let failed2: Vec<String> = host2.events.borrow().last().cloned().unwrap().summary.unwrap().failed.iter().map(|f| format!("{} {}", f.id, f.error)).collect();
+        assert_eq!(failed2, ["jellyfin restore_app_data_left"], "consent for one app covers only that app");
     }
 
     #[test]
@@ -2013,8 +2026,16 @@ mod tests {
         write_backup(&file2, &[short], None, &[]);
         let (host2, target2) = (FakeHost::default(), FakeTarget::default());
         let short_run = restore(&paths2, &host2, &target2, &request(&file2, &["nextcloud"], false, false));
+        // Over an installed Nextcloud, the volume the backup lacks keeps its data (never set aside).
+        let (paths3, file3) = setup("volumes-short-replace", &[("nextcloud", "cloud-s", false)]);
+        write_backup(&file3, &[app("nextcloud", "cloud-s", false, &["db"])], None, &[]);
+        let (host3, target3) = (FakeHost::default(), FakeTarget::default());
+        let replaced = restore(&paths3, &host3, &target3, &request(&file3, &["nextcloud"], true, false));
         let _ = std::fs::remove_dir_all(&paths.home);
         let _ = std::fs::remove_dir_all(&paths2.home);
+        let _ = std::fs::remove_dir_all(&paths3.home);
+        assert!(replaced.unwrap().failed.is_empty());
+        assert!(target3.calls.borrow().iter().any(|c| c == "aside nextcloud nextcloud_nextcloud"), "{:?}", target3.calls.borrow());
         assert!(summary.failed.is_empty(), "{:?}", summary.failed);
         assert_eq!(summary.notes, ["restore_settings_kept", "restore_volume_ignored"]);
         let volumes: Vec<&String> = calls.iter().filter(|c| c.starts_with("volume ")).collect();
@@ -2597,7 +2618,7 @@ mod tests {
 
     #[test]
     fn a_ca_only_restore_is_a_choice() {
-        let req = |ca| Request { path: String::new(), password: String::new(), apps: vec![], replace: false, photos: false, media: false, ca };
+        let req = |ca| Request { path: String::new(), password: String::new(), apps: vec![], replace: vec![], photos: false, media: false, ca };
         assert!(!chosen_something(&req(false)));
         assert!(chosen_something(&req(true)));
     }

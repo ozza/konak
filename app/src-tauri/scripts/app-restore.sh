@@ -1,8 +1,9 @@
 # Restore helpers for one app (see restore.rs). Args: command id [more]
 #   probe id [podman volume names]   what exists: the folder, set-aside copies, the app's volumes
-#   aside id                         removes the containers, records the app's volumes in
+#   aside id [kept podman names]     removes the containers, records the app's volumes in
 #                                    <id>.before-restore-volumes/.volumes, then moves the folder to
-#                                    <id>.before-restore and every volume's content to
+#                                    <id>.before-restore and every volume's content, but the kept
+#                                    ones' (the backup has no data for them), to
 #                                    <id>.before-restore-volumes/<vol>
 #   extract id [bind sources]        stdin: GNU tar of the app folder (members <id>/...), unpacked in
 #                                    a staging folder, checked (files and folders only; at the top
@@ -97,6 +98,9 @@ case "$cmd" in
     echo end
     ;;
   aside)
+    # The volumes named after the id are kept in place: the backup has no data for them.
+    shift 2
+    for k in "$@"; do [[ "$k" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { echo "bad volume name: $k" >&2; exit 2; }; done
     [ ! -e "$aside" ] && [ ! -e "$vaside" ] || { echo "an earlier restore left $aside" >&2; exit 3; }
     remove_containers
     # The app's volumes are recorded before anything moves, in a folder renamed into place whole:
@@ -108,6 +112,7 @@ case "$cmd" in
     mv -T "$vaside.new" "$vaside"
     if [ -e "$dir" ]; then mv "$dir" "$aside"; fi
     while IFS= read -r v; do
+      for k in "$@"; do [ "$k" != "$v" ] || continue 2; done
       mp=$(mountpoint_of "$v")
       mkdir "$vaside/$v"
       move_content "$mp" "$vaside/$v"
@@ -217,12 +222,16 @@ case "$cmd" in
         v=$(basename "$d")
         mp=$(mountpoint_of "$v")
         # Before `aside` completed nothing was imported, and what it had not moved yet is the
-        # app's own: only moved back, never emptied first.
-        if [ -e "$vaside/.complete" ]; then empty "$mp"; fi
+        # app's own: only moved back, never emptied first. After it, the volume is emptied of the
+        # restore's data once: a rollback cut off while moving back never empties it again.
+        if [ -e "$vaside/.complete" ] && [ ! -e "$vaside/.emptied-$v" ]; then
+          empty "$mp"
+          touch "$vaside/.emptied-$v"
+        fi
         move_content "$d" "$mp"
         rmdir "$d"
       done
-      rm -f "$vaside/.no-folder" "$vaside/.volumes" "$vaside/.complete"
+      rm -f "$vaside/.no-folder" "$vaside/.volumes" "$vaside/.complete" "$vaside"/.emptied-*
       rmdir "$vaside"
     fi
     echo rolled back

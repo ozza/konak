@@ -961,7 +961,7 @@ impl restore::Host for RestoreHost {
 /// CA, only on a Konak with no apps.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<String>, replace: bool, photos: bool, media: bool, ca: Option<bool>) -> Result<(), String> {
+fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<String>, replace: Vec<String>, photos: bool, media: bool, ca: Option<bool>) -> Result<(), String> {
     let paths = app.state::<Konak>().paths.clone();
     let req = restore::Request { path, password, apps, replace, photos, media, ca: ca.unwrap_or(false) };
     restore::precheck(&paths, &req)?;
@@ -1003,6 +1003,11 @@ fn recovery_apps(paths: &Paths) -> Vec<(String, &'static str)> {
     out
 }
 
+/// Whether a backup or a restore did not finish (its record is still there).
+fn has_unfinished_run(paths: &Paths) -> bool {
+    ["backup-inflight.json", "restore-inflight.json"].iter().any(|f| paths.home.join(f).exists())
+}
+
 /// Marks `ids` busy; returns those it marked (an id already busy is left to its holder).
 fn hold_busy(busy: &Mutex<HashSet<String>>, ids: &[(String, &'static str)]) -> Vec<(String, &'static str)> {
     let mut set = busy.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1025,7 +1030,8 @@ fn startup_sequence(stop_leftovers: impl FnOnce(), start_services: impl FnOnce()
 fn start_services_and_recover(app: AppHandle, sup: Arc<Supervisor>) {
     let k = app.state::<Konak>();
     let paths = k.paths.clone();
-    let guard = backup::Guard::acquire().ok();
+    // Only with something to recover: otherwise Quit and "Back up now" would be refused meanwhile.
+    let guard = if has_unfinished_run(&paths) { backup::Guard::acquire().ok() } else { None };
     let held = if guard.is_some() { hold_busy(&k.busy, &recovery_apps(&paths)) } else { vec![] };
     std::thread::spawn(move || {
         let k = app.state::<Konak>();
@@ -1292,11 +1298,15 @@ mod tests {
     fn the_startup_recovery_holds_the_apps_it_works_on() {
         let paths = settings::tests::temp_paths("recovery-apps");
         let none = recovery_apps(&paths);
-        std::fs::write(paths.home.join("backup-inflight.json"), r#"{"app":"jellyfin"}"#).unwrap();
+        let unfinished_none = has_unfinished_run(&paths);
         std::fs::write(paths.home.join("restore-inflight.json"), r#"{"app":"immich","phase":"aside"}"#).unwrap();
+        let unfinished_restore = has_unfinished_run(&paths);
+        std::fs::write(paths.home.join("backup-inflight.json"), r#"{"app":"jellyfin"}"#).unwrap();
         let both = recovery_apps(&paths);
         let _ = std::fs::remove_dir_all(&paths.home);
         assert!(none.is_empty());
+        assert!(!unfinished_none, "a plain start takes no run guard");
+        assert!(unfinished_restore);
         assert_eq!(both, [("jellyfin".to_string(), "start"), ("immich".to_string(), "restore")]);
         // An operation already holding one keeps it; the other is held for the recovery, so a
         // panel or MCP operation on it is refused as busy meanwhile.

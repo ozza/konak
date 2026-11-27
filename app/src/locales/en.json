@@ -600,7 +600,7 @@
         "restore_settings_kept": "Your settings on this PC were kept; settings in the backup were not applied.",
         "restore_volume_ignored": "The backup had app data this version of the app does not use; it was left out.",
         "restore_app_older": "An app was restored from a backup made with an older database version. If it does not start, restore it with the Konak version that made the backup.",
-        "restore_volume_missing": "The backup has no data for a part this app version added; that part starts empty."
+        "restore_volume_missing": "The backup has no data for a part this app version added; that part keeps the data it has here, or starts empty."
       },
       "log_saved": "The app's log was saved to:",
       "immich_needs_photos": "Immich keeps its photos in the Photos folder. Restore the Photos folder too, unless your photos are already there; otherwise Immich will not start.",
