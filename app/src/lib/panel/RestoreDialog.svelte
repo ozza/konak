@@ -99,6 +99,10 @@
         <label class="flex items-center gap-2.5 text-sm"><input type="checkbox" bind:checked={media} class="size-4 accent-accent" />{t("panel.restore.media", { size: formatBytes(manifest.media_bytes) })}</label>
       {/if}
       {#if photos || media}<p class="text-xs text-muted">{t("panel.restore.folders_merge")}</p>{/if}
+      <!-- Immich keeps its photos in the Photos folder; its database expects them on start. -->
+      {#if chosen.includes("immich") && manifest.photos_bytes !== null && !photos}
+        <p class="rounded-md border border-warn-border bg-warn-bg p-2.5 text-xs text-warn-text" role="status">{t("panel.restore.immich_needs_photos")}</p>
+      {/if}
     </fieldset>
     {#if clashes.length > 0}
       <label class="flex items-start gap-2.5 rounded-lg border border-error-border bg-error-bg p-3 text-sm">
@@ -107,11 +111,12 @@
       </label>
     {/if}
     {#if progress}
-      <p class="text-sm" role="status">
+      <div class="text-sm" role="status">
         {#if progress.state === "running"}{stepText(progress.step)}{#if progress.app} · {appName(progress.app)}{/if}
         {:else if progress.state === "done"}<span class="text-ok">{t("panel.restore.done")}</span>
-        {:else}<span class="text-error">{t("panel.restore.failed")} {progress.error ? message(progress.error) : ""}</span>{/if}
-      </p>
+        {:else}<span class="text-error">{t("panel.restore.failed")} {progress.error ? message(progress.error) : ""}</span>
+          {#if progress.detail}<details class="mt-1 text-xs"><summary class="cursor-pointer text-muted">{t("errors.details")}</summary><pre class="mt-1 font-mono break-all whitespace-pre-wrap">{progress.detail}</pre></details>{/if}{/if}
+      </div>
       {#if progress.summary}<RestoreSummary summary={progress.summary} />{/if}
     {/if}
     {#if error}<p class="text-sm text-error" role="alert">{error}</p>{/if}

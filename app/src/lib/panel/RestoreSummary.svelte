@@ -23,7 +23,16 @@
   {#if summary.failed.length}
     <ul class="flex flex-col gap-1">
       {#each summary.failed as f (f.id)}
-        <li><span class="text-error" aria-hidden="true">✕ </span>{appName(f.id)}: <span class="text-error">{message(f.error)}</span></li>
+        <li>
+          <span class="text-error" aria-hidden="true">✕ </span>{appName(f.id)}: <span class="text-error">{message(f.error)}</span>
+          {#if f.detail || f.log}
+            <details class="mt-1 pl-4 text-xs">
+              <summary class="cursor-pointer text-muted">{t("errors.details")}</summary>
+              {#if f.detail}<pre class="mt-1 font-mono break-all whitespace-pre-wrap">{f.detail}</pre>{/if}
+              {#if f.log}<p class="mt-1">{t("panel.restore.log_saved")} <span class="font-mono break-all select-all">{f.log}</span></p>{/if}
+            </details>
+          {/if}
+        </li>
       {/each}
     </ul>
   {/if}

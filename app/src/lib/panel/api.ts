@@ -79,11 +79,14 @@ export type BackupProgress = {
   app: string | null;
   done_bytes: number | null;
   total_bytes: number | null;
+  /** A locale code (`errors.<code>`); the technical text is in `detail`. */
   error: string | null;
+  detail?: string | null;
   /** Restore only, on the final event. */
   summary?: {
     restored: { id: string; name: string; renamed_from: string | null }[];
-    failed: { id: string; error: string }[];
+    /** `log`: a saved, redacted container log of the failed app. */
+    failed: { id: string; error: string; detail: string | null; log: string | null }[];
     photos: FolderResult | null;
     media: FolderResult | null;
     notes: string[];

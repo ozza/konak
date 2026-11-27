@@ -97,7 +97,11 @@
     "restore_no_free_name": "No free name was found for this app on your network.",
     "restore_path_refused": "The backup contains a file path Konak will not write.",
     "restore_file_changed": "The backup file changed while it was being restored.",
-    "restore_some_failed": "Some parts could not be restored."
+    "restore_some_failed": "Some parts could not be restored.",
+    "restore_app_unhealthy": "The app did not start correctly after the restore, so Konak put back what was there before.",
+    "restore_app_failed": "This app could not be restored; Konak put back what was there before.",
+    "backup_app_failed": "This app could not be backed up.",
+    "backup_failed": "The backup did not finish."
   },
   "tray": {
     "open": "Open Konak",
@@ -535,7 +539,14 @@
         "media": "Copying the Media folder",
         "verify": "Checking the backup",
         "finish": "Finishing",
-        "done": "Done"
+        "done": "Done",
+        "restore_check": "Checking what can be restored",
+        "restore_verify": "Checking the backup file",
+        "restore_konak": "Restoring Konak's certificate",
+        "restore_app": "Restoring app",
+        "restore_photos": "Restoring the Photos folder",
+        "restore_media": "Restoring the Media folder",
+        "restore_done": "Done"
       }
     },
     "restore": {
@@ -565,7 +576,9 @@
         "restore_ca_invalid": "The certificate in the backup is not valid, so this PC's certificate was kept.",
         "restore_ca_failed": "The certificate from the backup could not be restored; this PC's certificate was kept.",
         "restore_settings_kept": "Your settings on this PC were kept; settings in the backup were not applied."
-      }
+      },
+      "log_saved": "The app's log was saved to:",
+      "immich_needs_photos": "Immich keeps its photos in the Photos folder. Restore the Photos folder too, unless your photos are already there; otherwise Immich will not start."
     }
   },
   "apps": {

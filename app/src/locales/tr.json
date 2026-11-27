@@ -97,7 +97,11 @@
     "restore_no_free_name": "Bu uygulama için ağınızda boş bir ad bulunamadı.",
     "restore_path_refused": "Yedekte Konak'ın yazmayacağı bir dosya yolu var.",
     "restore_file_changed": "Yedek dosyası geri yükleme sırasında değişti.",
-    "restore_some_failed": "Bazı kısımlar geri yüklenemedi."
+    "restore_some_failed": "Bazı kısımlar geri yüklenemedi.",
+    "restore_app_unhealthy": "Uygulama geri yüklemeden sonra düzgün başlamadı, bu yüzden Konak önceki halini geri koydu.",
+    "restore_app_failed": "Bu uygulama geri yüklenemedi; Konak önceki halini geri koydu.",
+    "backup_app_failed": "Bu uygulama yedeklenemedi.",
+    "backup_failed": "Yedekleme tamamlanmadı."
   },
   "tray": {
     "open": "Konak'ı aç",
@@ -535,7 +539,14 @@
         "media": "Medya klasörü kopyalanıyor",
         "verify": "Yedek kontrol ediliyor",
         "finish": "Tamamlanıyor",
-        "done": "Tamamlandı"
+        "done": "Tamamlandı",
+        "restore_check": "Neyin geri yüklenebileceği kontrol ediliyor",
+        "restore_verify": "Yedek dosyası kontrol ediliyor",
+        "restore_konak": "Konak'ın sertifikası geri yükleniyor",
+        "restore_app": "Uygulama geri yükleniyor",
+        "restore_photos": "Fotoğraflar klasörü geri yükleniyor",
+        "restore_media": "Medya klasörü geri yükleniyor",
+        "restore_done": "Tamamlandı"
       }
     },
     "restore": {
@@ -565,7 +576,9 @@
         "restore_ca_invalid": "Yedekteki sertifika geçerli değil, bu yüzden bu bilgisayarın sertifikası korundu.",
         "restore_ca_failed": "Yedekteki sertifika geri yüklenemedi; bu bilgisayarın sertifikası korundu.",
         "restore_settings_kept": "Bu bilgisayardaki ayarlarınız korundu; yedekteki ayarlar uygulanmadı."
-      }
+      },
+      "log_saved": "Uygulamanın kaydı şuraya kaydedildi:",
+      "immich_needs_photos": "Immich fotoğraflarını Fotoğraflar klasöründe tutar. Fotoğraflarınız zaten orada değilse Fotoğraflar klasörünü de geri yükleyin; yoksa Immich başlamaz."
     }
   },
   "apps": {

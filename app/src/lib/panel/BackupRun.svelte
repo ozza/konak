@@ -59,11 +59,12 @@
 
   {#if progress}
     <div class="flex flex-col gap-1.5" role="status">
-      <p class="text-[13px]">
+      <div class="text-[13px]">
         {#if progress.state === "running"}{stepText(progress.step)}{#if progress.app} · {appName(progress.app)}{/if}
         {:else if progress.state === "done"}<span class="text-ok">{t("panel.backup.done")}</span>
-        {:else}<span class="text-error">{t("panel.backup.failed")} {message(progress.error)}</span>{/if}
-      </p>
+        {:else}<span class="text-error">{t("panel.backup.failed")} {message(progress.error)}</span>
+          {#if progress.detail}<details class="mt-1 text-xs"><summary class="cursor-pointer text-muted">{t("errors.details")}</summary><pre class="mt-1 font-mono break-all whitespace-pre-wrap">{progress.detail}</pre></details>{/if}{/if}
+      </div>
       {#if running}
         <div class="h-1.5 overflow-hidden rounded-full bg-border">
           <div class="h-full rounded-full bg-accent {pct === null ? 'w-1/3 animate-pulse' : ''}" style:width={pct === null ? undefined : `${pct}%`}></div>
