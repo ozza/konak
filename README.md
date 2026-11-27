@@ -38,10 +38,10 @@ firewall and the certificates, and it backs everything up.
   there before.
 - **Built-in diagnostics.** Konak checks its environment, the network, port 80, the firewall and WSL's
   networking mode (NAT or mirrored), and explains each problem in plain language with the fix.
-- **An MCP server for AI agents.** AI assistants can check status, read logs and troubleshoot through Konak,
-  instead of driving PowerShell or WSL directly. Every change an agent requests (install, remove,
-  restart, …) waits for your click in the Konak window. The server is local only, and it hides secrets in
-  everything it returns.
+- **An MCP server for AI agents.** AI assistants can check status, read logs and troubleshoot
+  through Konak, instead of driving PowerShell or WSL directly. Every change an agent requests
+  (install, remove, restart, …) waits for your click in the Konak window. The server is local only,
+  and it hides secrets in everything it returns.
 - **English and Turkish.** The interface follows your Windows display language.
 
 | Add an app | Backups |
@@ -102,6 +102,6 @@ open an issue before starting on a larger change.
 
 ## License
 
-Konak is free software, licensed under the [GNU General Public License](LICENSE), version 3 or (at your option) any later
-version. The apps it
-installs, and the tools it bundles such as Caddy, keep their own licenses.
+Konak is free software, licensed under the [GNU General Public License](LICENSE), version 3 or
+(at your option) any later version. The apps it installs, and the tools it bundles such as Caddy,
+keep their own licenses.
