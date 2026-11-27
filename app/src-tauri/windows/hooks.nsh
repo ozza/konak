@@ -24,7 +24,8 @@
       ${EndIf}
       MessageBox MB_OK|MB_ICONEXCLAMATION "$R8" /SD IDOK
       SetErrorLevel 3
-      Abort "$R8"
+      ; Quit, not Abort: Abort leaves the window on its "aborted" page, which needs a second click.
+      Quit
     ${EndIf}
   ${EndIf}
 !macroend
@@ -65,7 +66,8 @@
       ${EndIf}
       MessageBox MB_OK|MB_ICONEXCLAMATION "$R8" /SD IDOK
       SetErrorLevel 3
-      Abort "$R8"
+      ; Quit, not Abort: Abort leaves the window on its "aborted" page, which needs a second click.
+      Quit
     ${EndIf}
   ${EndIf}
 !macroend

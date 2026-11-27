@@ -319,6 +319,8 @@ struct Heartbeat<'a> {
     web_ports: WebPorts,
     /// The program holding port 80, while on the fallback and when it is known.
     port80_owner: Option<String>,
+    /// Caddy and mDNS are kept off the LAN: Konak's firewall rules are missing (`set_lan_blocked`).
+    lan_blocked: bool,
 }
 
 #[derive(Default)]
@@ -698,6 +700,7 @@ impl Supervisor {
             caddy_failures: p.caddy_failures,
             web_ports: p.config.as_ref().map(|c| c.3).unwrap_or_default(),
             port80_owner: self.web.lock().unwrap().port80_owner.clone(),
+            lan_blocked: blocked,
         };
         // Written before any re-render starts, so an app operation reads the new ports from it.
         if let Err(e) = write_atomic(&self.paths.supervisor_file(), &serde_json::to_string_pretty(&beat).unwrap()) {
