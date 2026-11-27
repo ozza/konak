@@ -1,20 +1,31 @@
 //! The restore engine: brings apps, the local CA and the Photos/Media folders back from a backup
 //! file (`backup_format`) into this Konak, a fresh install or one that runs already.
 //!
-//! Order of a run:
-//! 1. `verify`: the whole file is read and checked (age authentication, every entry against
+//! Order of a run (the progress steps):
+//! 1. `restore_check`: the file is opened (password, manifest) and the choice is checked against the
+//!    manifest, `state.json` and the distro: an app not in the backup, not in the catalog, or
+//!    installed here without `replace` refuses the whole restore at once, before the long read.
+//! 2. `restore_verify`: the whole file is read and checked (age authentication, every entry against
 //!    `checksums.json`). Nothing is changed before this passes. The CA files are kept in memory.
-//! 2. `konak`: the CA rule (`ca_action`). `settings.json` and the backup password are never restored.
-//! 3. A second pass over the file. Each chosen app, one at a time and in the busy set (op `restore`):
-//!    its existing data (only with `replace`) is set aside in the distro, its folder is unpacked,
-//!    its volumes are imported, it is rendered for this PC's active web ports under its backed-up
-//!    name (or `-2`, `-3`, ... when that name is taken), started with the install's health checks
-//!    unless it was stopped, and added to `state.json`. Only then is the set-aside copy deleted; a
-//!    failure puts it back and starts the old app again. One app's failure never stops the others.
-//! 4. `photos` / `media` (only when asked): merged into the configured folders, never deleting or
-//!    overwriting a file (`merge_file`).
+//! 3. `restore_konak`: the CA rule (`ca_action`). `settings.json` and the backup password are never
+//!    restored.
+//! 4. A second pass over the file, in archive order:
+//!    - `restore_photos` / `restore_media` (only when asked): merged into the configured folders,
+//!      never deleting or overwriting a file (`merge_file`);
+//!    - `restore_app`: each chosen app, one at a time and in the busy set (op `restore`): its
+//!      existing data (only with `replace`) is set aside in the distro, its folder is unpacked, its
+//!      volumes are imported, it is rendered for this PC's active web ports under its backed-up name
+//!      (or `-2`, `-3`, ... when that name is taken), started with the install's health checks
+//!      unless it was stopped, and added to `state.json`. Only then is the set-aside copy deleted;
+//!      a failure saves the containers' logs, puts the old data back and starts the old app again.
+//!      One app's failure never stops the others.
 //!
-//! Errors the panel explains are short codes (`restore_app_exists`, ...); `Summary` lists the result.
+//!    An app that mounts Photos or Media (Immich checks its folders at start) must find them
+//!    restored before it starts. Files written since this order have Photos and Media before the
+//!    apps; in an older file they come after, so then the folders get a pass of their own first.
+//!
+//! Errors the panel explains are short codes (`restore_app_exists`, ...), with the technical text
+//! apart (`detail`); `Summary` lists the result.
 //!
 //! An app's turn is recorded in `restore-inflight.json` before anything of it changes. A Konak that
 //! ends mid-turn (closed, crashed, a panic) finds it at its next start (`recover`): the turn is
@@ -44,6 +55,17 @@ const FREE_SH: &str = "set -euo pipefail\ndf -B1 --output=avail /var/lib </dev/n
 const DISTRO_MARGIN: u64 = 1 << 30;
 /// Names tried for an app: its backed-up name, then `-2` up to this.
 const MAX_SUFFIX: u32 = 9;
+/// Lines per container kept from a failed app's logs.
+const LOG_LINES: u32 = 1000;
+
+// Progress steps (locale keys).
+const CHECK: &str = "restore_check";
+const VERIFY: &str = "restore_verify";
+const KONAK: &str = "restore_konak";
+const APP: &str = "restore_app";
+const PHOTOS: &str = "restore_photos";
+const MEDIA: &str = "restore_media";
+const DONE: &str = "restore_done";
 
 // ---- Request, progress, result ---------------------------------------------------------------------
 
@@ -65,12 +87,16 @@ pub struct Request {
 pub struct Progress {
     /// running | done | failed
     pub state: &'static str,
-    /// verify | konak | app | photos | media | done
+    /// restore_check | restore_verify | restore_konak | restore_app | restore_photos |
+    /// restore_media | restore_done
     pub step: &'static str,
     pub app: Option<String>,
     pub done_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
+    /// A locale code (`errors.<code>`).
     pub error: Option<String>,
+    /// The technical text behind `error`, redacted; for details on demand.
+    pub detail: Option<String>,
     pub summary: Option<Summary>,
 }
 
@@ -97,7 +123,21 @@ pub struct Restored {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct AppFailure {
     pub id: String,
+    /// A locale code: `restore_app_exists`, `restore_app_not_in_backup`, `unknown_app`,
+    /// `restore_aside_exists`, `restore_no_free_name`, `busy`, `backup_damaged`,
+    /// `restore_path_refused`, `restore_app_unhealthy` (started, but it did not pass its health
+    /// checks), `restore_app_failed` (anything else).
     pub error: String,
+    /// The technical text behind `error`, redacted; for details on demand.
+    pub detail: Option<String>,
+    /// The containers' logs of an app that failed once started, saved before the rollback removed
+    /// them: `<home>\logs\restore-<id>-<YYYYMMDD-HHMMSS>.log`.
+    pub log: Option<String>,
+}
+
+fn app_failure(id: &str, error: &str, log: Option<String>) -> AppFailure {
+    let (error, detail) = crate::redact::code_and_detail(error, "restore_app_failed");
+    AppFailure { id: id.to_string(), error, detail, log }
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
@@ -203,6 +243,8 @@ pub trait Target {
     fn bring_up(&self, id: &str, name: &str, claimed: bool, up: bool) -> Result<(), String>;
     /// Starts the app's own containers again after a rollback (it was running before).
     fn start_old(&self, id: &str) -> Result<(), String>;
+    /// The app's containers' recent logs, redacted.
+    fn app_logs(&self, id: &str) -> Result<String, String>;
     fn name_free_on_lan(&self, name: &str) -> Result<bool, String>;
     /// Bytes free on the distro's disk.
     fn distro_free(&self) -> Result<u64, String>;
@@ -282,6 +324,16 @@ impl Target for DistroTarget<'_> {
     fn start_old(&self, id: &str) -> Result<(), String> {
         let out = apps::compose(self.0, id, "up -d --remove-orphans");
         out.ok.then_some(()).ok_or_else(|| format!("start of {id} failed: {}", shell::tail(&out.text, 4)))
+    }
+    fn app_logs(&self, id: &str) -> Result<String, String> {
+        let out = apps::compose(self.0, id, &format!("logs --no-color --timestamps --tail {LOG_LINES}"));
+        // The restored app's .env is in place, so its secrets are masked too.
+        let text = crate::redact::Redactor::load(self.0).apply(&out.text);
+        if out.ok {
+            Ok(text)
+        } else {
+            Err(format!("logs of {id} failed: {}", shell::tail(&text, 4)))
+        }
     }
     fn name_free_on_lan(&self, name: &str) -> Result<bool, String> {
         apps::name_free_on_lan(self.0, name)
@@ -639,21 +691,56 @@ struct Verified {
     ca: Option<(String, String)>,
     /// Every entry's path and size, from `checksums.json`.
     sizes: Vec<(String, u64)>,
+    /// Where things come in the file: each app's first entry, and the first Photos and Media entry.
+    order: Order,
 }
 
-fn verify(path: &Path, pw: &SecretString, ctx: &Ctx) -> Result<Verified, Failed> {
-    let read_err = |e: fmt::ReadError| {
-        crate::log(ctx.paths, &format!("restore: {e}"));
-        fail("verify", e.code)
-    };
-    let backup = fmt::open(path, pw).map_err(read_err)?;
+#[derive(Default)]
+struct Order {
+    apps: Vec<(String, usize)>,
+    photos: Option<usize>,
+    media: Option<usize>,
+}
+
+impl Order {
+    fn note(&mut self, e: &Entry, index: usize) {
+        match e {
+            Entry::AppFolder { app, .. } | Entry::AppVolume { app, .. } if !self.apps.iter().any(|(a, _)| a == app) => self.apps.push((app.clone(), index)),
+            Entry::Photos(_) => {
+                self.photos.get_or_insert(index);
+            }
+            Entry::Media(_) => {
+                self.media.get_or_insert(index);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the file has a chosen folder after an entry of a chosen app that mounts it (a file
+    /// written before Photos and Media came first): then the folders need a pass of their own
+    /// before the apps start.
+    fn folders_late(&self, req: &Request) -> bool {
+        let late = |kind: &str, first: Option<usize>| {
+            first.is_some_and(|f| {
+                self.apps.iter().any(|(id, i)| *i < f && req.apps.contains(id) && catalog::get(id).is_some_and(|m| m.mounts.values().any(|k| k == kind)))
+            })
+        };
+        (req.photos && late("photos", self.photos)) || (req.media && late("media", self.media))
+    }
+}
+
+fn verify(backup: fmt::Backup, ctx: &Ctx) -> Result<Verified, Failed> {
     let manifest = backup.manifest.clone();
     let estimate = manifest.apps.iter().map(|a| a.size_bytes).sum::<u64>() + manifest.photos_bytes.unwrap_or(0) + manifest.media_bytes.unwrap_or(0);
     ctx.total.set(estimate);
     let count = Cell::new(0u64);
     let (mut crt, mut key) = (None, None);
+    let mut order = Order::default();
+    let mut index = 0;
     let sums = backup
         .for_each_entry(|e, _, r| {
+            order.note(e, index);
+            index += 1;
             let mut body = vec![];
             let mut t = Tracked { inner: r, count: &count, error: None };
             match e {
@@ -669,17 +756,18 @@ fn verify(path: &Path, pw: &SecretString, ctx: &Ctx) -> Result<Verified, Failed>
                 Entry::Konak(p) if p == "ca/root.key" => key = String::from_utf8(body).ok(),
                 _ => {}
             }
-            ctx.bytes("verify", None, count.get());
+            ctx.bytes(VERIFY, None, count.get());
             Ok(())
         })
         .map_err(|e| {
             // A read error inside the callback is the archive's: report it as damaged.
-            let e = if e.code == "backup_restore_failed" { fmt::ReadError { code: "backup_damaged", detail: e.detail } } else { e };
-            read_err(e)
+            let code = if e.code == "backup_restore_failed" { "backup_damaged" } else { e.code };
+            crate::log(ctx.paths, &format!("restore: {code}: {}", e.detail));
+            fail(VERIFY, format!("{code}: {}", e.detail))
         })?;
     let total = sums.entries.iter().skip(1).map(|e| e.size).sum();
     let sizes = sums.entries.into_iter().map(|e| (e.path, e.size)).collect();
-    Ok(Verified { manifest, total, ca: crt.zip(key), sizes })
+    Ok(Verified { manifest, total, ca: crt.zip(key), sizes, order })
 }
 
 // ---- The run ---------------------------------------------------------------------------------------
@@ -696,7 +784,7 @@ impl Ctx<'_> {
     fn step(&self, step: &'static str, app: Option<&str>, done: u64) {
         self.last.set(Some(Instant::now()));
         let total = self.total.get();
-        self.host.progress(&Progress { state: "running", step, app: app.map(String::from), done_bytes: Some(done.min(total)), total_bytes: Some(total), error: None, summary: None });
+        self.host.progress(&Progress { state: "running", step, app: app.map(String::from), done_bytes: Some(done.min(total)), total_bytes: Some(total), error: None, detail: None, summary: None });
     }
     fn bytes(&self, step: &'static str, app: Option<&str>, done: u64) {
         if self.last.get().is_none_or(|t| t.elapsed() >= Duration::from_millis(500)) {
@@ -739,85 +827,147 @@ fn password(paths: &Paths, given: &str) -> Result<SecretString, String> {
 
 /// One restore, start to end. `_guard` proves no backup or other restore runs. The result goes to
 /// `host` as the final `done` (everything chosen was restored) or `failed` event, with the summary.
+/// A run's failure is returned (and sent) as a code, its technical text as the event's `detail`.
 pub fn run(paths: &Paths, host: &dyn Host, target: &dyn Target, _guard: &Guard, req: &Request) -> Result<Summary, Failed> {
     let t0 = Instant::now();
     let _marker = crate::backup::RunMarker::new(paths, "restore");
     let ctx = Ctx { paths, host, total: Cell::new(0), last: Cell::new(None) };
     let mut summary = Summary::default();
     let result = run_steps(&ctx, target, req, &mut summary);
-    let redact = |e: &str| crate::redact::Redactor::new(vec![]).apply(e);
-    for f in &mut summary.failed {
-        f.error = redact(&f.error);
-    }
-    let error = match &result {
-        Err(f) => Some(redact(&f.error)),
-        Ok(()) if !summary.failed.is_empty() || [&summary.photos, &summary.media].iter().any(|f| f.as_ref().is_some_and(|f| f.failed > 0)) => Some("restore_some_failed".to_string()),
-        Ok(()) => None,
+    let (error, detail) = match &result {
+        Err(f) => {
+            let (code, detail) = crate::redact::code_and_detail(&f.error, "backup_restore_failed");
+            (Some(code), detail)
+        }
+        Ok(()) if !summary.failed.is_empty() || [&summary.photos, &summary.media].iter().any(|f| f.as_ref().is_some_and(|f| f.failed > 0)) => (Some("restore_some_failed".to_string()), None),
+        Ok(()) => (None, None),
     };
     crate::log(paths, &format!("restore finished in {:.0} s: {}", t0.elapsed().as_secs_f64(), serde_json::to_string(&summary).unwrap_or_default()));
     let (state, step) = match (&result, &error) {
         (Err(f), _) => ("failed", f.step),
-        (Ok(()), Some(_)) => ("failed", "done"),
-        (Ok(()), None) => ("done", "done"),
+        (Ok(()), Some(_)) => ("failed", DONE),
+        (Ok(()), None) => ("done", DONE),
     };
     if let Some(e) = &error {
-        crate::log(paths, &format!("restore failed at {step}: {e}"));
+        crate::log(paths, &format!("restore failed at {step}: {e}{}", detail.as_deref().map(|d| format!(" ({d})")).unwrap_or_default()));
     }
-    host.progress(&Progress { state, step, app: None, done_bytes: Some(ctx.total.get()), total_bytes: Some(ctx.total.get()), error, summary: Some(summary.clone()) });
-    result.map(|()| summary)
+    host.progress(&Progress { state, step, app: None, done_bytes: Some(ctx.total.get()), total_bytes: Some(ctx.total.get()), error: error.clone(), detail, summary: Some(summary.clone()) });
+    match result {
+        Ok(()) => Ok(summary),
+        Err(f) => Err(Failed { step: f.step, error: error.unwrap_or_default() }),
+    }
+}
+
+/// The request as far as the backup can serve it: Photos, Media and the CA only when it has them.
+fn narrowed(req: &Request, m: &Manifest) -> Request {
+    Request { photos: req.photos && m.photos_bytes.is_some(), media: req.media && m.media_bytes.is_some(), ca: req.ca && m.konak_files.iter().any(|f| f == "ca/root.crt"), ..req.clone() }
+}
+
+/// The chosen apps the restore would refuse, told from the manifest, the catalog, `state.json` and
+/// a probe of the distro, before the long read of the file: not in the backup, not in the catalog,
+/// a manifest that lacks one of its volumes, or installed here (or data of it left in the distro)
+/// without `replace`. Each app's turn checks again later (`Walk::begin`).
+fn refusals(target: &dyn Target, state: &State, m: &Manifest, req: &Request) -> Vec<AppFailure> {
+    let refused = |id: &str| -> Option<String> {
+        let Some(mut am) = m.apps.iter().find(|a| a.id == id).cloned() else { return Some("restore_app_not_in_backup".into()) };
+        let Some(cm) = catalog::get(id) else { return Some("unknown_app".into()) };
+        if let Err(e) = catalog_volumes(cm, &mut am) {
+            return Some(e);
+        }
+        if req.replace {
+            return None;
+        }
+        let volumes: Vec<&str> = am.volumes.iter().map(|v| v.podman_name.as_str()).collect();
+        // A probe that fails is left to the app's turn, which probes again.
+        let exists = state.apps.iter().any(|a| a.id == id) || target.probe(id, &volumes).is_ok_and(|p| p.folder || p.volumes);
+        exists.then(|| "restore_app_exists".into())
+    };
+    req.apps.iter().filter_map(|id| refused(id).map(|e| app_failure(id, &e, None))).collect()
 }
 
 fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summary) -> Result<(), Failed> {
     let paths = ctx.paths;
-    ctx.step("verify", None, 0);
-    let state = State::try_load(paths).map_err(|e| fail("verify", e))?;
+    ctx.step(CHECK, None, 0);
+    let state = State::try_load(paths).map_err(|e| fail(CHECK, e))?;
     if !state.done {
-        return Err(fail("verify", "backup_not_set_up"));
+        return Err(fail(CHECK, "backup_not_set_up"));
     }
-    let pw = password(paths, &req.password).map_err(|e| fail("verify", e))?;
+    let pw = password(paths, &req.password).map_err(|e| fail(CHECK, e))?;
     // An earlier turn that did not finish (its rollback failed at the last start): tried again
     // now; while it stays, no restore runs, so its record is never overwritten.
     if inflight_file(paths).is_file() {
         recover(paths, target);
         if inflight_file(paths).is_file() {
-            return Err(fail("verify", "restore_aside_exists"));
+            return Err(fail(CHECK, "restore_aside_exists"));
         }
     }
     let file = Path::new(&req.path);
     let before = stamp(file);
-    let v = verify(file, &pw, ctx)?;
-    crate::log(paths, &format!("restore: {} verified ({} apps in it; chosen {:?}, replace {}, photos {}, media {})", file.display(), v.manifest.apps.len(), req.apps, req.replace, req.photos, req.media));
-    check_space(paths, target, req, &v.sizes).map_err(|e| fail("verify", e))?;
+    // A wrong password fails here, at the age header (one scrypt), long before the full read.
+    let backup = fmt::open(file, &pw).map_err(|e| {
+        crate::log(paths, &format!("restore: {e}"));
+        fail(CHECK, e.code)
+    })?;
+    let req = &narrowed(req, &backup.manifest);
+    let refused = refusals(target, &state, &backup.manifest, req);
+    if let Some(first) = refused.first() {
+        let code = first.error.clone();
+        crate::log(paths, &format!("restore: refused before reading the file: {:?}", refused.iter().map(|f| (&f.id, &f.error)).collect::<Vec<_>>()));
+        summary.failed = refused;
+        return Err(fail(CHECK, code));
+    }
+    if !chosen_something(req) {
+        return Err(fail(CHECK, "restore_nothing_chosen"));
+    }
 
-    ctx.step("konak", None, 0);
+    ctx.step(VERIFY, None, 0);
+    let v = verify(backup, ctx)?;
+    crate::log(paths, &format!("restore: {} verified ({} apps in it; chosen {:?}, replace {}, photos {}, media {})", file.display(), v.manifest.apps.len(), req.apps, req.replace, req.photos, req.media));
+    check_space(paths, target, req, &v.sizes).map_err(|e| fail(CHECK, e))?;
+
+    ctx.step(KONAK, None, 0);
     restore_ca(paths, ctx.host, &v, req.ca, state.apps.is_empty(), summary);
     if v.manifest.konak_files.iter().any(|f| f == "settings.json") {
         summary.notes.push("restore_settings_kept");
     }
 
-    if stamp(file) != before {
-        return Err(fail("verify", "restore_file_changed"));
-    }
-    ctx.total.set(v.total);
-    let backup = fmt::open(file, &pw).map_err(|e| fail("verify", e.code))?;
+    // The second read, in archive order; Photos and Media first in a pass of their own when an app
+    // that mounts them comes before them in the file.
+    let passes = if v.order.folders_late(req) {
+        crate::log(paths, "restore: Photos/Media come after the apps in this file; restoring them first in a pass of their own");
+        vec![Request { apps: vec![], ca: false, ..req.clone() }, Request { photos: false, media: false, ..req.clone() }]
+    } else {
+        vec![req.clone()]
+    };
+    ctx.total.set(v.total * passes.len() as u64);
     let count = Cell::new(0u64);
-    let mut walk = Walk { ctx, target, req, manifest: &v.manifest, count: &count, current: Current::None, seen: vec![], summary };
-    let walked = backup.for_each_entry(|e, _, r| walk.entry(e, r)).map(|_| ());
-    match &walked {
-        Ok(()) => walk.end_current(),
-        Err(e) => {
-            walk.fail_current("backup_damaged".into());
-            crate::log(paths, &format!("restore: the second read failed: {e}"));
+    let mut seen = vec![];
+    let mut walked = Ok(());
+    for pass in &passes {
+        if stamp(file) != before {
+            return Err(fail(VERIFY, "restore_file_changed"));
+        }
+        let backup = fmt::open(file, &pw).map_err(|e| fail(VERIFY, e.code))?;
+        let mut walk = Walk { ctx, target, req: pass, manifest: &v.manifest, count: &count, current: Current::None, seen: vec![], summary };
+        walked = backup.for_each_entry(|e, _, r| walk.entry(e, r)).map(|_| ());
+        match &walked {
+            Ok(()) => walk.end_current(),
+            Err(e) => {
+                walk.fail_current("backup_damaged".into());
+                crate::log(paths, &format!("restore: the second read failed: {e}"));
+            }
+        }
+        seen.append(&mut walk.seen);
+        if walked.is_err() {
+            break;
         }
     }
-    let seen = std::mem::take(&mut walk.seen);
-    drop(walk);
     for id in &req.apps {
         if !seen.contains(id) && !summary.failed.iter().any(|f| &f.id == id) {
-            summary.failed.push(AppFailure { id: id.clone(), error: "restore_app_not_in_backup".into() });
+            summary.failed.push(app_failure(id, "restore_app_not_in_backup", None));
         }
     }
-    walked.map_err(|e| fail("verify", if e.code == "backup_restore_failed" { "backup_damaged" } else { e.code }))
+    walked.map_err(|e| fail(VERIFY, if e.code == "backup_restore_failed" { "backup_damaged" } else { e.code }))
 }
 
 /// What a restore writes, per destination: the distro (the chosen apps' folders and volumes) and
@@ -912,6 +1062,8 @@ struct Turn {
     volumes_done: Vec<String>,
     /// Volumes of the manifest the catalog does not declare: their entries are read past.
     ignored_volumes: Vec<String>,
+    /// `bring_up` was called: a failure from here on saves the containers' logs.
+    up_tried: bool,
 }
 
 enum Current {
@@ -964,13 +1116,14 @@ impl Walk<'_> {
             Entry::Photos(rel) | Entry::Media(rel) => {
                 self.end_current();
                 let photos = matches!(e, Entry::Photos(_));
-                let (wanted, root, step) = if photos { (self.req.photos, &self.ctx.paths.photos, "photos") } else { (self.req.media, &self.ctx.paths.media, "media") };
+                let (wanted, root, step) = if photos { (self.req.photos, &self.ctx.paths.photos, PHOTOS) } else { (self.req.media, &self.ctx.paths.media, MEDIA) };
                 if wanted {
                     let result = merge_file(root, rel, &mut t);
                     if let Some(read) = t.error.take() {
                         return Err(read);
                     }
                     let slot = if photos { &mut self.summary.photos } else { &mut self.summary.media };
+                    let first = slot.is_none();
                     let f = slot.get_or_insert_with(FolderResult::default);
                     match result {
                         Ok(Merged::Written) => f.written += 1,
@@ -984,7 +1137,11 @@ impl Walk<'_> {
                             }
                         }
                     }
-                    self.ctx.bytes(step, None, self.count.get());
+                    if first {
+                        self.ctx.step(step, None, self.count.get());
+                    } else {
+                        self.ctx.bytes(step, None, self.count.get());
+                    }
                 }
             }
             _ => self.end_current(),
@@ -1024,7 +1181,7 @@ impl Walk<'_> {
             self.record_failure(id, "busy".into());
             return skip;
         }
-        self.ctx.step("app", Some(id), self.count.get());
+        self.ctx.step(APP, Some(id), self.count.get());
         let prepared = (|| {
             let state = State::try_load(self.ctx.paths)?;
             let old = state.apps.iter().find(|a| a.id == id).cloned();
@@ -1043,7 +1200,7 @@ impl Walk<'_> {
         let (old, had_old, name, reservation) = match prepared {
             Ok(p) => p,
             Err(e) => {
-                self.ctx.host.release(id, &Err(e.clone()));
+                self.release_failed(id, &e);
                 self.record_failure(id, e);
                 return skip;
             }
@@ -1054,11 +1211,11 @@ impl Walk<'_> {
         }
         // Recorded before anything changes, so a Konak that ends mid-turn rolls it back at its next start.
         if let Err(e) = mark(self.ctx.paths, &Inflight { app: id.to_string(), had_old, old: old.clone(), phase: "restore".into() }) {
-            self.ctx.host.release(id, &Err(e.clone()));
+            self.release_failed(id, &e);
             self.record_failure(id, e);
             return skip;
         }
-        self.current = Current::Turn(Box::new(Turn { am, name, renamed_from, _reservation: reservation, old, had_old, sink: None, next_index: 0, folder_done: false, volumes_done: vec![], ignored_volumes }));
+        self.current = Current::Turn(Box::new(Turn { am, name, renamed_from, _reservation: reservation, old, had_old, sink: None, next_index: 0, folder_done: false, volumes_done: vec![], ignored_volumes, up_tried: false }));
         if had_old {
             if let Err(e) = self.target.set_aside(id) {
                 self.fail_current(e);
@@ -1113,7 +1270,7 @@ impl Walk<'_> {
                 return Ok(());
             }
             sink.write_all(&buf[..n]).map_err(|e| format!("writing {} of {id}: {e}", stage_name(&stage)))?;
-            ctx.bytes("app", Some(&id), data.count.get());
+            ctx.bytes(APP, Some(&id), data.count.get());
         }
     }
 
@@ -1151,7 +1308,8 @@ impl Walk<'_> {
         }
     }
 
-    /// The current app failed: what it changed is undone, its old data put back and started again.
+    /// The current app failed: its containers' logs are saved when it had been started, what it
+    /// changed is undone, its old data put back and started again.
     fn fail_current(&mut self, error: String) {
         let Current::Turn(mut t) = std::mem::replace(&mut self.current, Current::None) else { return };
         let id = t.am.id.clone();
@@ -1163,6 +1321,8 @@ impl Walk<'_> {
                 error = format!("{error} ({said})");
             }
         }
+        // Before the rollback, which removes the containers and their logs.
+        let log = if t.up_tried { save_logs(self.ctx.paths, self.target, &id) } else { None };
         if let Err(e) = self.target.roll_back(&id, t.had_old) {
             // The marker stays: the next start tries the rollback again.
             crate::log(self.ctx.paths, &format!("restore {id}: rolling back failed, the set-aside data stays in the distro: {e}"));
@@ -1175,14 +1335,32 @@ impl Walk<'_> {
                 }
             }
         }
-        crate::log(self.ctx.paths, &format!("restore {id} failed: {error}"));
-        self.ctx.host.release(&id, &Err(error.clone()));
-        self.record_failure(&id, error);
+        let logs = log.as_deref().map(|l| format!(" (container logs: {l})")).unwrap_or_default();
+        crate::log(self.ctx.paths, &format!("restore {id} failed: {error}{logs}"));
+        self.release_failed(&id, &error);
+        self.summary.failed.push(app_failure(&id, &error, log));
     }
 
     fn record_failure(&mut self, id: &str, error: String) {
-        self.summary.failed.push(AppFailure { id: id.to_string(), error });
+        self.summary.failed.push(app_failure(id, &error, None));
     }
+
+    /// Ends the app's busy mark with the failure's code (the summary has the detail).
+    fn release_failed(&self, id: &str, error: &str) {
+        self.ctx.host.release(id, &Err(app_failure(id, error, None).error));
+    }
+}
+
+/// Saves the containers' logs of app `id` (redacted) to `<home>\logs\restore-<id>-<local time>.log`;
+/// returns the file's path. A failure to get or save them is logged.
+fn save_logs(paths: &Paths, target: &dyn Target, id: &str) -> Option<String> {
+    let saved = target.app_logs(id).and_then(|text| {
+        let t = crate::backup::local_of(now()).ok_or("cannot read the local time")?;
+        let file = paths.log_dir().join(format!("restore-{id}-{:04}{:02}{:02}-{:02}{:02}{:02}.log", t.year(), t.month() as u8, t.day(), t.hour(), t.minute(), t.second()));
+        std::fs::create_dir_all(paths.log_dir()).and_then(|()| std::fs::write(&file, crate::redact::Redactor::new(vec![]).apply(&text))).map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+        Ok(file.display().to_string())
+    });
+    saved.map_err(|e| crate::log(paths, &format!("restore {id}: the containers' logs were not saved: {e}"))).ok()
 }
 
 fn stage_name(s: &Stage) -> String {
@@ -1230,7 +1408,8 @@ fn complete(ctx: &Ctx, target: &dyn Target, t: &mut Turn) -> Result<(), String> 
     if let Some(v) = t.am.volumes.iter().find(|v| !t.volumes_done.contains(&v.name)) {
         return Err(format!("backup_damaged: volume {} is missing", v.name));
     }
-    target.bring_up(&id, &t.name, t.am.claimed, !t.am.stopped)?;
+    t.up_tried = true;
+    target.bring_up(&id, &t.name, t.am.claimed, !t.am.stopped).map_err(|e| format!("{}: {e}", if apps::health_failed(&e) { "restore_app_unhealthy" } else { "restore_app_failed" }))?;
     let (name, claimed, stopped) = (t.name.clone(), t.am.claimed, t.am.stopped);
     apps::update_state(ctx.paths, |s| {
         s.rerender.retain(|r| *r != id);
@@ -1287,6 +1466,8 @@ mod tests {
         windows_free: Option<u64>,
         fail_rollback: bool,
         panic_up: bool,
+        /// A file whose presence `bring_up` records (`seen <name> true|false`).
+        watch: Option<PathBuf>,
     }
 
     struct FakeSink {
@@ -1355,6 +1536,9 @@ mod tests {
         fn bring_up(&self, id: &str, name: &str, claimed: bool, up: bool) -> Result<(), String> {
             self.call(format!("up {id} {name} claimed={claimed} up={up}"));
             assert!(!self.panic_up, "a bug in the middle of a restore");
+            if let Some(w) = &self.watch {
+                self.call(format!("seen {} {}", w.file_name().unwrap().to_string_lossy(), w.exists()));
+            }
             if self.fail_up.iter().any(|f| f == id) {
                 return Err(format!("{id} did not answer on /health within 5 minutes"));
             }
@@ -1363,6 +1547,10 @@ mod tests {
         fn start_old(&self, id: &str) -> Result<(), String> {
             self.call(format!("start_old {id}"));
             Ok(())
+        }
+        fn app_logs(&self, id: &str) -> Result<String, String> {
+            self.call(format!("logs {id}"));
+            Ok(format!("{id}_server  | 2026-11-27T08:20:00Z Failed to read /data/.immich; password=hunter22"))
         }
         fn name_free_on_lan(&self, name: &str) -> Result<bool, String> {
             self.call(format!("lan {name}"));
@@ -1411,6 +1599,20 @@ mod tests {
         }
     }
 
+    /// Bytes zstd cannot shrink, so a file with them reaches past age's first 64 KiB chunk (a byte
+    /// changed there leaves the manifest readable).
+    fn noise(len: usize) -> Vec<u8> {
+        let mut x = 0x9e37_79b9_u32;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect()
+    }
+
     fn stream(tag: &str, len: usize) -> Vec<u8> {
         (0..len).map(|i| (i as u8).wrapping_mul(31) ^ tag.as_bytes()[i % tag.len()]).collect()
     }
@@ -1418,6 +1620,12 @@ mod tests {
     /// A backup with the given apps (folder and volume streams from `stream`), a CA when given, and
     /// photos `(rel, content)`.
     fn write_backup(path: &Path, apps: &[AppManifest], ca: Option<(&str, &str)>, photos: &[(&str, &[u8])]) {
+        write_backup_ordered(path, apps, ca, photos, false);
+    }
+
+    /// `photos_first`: the order backups are written in now; without, the order of older files
+    /// (apps first, Photos last).
+    fn write_backup_ordered(path: &Path, apps: &[AppManifest], ca: Option<(&str, &str)>, photos: &[(&str, &[u8])], photos_first: bool) {
         let m = Manifest {
             format: fmt::FORMAT,
             konak_version: "0.1.0".into(),
@@ -1429,6 +1637,14 @@ mod tests {
         };
         let file = io::BufWriter::new(std::fs::File::create(path).unwrap());
         let mut w = fmt::Writer::new(file, &pw("the backup password"), &m, TEST_LOG_N).unwrap();
+        let add_photos = |w: &mut fmt::Writer<io::BufWriter<std::fs::File>>| {
+            for (rel, body) in photos {
+                w.add_reader(&format!("photos/{rel}"), body.len() as u64, *body, 0o644, 1).unwrap();
+            }
+        };
+        if photos_first {
+            add_photos(&mut w);
+        }
         for a in apps {
             w.add_stream(&format!("apps/{}/folder", a.id), stream(&a.id, 3000).as_slice(), 1, &mut |_| {}).unwrap();
             for v in &a.volumes {
@@ -1441,8 +1657,8 @@ mod tests {
         }
         w.add_bytes("konak/state.json", b"{}", 0o600, 1).unwrap();
         w.add_bytes("konak/settings.json", b"{}", 0o600, 1).unwrap();
-        for (rel, body) in photos {
-            w.add_reader(&format!("photos/{rel}"), body.len() as u64, *body, 0o644, 1).unwrap();
+        if !photos_first {
+            add_photos(&mut w);
         }
         let (mut f, _) = w.finish(1).unwrap();
         f.flush().unwrap();
@@ -1471,7 +1687,7 @@ mod tests {
     #[test]
     fn nothing_changes_before_the_whole_file_is_verified() {
         let (paths, file) = setup("verify", &[]);
-        write_backup(&file, &[app("vaultwarden", "vault-v", false, &[])], None, &[("a.jpg", b"jpeg")]);
+        write_backup(&file, &[app("vaultwarden", "vault-v", false, &[])], None, &[("a.jpg", &noise(200_000))]);
         // A byte changed near the end: the apps come first in the file, so a restore that did not
         // verify first would already have unpacked them.
         let mut raw = std::fs::read(&file).unwrap();
@@ -1484,12 +1700,16 @@ mod tests {
         let state = State::load(&paths);
         let photos_exist = paths.photos.exists();
         let _ = std::fs::remove_dir_all(&paths.home);
-        assert_eq!(r.unwrap_err(), fail("verify", "backup_damaged"));
-        assert_eq!(wrong.unwrap_err(), fail("verify", "backup_wrong_password"));
+        assert_eq!(r.unwrap_err(), fail(VERIFY, "backup_damaged"));
+        assert_eq!(wrong.unwrap_err(), fail(CHECK, "backup_wrong_password"));
         assert!(target.calls.borrow().is_empty(), "{:?}", target.calls.borrow());
         assert!(state.apps.is_empty() && !photos_exist && host.released.borrow().is_empty());
-        let last = host.events.borrow().last().cloned().unwrap();
-        assert_eq!((last.state, last.step, last.error.as_deref()), ("failed", "verify", Some("backup_wrong_password")));
+        let events = host.events.borrow();
+        let damaged = events.iter().find(|e| e.state == "failed").unwrap();
+        assert_eq!((damaged.step, damaged.error.as_deref()), (VERIFY, Some("backup_damaged")));
+        assert!(damaged.detail.as_deref().is_some_and(|d| !d.is_empty()), "the technical text apart: {damaged:?}");
+        let last = events.last().cloned().unwrap();
+        assert_eq!((last.state, last.step, last.error.as_deref()), ("failed", CHECK, Some("backup_wrong_password")));
     }
 
     #[test]
@@ -1515,6 +1735,9 @@ mod tests {
         assert_eq!(
             *target.calls.borrow(),
             [
+                // The check before the long read.
+                "probe vaultwarden",
+                "probe nextcloud",
                 "probe vaultwarden",
                 "lan vault-n-2",
                 "folder vaultwarden",
@@ -1541,23 +1764,34 @@ mod tests {
     }
 
     #[test]
-    fn an_installed_app_is_refused_without_replace_and_the_others_go_on() {
+    fn a_choice_that_cannot_be_served_is_refused_before_the_long_read() {
         let (paths, file) = setup("noreplace", &[("vaultwarden", "vault-r", false)]);
         let apps = [app("vaultwarden", "vault-r", false, &[]), app("forgejo", "git-r", false, &[]), app("jellyfin", "films-r", false, &[])];
-        write_backup(&file, &apps, None, &[]);
+        write_backup(&file, &apps, None, &[("big.raw", &noise(200_000))]);
+        // Damaged near the end: a refusal that read the file through would say backup_damaged.
+        let mut raw = std::fs::read(&file).unwrap();
+        let n = raw.len();
+        raw[n - 40] ^= 1;
+        std::fs::write(&file, &raw).unwrap();
         let host = FakeHost::default();
         // Jellyfin is not in state.json, but its folder was kept by an earlier remove: existing data too.
         let target = FakeTarget { probes: HashMap::from([("jellyfin".to_string(), Probe { folder: true, ..Default::default() })]), ..Default::default() };
-        let summary = restore(&paths, &host, &target, &request(&file, &["vaultwarden", "forgejo", "jellyfin", "immich"], false, false)).unwrap();
+        let refused = restore(&paths, &host, &target, &request(&file, &["vaultwarden", "forgejo", "jellyfin", "immich"], false, false));
+        // Media chosen, but the backup has none: nothing left to restore.
+        let nothing = restore(&paths, &FakeHost::default(), &FakeTarget::default(), &Request { media: true, ..request(&file, &[], false, false) });
         let state = State::load(&paths);
         let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(refused.unwrap_err(), fail(CHECK, "restore_app_exists"));
+        assert_eq!(nothing.unwrap_err(), fail(CHECK, "restore_nothing_chosen"));
+        let last = host.events.borrow().last().cloned().unwrap();
+        let summary = last.summary.unwrap();
         let failed: Vec<(&str, &str)> = summary.failed.iter().map(|f| (f.id.as_str(), f.error.as_str())).collect();
         assert_eq!(failed, [("vaultwarden", "restore_app_exists"), ("jellyfin", "restore_app_exists"), ("immich", "restore_app_not_in_backup")]);
-        assert_eq!(summary.restored.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["forgejo"]);
-        assert!(!target.calls.borrow().iter().any(|c| c.starts_with("aside") || c == "folder vaultwarden" || c == "folder jellyfin"), "{:?}", target.calls.borrow());
-        assert_eq!(state.apps.len(), 2);
-        let last = host.events.borrow().last().cloned().unwrap();
-        assert_eq!((last.state, last.error.as_deref()), ("failed", Some("restore_some_failed")));
+        assert!(summary.restored.is_empty());
+        assert_eq!(*target.calls.borrow(), ["probe forgejo", "probe jellyfin"], "only looked at");
+        assert_eq!(state.apps.len(), 1);
+        assert_eq!((last.state, last.step, last.error.as_deref()), ("failed", CHECK, Some("restore_app_exists")));
+        assert!(!host.events.borrow().iter().any(|e| e.step == VERIFY), "no verify step");
     }
 
     #[test]
@@ -1569,7 +1803,15 @@ mod tests {
         let target = FakeTarget { fail_up: vec!["vaultwarden".into()], ..Default::default() };
         let summary = restore(&paths, &host, &target, &request(&file, &["vaultwarden", "nextcloud"], true, false)).unwrap();
         let state = State::load(&paths);
+        let log_file = summary.failed[0].log.clone().unwrap();
+        let saved = std::fs::read_to_string(&log_file).unwrap();
         let _ = std::fs::remove_dir_all(&paths.home);
+        let f = &summary.failed[0];
+        assert_eq!((f.id.as_str(), f.error.as_str()), ("vaultwarden", "restore_app_unhealthy"));
+        assert!(f.detail.as_deref().is_some_and(|d| d.contains("did not answer") && !d.starts_with("restore_")), "{f:?}");
+        let name = Path::new(&log_file).file_name().unwrap().to_string_lossy().to_string();
+        assert!(Path::new(&log_file).starts_with(paths.log_dir()) && name.starts_with("restore-vaultwarden-") && name.ends_with(".log"), "{log_file}");
+        assert!(saved.contains("Failed to read /data/.immich") && saved.contains("password=[redacted]") && !saved.contains("hunter22"), "{saved}");
         assert_eq!(
             *target.calls.borrow(),
             [
@@ -1578,6 +1820,8 @@ mod tests {
                 "aside vaultwarden",
                 "folder vaultwarden",
                 "up vaultwarden vault-a claimed=true up=true",
+                // Its logs are saved before the rollback removes the containers.
+                "logs vaultwarden",
                 "rollback vaultwarden true",
                 "start_old vaultwarden",
                 "probe nextcloud",
@@ -1591,7 +1835,6 @@ mod tests {
             ]
         );
         assert_eq!(summary.failed.len(), 1);
-        assert!(summary.failed[0].error.contains("did not answer"), "{:?}", summary.failed);
         let names: Vec<(&str, &str, u64)> = state.apps.iter().map(|a| (a.id.as_str(), a.name.as_str(), a.installed_unix)).collect();
         assert_eq!(names, [("vaultwarden", "vault-a", 7), ("nextcloud", "files-a", 7)], "the failed one unchanged, the replaced one renamed");
         assert_eq!(*host.released.borrow(), [("vaultwarden".to_string(), false), ("nextcloud".to_string(), true)]);
@@ -1613,8 +1856,8 @@ mod tests {
         let calls = target.calls.borrow().clone();
         let (paths2, file2) = setup("volumes-short", &[]);
         write_backup(&file2, &[short], None, &[]);
-        let target2 = FakeTarget::default();
-        let summary2 = restore(&paths2, &FakeHost::default(), &target2, &request(&file2, &["nextcloud"], false, false)).unwrap();
+        let (host2, target2) = (FakeHost::default(), FakeTarget::default());
+        let refused2 = restore(&paths2, &host2, &target2, &request(&file2, &["nextcloud"], false, false));
         let _ = std::fs::remove_dir_all(&paths.home);
         let _ = std::fs::remove_dir_all(&paths2.home);
         assert!(summary.failed.is_empty(), "{:?}", summary.failed);
@@ -1622,7 +1865,9 @@ mod tests {
         let volumes: Vec<&String> = calls.iter().filter(|c| c.starts_with("volume ")).collect();
         assert_eq!(volumes, ["volume nextcloud nextcloud_db", "volume nextcloud nextcloud_nextcloud"]);
         assert!(!calls.iter().any(|c| c.contains("immich") || c.contains("pgdata") || c.contains("extra")), "{calls:?}");
-        assert_eq!(summary2.failed, [AppFailure { id: "nextcloud".into(), error: "backup_damaged: volume nextcloud is missing".into() }]);
+        assert_eq!(refused2.unwrap_err(), fail(CHECK, "backup_damaged"));
+        let summary2 = host2.events.borrow().last().cloned().unwrap().summary.unwrap();
+        assert_eq!(summary2.failed, [AppFailure { id: "nextcloud".into(), error: "backup_damaged".into(), detail: Some("volume nextcloud is missing".into()), log: None }]);
         assert!(target2.calls.borrow().is_empty(), "{:?}", target2.calls.borrow());
     }
 
@@ -1641,10 +1886,10 @@ mod tests {
         let no_photos = restore(&paths, &host, &tight_photos, &request(&file, &[], false, true));
         let photos_written = paths.photos.join("big.jpg").exists();
         let _ = std::fs::remove_dir_all(&paths.home);
-        assert_eq!(no_distro.unwrap_err(), fail("verify", "restore_no_space"));
-        assert!(tight_distro.calls.borrow().is_empty(), "{:?}", tight_distro.calls.borrow());
+        assert_eq!(no_distro.unwrap_err(), fail(CHECK, "restore_no_space"));
+        assert_eq!(*tight_distro.calls.borrow(), ["probe nextcloud"], "only looked at");
         assert!(ok.unwrap().failed.is_empty());
-        assert_eq!(no_photos.unwrap_err(), fail("verify", "restore_no_space"));
+        assert_eq!(no_photos.unwrap_err(), fail(CHECK, "restore_no_space"));
         assert!(!photos_written);
     }
 
@@ -1711,7 +1956,7 @@ mod tests {
         let target = FakeTarget::default();
         let ok = restore(&paths, &FakeHost::default(), &target, &request(&file, &["forgejo"], false, false));
         let _ = std::fs::remove_dir_all(&paths.home);
-        assert_eq!(blocked.unwrap_err(), fail("verify", "restore_aside_exists"));
+        assert_eq!(blocked.unwrap_err(), fail(CHECK, "restore_aside_exists"));
         assert_eq!(*failing.calls.borrow(), ["rollback vaultwarden false"], "nothing else touched");
         assert!(kept);
         assert_eq!(ok.unwrap().restored.len(), 1);
@@ -1733,7 +1978,8 @@ mod tests {
         assert_eq!(summary.restored.len(), 1);
         assert_eq!(summary.failed.len(), 1);
         assert!(!marker_left, "cleared after a commit and after a rollback");
-        assert!(summary2.failed[0].error.contains("cannot record the restore in progress"), "{:?}", summary2.failed);
+        let f = &summary2.failed[0];
+        assert!(f.error == "restore_app_failed" && f.detail.as_deref().is_some_and(|d| d.contains("cannot record the restore in progress")), "{f:?}");
         assert_eq!(*blocked.calls.borrow(), ["probe vaultwarden"], "nothing set aside");
     }
 
@@ -1745,8 +1991,36 @@ mod tests {
         let target = FakeTarget::default();
         let summary = restore(&paths, &host, &target, &request(&file, &["forgejo"], false, false)).unwrap();
         let _ = std::fs::remove_dir_all(&paths.home);
-        assert_eq!(summary.failed, [AppFailure { id: "forgejo".into(), error: "busy".into() }]);
-        assert!(target.calls.borrow().is_empty());
+        assert_eq!(summary.failed, [AppFailure { id: "forgejo".into(), error: "busy".into(), detail: None, log: None }]);
+        assert_eq!(*target.calls.borrow(), ["probe forgejo"]);
+    }
+
+    #[test]
+    fn photos_are_in_place_before_an_app_that_mounts_them_starts() {
+        // Immich mounts Photos (and checks its folders at start); Forgejo mounts nothing.
+        let apps = [app("forgejo", "git-p", false, &[]), app("immich", "immich-p", false, &[])];
+        let photo: &[(&str, &[u8])] = &[(".immich", b"marker"), ("library/a.jpg", b"jpeg")];
+        let mut results = vec![];
+        for photos_first in [false, true] {
+            let (paths, file) = setup(&format!("order-{photos_first}"), &[]);
+            write_backup_ordered(&file, &apps, None, photo, photos_first);
+            let host = FakeHost::default();
+            let target = FakeTarget { watch: Some(paths.photos.join(".immich")), ..Default::default() };
+            let summary = restore(&paths, &host, &target, &request(&file, &["forgejo", "immich"], false, true)).unwrap();
+            let marker = std::fs::read(paths.photos.join(".immich")).unwrap();
+            let last = host.events.borrow().last().cloned().unwrap();
+            let steps: Vec<&str> = host.events.borrow().iter().map(|e| e.step).collect();
+            let _ = std::fs::remove_dir_all(&paths.home);
+            assert_eq!(marker, b"marker");
+            assert!(summary.failed.is_empty(), "{:?}", summary.failed);
+            assert_eq!(summary.photos.as_ref().map(|p| p.written), Some(2));
+            let ups: Vec<String> = target.calls.borrow().iter().filter(|c| c.starts_with("up ") || c.starts_with("seen ")).cloned().collect();
+            assert_eq!(ups, ["up forgejo git-p claimed=true up=true", "seen .immich true", "up immich immich-p claimed=true up=true", "seen .immich true"], "photos_first {photos_first}");
+            assert!(steps.contains(&PHOTOS) && steps.contains(&APP) && *steps.last().unwrap() == DONE, "{steps:?}");
+            results.push(last.total_bytes.unwrap());
+        }
+        // An older file is read twice after the verify (the folders' pass, then the apps'); a new one once.
+        assert_eq!(results[0], 2 * results[1]);
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -1831,11 +2105,11 @@ mod tests {
     #[test]
     fn photos_are_restored_only_when_asked_into_the_configured_folder() {
         let (paths, file) = setup("photos", &[]);
-        write_backup(&file, &[], None, &[("2026/a.jpg", b"aaa"), ("b.jpg", b"bbb")]);
+        write_backup(&file, &[app("forgejo", "git-ph", false, &[])], None, &[("2026/a.jpg", b"aaa"), ("b.jpg", b"bbb")]);
         std::fs::create_dir_all(&paths.photos).unwrap();
         std::fs::write(paths.photos.join("b.jpg"), b"changed").unwrap();
         let (host, target) = (FakeHost::default(), FakeTarget::default());
-        let skipped = restore(&paths, &host, &target, &request(&file, &[], false, false)).unwrap();
+        let skipped = restore(&paths, &host, &target, &request(&file, &["forgejo"], false, false)).unwrap();
         let before = names_in(&paths.photos);
         let done = restore(&paths, &host, &target, &request(&file, &[], false, true)).unwrap();
         let a = std::fs::read(paths.photos.join("2026").join("a.jpg")).unwrap();
