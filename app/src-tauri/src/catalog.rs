@@ -123,6 +123,43 @@ pub fn get(id: &str) -> Option<&'static Manifest> {
     all().iter().find(|m| m.id == id)
 }
 
+impl Manifest {
+    /// The named volumes compose.yml declares at its top level (`volumes:` / `  db:`).
+    pub fn named_volumes(&self) -> Vec<String> {
+        let mut out = vec![];
+        let mut inside = false;
+        for line in self.compose.lines() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if !line.starts_with(' ') {
+                inside = line.trim_end() == "volumes:";
+            } else if inside && line.starts_with("  ") && !line.starts_with("   ") {
+                if let Some((name, _)) = t.split_once(':') {
+                    out.push(name.trim().to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// The app-folder entries its containers bind-mount (`./forgejo:/data`, `DB_DATA_LOCATION:
+    /// ./postgres`): the first path component of every `./...` bind source in compose.yml and of
+    /// every `./...` env value.
+    pub fn bind_sources(&self) -> Vec<String> {
+        let from_compose = self.compose.lines().filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("- ./").or_else(|| l.strip_prefix("source: ./")).map(|r| r.split([':', '/']).next().unwrap_or_default())
+        });
+        let from_env = self.env.values().filter_map(|v| v.strip_prefix("./").map(|r| r.split('/').next().unwrap_or_default()));
+        let mut out: Vec<String> = from_compose.chain(from_env).filter(|s| !s.is_empty()).map(String::from).collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +215,26 @@ mod tests {
             assert!(m.compose.contains("@sha256:"), "{} has no pinned image", m.id);
             assert!(PORT_RANGE.contains(&m.port));
         }
+    }
+
+    #[test]
+    fn named_volumes_of_the_catalog() {
+        let vols = |id: &str| get(id).unwrap().named_volumes();
+        assert_eq!(vols("nextcloud"), ["db", "nextcloud"]);
+        assert_eq!(vols("immich"), ["model-cache"]);
+        for id in ["forgejo", "jellyfin", "vaultwarden"] {
+            assert!(vols(id).is_empty(), "{id}");
+        }
+    }
+
+    #[test]
+    fn bind_sources_of_the_catalog() {
+        let binds = |id: &str| get(id).unwrap().bind_sources();
+        assert_eq!(binds("forgejo"), ["forgejo"]);
+        assert_eq!(binds("jellyfin"), ["cache", "config"]);
+        assert_eq!(binds("vaultwarden"), ["vw-data"]);
+        assert_eq!(binds("immich"), ["postgres"]);
+        assert!(binds("nextcloud").is_empty());
     }
 
     #[test]

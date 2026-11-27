@@ -28,12 +28,12 @@ use time::{Date, Month, PrimitiveDateTime, Time};
 const EXT: &str = ".konakbackup";
 const PARTIAL: &str = ".partial";
 /// Room kept free beyond the estimate.
-const SPACE_MARGIN: u64 = 64 << 20;
+pub(crate) const SPACE_MARGIN: u64 = 64 << 20;
 /// How long an app's turn waits for another operation on it to end.
 const BUSY_WAIT: Duration = Duration::from_secs(10 * 60);
 const HISTORY_MAX: usize = 30;
 /// Named volumes that are not backed up (re-downloadable).
-const SKIP_VOLUMES: &[(&str, &str)] = &[("immich", "model-cache")];
+pub(crate) const SKIP_VOLUMES: &[(&str, &str)] = &[("immich", "model-cache")];
 
 // ---- One run at a time ---------------------------------------------------------------------------
 
@@ -56,6 +56,39 @@ impl Drop for Guard {
 
 pub fn running() -> bool {
     RUNNING.load(Ordering::SeqCst)
+}
+
+/// While a backup or restore runs, `op-running.json` in the Konak home names this process, so an
+/// uninstall (another process) waits for it instead of stopping Konak in the middle of it.
+pub struct RunMarker(PathBuf);
+
+fn run_marker_file(paths: &Paths) -> PathBuf {
+    paths.home.join("op-running.json")
+}
+
+impl RunMarker {
+    pub fn new(paths: &Paths, op: &str) -> RunMarker {
+        let file = run_marker_file(paths);
+        if let Err(e) = settings::write_atomic(&file, serde_json::json!({ "pid": std::process::id(), "op": op }).to_string().as_bytes()) {
+            crate::log(paths, &format!("{op}: cannot write {}: {e}", file.display()));
+        }
+        RunMarker(file)
+    }
+}
+
+impl Drop for RunMarker {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// The backup or restore another live process of `exe` runs: its pid and op (`backup`, `restore`).
+pub fn running_elsewhere(paths: &Paths, exe: &Path) -> Option<(u32, String)> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(run_marker_file(paths)).ok()?).ok()?;
+    let pid = u32::try_from(v["pid"].as_u64()?).ok()?;
+    let image = crate::diag::process_image(pid)?;
+    let same = |a: &Path, b: &Path| a.to_string_lossy().replace('/', "\\").eq_ignore_ascii_case(&b.to_string_lossy().replace('/', "\\"));
+    (pid != std::process::id() && same(Path::new(&image), exe)).then(|| (pid, v["op"].as_str().unwrap_or("backup").to_string()))
 }
 
 // ---- What the engine needs from its caller ---------------------------------------------------------
@@ -355,39 +388,92 @@ pub fn list(paths: &Paths) -> Vec<BackupEntry> {
     out
 }
 
-/// The manifest of a backup file. An empty `password` uses the stored one.
-pub fn inspect(paths: &Paths, path: &str, password: &str) -> Result<Manifest, String> {
+/// `inspect_backup`'s answer (contract `BackupManifest`): the manifest, plus the backup's root CA.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Inspected {
+    #[serde(flatten)]
+    pub manifest: Manifest,
+    /// SHA-256 of the backup's root certificate (as `ca_info` shows it), when it has one.
+    pub ca_fingerprint: Option<String>,
+    /// The root passes the restore's check (`ca::check_restored_root`).
+    pub ca_valid: bool,
+}
+
+/// The manifest of a backup file and its root CA. An empty `password` uses the stored one. The CA
+/// files come after the apps in the file, so this reads (and decrypts) up to them; the rest of the
+/// file is not checked here, a restore verifies all of it first.
+pub fn inspect(paths: &Paths, path: &str, password: &str) -> Result<Inspected, String> {
+    if settings::wsl_path(path) {
+        return Err("backup_path_refused".into());
+    }
     let pw = if password.is_empty() { settings::password(paths)?.ok_or("backup_no_password")? } else { SecretString::from(password.to_string()) };
-    fmt::open(Path::new(path), &pw).map(|b| b.manifest).map_err(|e| {
+    let b = fmt::open(Path::new(path), &pw).map_err(|e| {
         crate::log(paths, &format!("inspect backup: {e}"));
         e.code.to_string()
-    })
+    })?;
+    let manifest = b.manifest.clone();
+    let (mut crt, mut key) = (None, None);
+    if manifest.konak_files.iter().any(|f| f == "ca/root.crt") {
+        // Stopped with an error once both are read, or at the first Photos/Media entry.
+        let _ = b.for_each_entry(|e, _, r| {
+            let slot = match e {
+                fmt::Entry::Konak(p) if p == "ca/root.crt" => &mut crt,
+                fmt::Entry::Konak(p) if p == "ca/root.key" => &mut key,
+                fmt::Entry::Photos(_) | fmt::Entry::Media(_) => return Err("past the CA".into()),
+                _ => return Ok(()),
+            };
+            let mut body = String::new();
+            std::io::Read::read_to_string(&mut std::io::Read::take(r, 1 << 20), &mut body).map_err(|e| e.to_string())?;
+            *slot = Some(body);
+            if crt.is_some() && key.is_some() {
+                return Err("both read".into());
+            }
+            Ok(())
+        });
+    }
+    let ca_fingerprint = crt.as_deref().and_then(crate::ca::restored_fingerprint);
+    let ca_valid = matches!((&crt, &key), (Some(c), Some(k)) if crate::ca::check_restored_root(c, k).is_ok());
+    Ok(Inspected { manifest, ca_fingerprint, ca_valid })
 }
 
 // ---- Retention -------------------------------------------------------------------------------------
 
-/// Of Konak's file names, those beyond the newest `keep` (the name carries the time, so name order
-/// is age order).
-pub fn prune_candidates(mut names: Vec<String>, keep: usize) -> Vec<String> {
-    names.sort_by(|a, b| b.cmp(a));
-    names.into_iter().skip(keep).collect()
+/// How far ahead of this PC's clock a backup's time may be and still count (clocks of two PCs).
+const FUTURE_SLACK: u64 = 5 * 60;
+
+/// Of `(name, created_unix)` pairs, those beyond the newest `keep`, newest by the authenticated
+/// creation time (the name breaks ties).
+pub fn prune_candidates(mut found: Vec<(String, u64)>, keep: usize) -> Vec<String> {
+    found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    found.into_iter().skip(keep).map(|(n, _)| n).collect()
 }
 
-/// Deletes Konak's backups beyond the newest `keep` in `dir`: only files with Konak's name pattern
-/// and magic line whose manifest opens with `password`. Anything else is never deleted; an old file
-/// that does not open (made with an earlier password) is kept, with a log line. Returns the deleted
-/// names.
-pub fn prune(paths: &Paths, dir: &Path, keep: usize, password: &SecretString) -> Vec<String> {
-    let names = konak_files(dir).into_iter().map(|(n, _)| n).collect();
+/// Deletes Konak's backups beyond the newest `keep` in `dir`. `written` is the file this run just
+/// wrote and verified: it takes one of the `keep` places and is never deleted. Of the other files
+/// with Konak's name pattern and magic line, only those that open with `password` (age header,
+/// manifest entry and its tar checksum: a quick check, not a full verify, which would read every
+/// file end to end) and whose manifest time is not in the future are counted, ranked by that time,
+/// and may be deleted. A file that does not open (another password, planted, damaged) or has a
+/// future time is neither counted nor deleted, with a log line. Returns the deleted names.
+pub fn prune(paths: &Paths, dir: &Path, keep: usize, password: &SecretString, written: &Path) -> Vec<String> {
+    let written_name = written.file_name().map(|n| n.to_string_lossy().to_string());
+    let limit = now() + FUTURE_SLACK;
+    let mut counted = vec![];
+    for (name, _) in konak_files(dir) {
+        if Some(&name) == written_name.as_ref() {
+            continue;
+        }
+        match fmt::open(&dir.join(&name), password) {
+            Ok(b) if b.manifest.created_unix > limit => crate::log(paths, &format!("backup retention: {name} not counted, its time is in the future")),
+            Ok(b) => counted.push((name, b.manifest.created_unix)),
+            Err(e) => crate::log(paths, &format!("backup retention: {name} not counted, it does not open with the current password ({})", e.code)),
+        }
+    }
     let mut deleted = vec![];
-    for name in prune_candidates(names, keep) {
-        let path = dir.join(&name);
-        match fmt::open(&path, password) {
-            Ok(_) => match std::fs::remove_file(&path) {
-                Ok(()) => deleted.push(name),
-                Err(e) => crate::log(paths, &format!("backup retention: cannot delete {name}: {e}")),
-            },
-            Err(e) => crate::log(paths, &format!("backup retention: kept {name}, its manifest does not open with the current password ({})", e.code)),
+    for name in prune_candidates(counted, keep.saturating_sub(1)) {
+        match std::fs::remove_file(dir.join(&name)) {
+            Ok(()) => deleted.push(name),
+            Err(e) => crate::log(paths, &format!("backup retention: cannot delete {name}: {e}")),
         }
     }
     if !deleted.is_empty() {
@@ -476,7 +562,7 @@ pub fn parse_sizes(text: &str, ids: &[&str]) -> Result<Vec<AppSize>, String> {
 }
 
 /// Bytes free for this user on the volume holding `dir` (a drive or a network share).
-fn free_space(dir: &Path) -> Result<u64, String> {
+pub(crate) fn free_space(dir: &Path) -> Result<u64, String> {
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let wide: Vec<u16> = dir.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
     let mut avail = 0u64;
@@ -636,6 +722,7 @@ pub fn recover(paths: &Paths, apps: &dyn Apps) -> Option<String> {
 /// history and reported through `host` (`done` or `failed`).
 pub fn run(paths: &Paths, host: &dyn Host, apps: &dyn Apps, _guard: &Guard, log_n: u8) -> Result<PathBuf, Failed> {
     let t0 = Instant::now();
+    let _marker = RunMarker::new(paths, "backup");
     let created = now();
     let ctx = Ctx { host, total: Cell::new(0), last: Cell::new(None) };
     let mut partial = None;
@@ -752,7 +839,20 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
             }
             std::thread::sleep(Duration::from_secs(2));
         }
-        let _ = settings::write_atomic(&inflight_file(paths), serde_json::json!({ "app": id }).to_string().as_bytes());
+        // Removed since the sizes were taken (the panel or an MCP remove): left out with a note,
+        // the other apps are still backed up.
+        if !State::try_load(paths).map_err(|e| fail("app", e))?.apps.iter().any(|a| a.id == id) {
+            ctx.host.release(id, &Ok(()));
+            crate::log(paths, &format!("backup: {id} was removed during the backup; left out"));
+            w.skip(format!("apps/{id} (removed during the backup)"));
+            continue;
+        }
+        // Without the marker, a Konak that ended now would leave the app stopped: it is not stopped then.
+        if let Err(e) = settings::write_atomic(&inflight_file(paths), serde_json::json!({ "app": id }).to_string().as_bytes()) {
+            let e = format!("cannot record the backup in progress: {e}");
+            ctx.host.release(id, &Err(e.clone()));
+            return Err(app_fail(e));
+        }
         let result = with_stopped(apps, id, || archive_app(paths, ctx, &mut w, z, created));
         let _ = std::fs::remove_file(inflight_file(paths));
         ctx.host.release(id, &result);
@@ -817,7 +917,7 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
     ctx.step("finish", None, ctx.total.get());
     std::fs::rename(&partial, &final_path).map_err(|e| fail("finish", format!("cannot rename the finished backup: {e}")))?;
     *partial_out = None;
-    prune(paths, &dir, s.backup.keep as usize, &pw);
+    prune(paths, &dir, s.backup.keep as usize, &pw, &final_path);
     Ok(final_path)
 }
 
@@ -836,7 +936,7 @@ fn archive_app<W: Write>(paths: &Paths, ctx: &Ctx, w: &mut Writer<W>, z: &AppSiz
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::cell::RefCell;
     use time::macros::datetime;
@@ -954,6 +1054,16 @@ mod tests {
         assert!(parse_sizes("V nextcloud x Bad/Name 1\nend\n", &["nextcloud"]).is_err());
     }
 
+    /// The run guard, once another test (backup's or restore's) has let it go.
+    pub(crate) fn test_guard() -> Guard {
+        loop {
+            match Guard::acquire() {
+                Ok(g) => return g,
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("konak-backup-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -966,35 +1076,62 @@ mod tests {
         use crate::backup_format::tests::{manifest, pw, write_sample};
         let paths = crate::settings::tests::temp_paths("retention");
         let dir = temp_dir("retention");
-        let names = ["konak-20261120-030000.konakbackup", "konak-20261121-030000.konakbackup", "konak-20261122-030000.konakbackup", "konak-20261123-030000.konakbackup"];
-        for n in names {
-            write_sample(&dir.join(n), "the backup password", &manifest(1), b"x");
+        let (pw_now, t) = ("the backup password", now());
+        let day = 86_400;
+        // Real backups, made with the current password: (name, created).
+        let real = [
+            ("konak-20261120-030000.konakbackup", t - 4 * day),
+            ("konak-20261121-030000.konakbackup", t - 3 * day),
+            ("konak-20261122-030000.konakbackup", t - 2 * day),
+            ("konak-20261123-030000.konakbackup", t - day),
+        ];
+        for (n, created) in real {
+            write_sample(&dir.join(n), pw_now, &manifest(created), b"x");
         }
-        // Old, but made with another password: not deleted.
-        write_sample(&dir.join("konak-20261101-030000.konakbackup"), "an earlier password", &manifest(1), b"x");
+        // The one this run wrote, older by its manifest than the others (a clock that went back):
+        // still never deleted.
+        let written = dir.join("konak-20261124-030000.konakbackup");
+        write_sample(&written, pw_now, &manifest(t - 10 * day), b"x");
+        // Old, but made with another password: not deleted, not counted.
+        write_sample(&dir.join("konak-20261101-030000.konakbackup"), "an earlier password", &manifest(t - 30 * day), b"x");
+        // Planted: names far in the future with only the magic line, and one that opens but claims
+        // a future time. None of them takes a place or is deleted.
+        for i in 1..=7 {
+            std::fs::write(dir.join(format!("konak-9999010{i}-000000.konakbackup")), b"KONAK-BACKUP\n").unwrap();
+        }
+        write_sample(&dir.join("konak-20991231-000000.konakbackup"), pw_now, &manifest(t + 365 * day), b"x");
         // Konak's name without Konak's content, and other files: never touched.
         std::fs::write(dir.join("konak-20261102-030000.konakbackup"), b"not a backup").unwrap();
         std::fs::write(dir.join("holiday.jpg"), b"jpg").unwrap();
         std::fs::write(dir.join("konak-20261103-030000.konakbackup.old"), b"KONAK-BACKUP\n").unwrap();
-        let deleted = prune(&paths, &dir, 2, &pw("the backup password"));
-        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
-        left.sort();
+        let deleted = prune(&paths, &dir, 3, &pw(pw_now), &written);
+        let left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&paths.home);
+        // keep 3: the written one plus the two newest real ones.
         assert_eq!(deleted, ["konak-20261121-030000.konakbackup", "konak-20261120-030000.konakbackup"]);
-        assert_eq!(
-            left,
-            [
-                "holiday.jpg",
-                "konak-20261101-030000.konakbackup",
-                "konak-20261102-030000.konakbackup",
-                "konak-20261103-030000.konakbackup.old",
-                "konak-20261122-030000.konakbackup",
-                "konak-20261123-030000.konakbackup"
-            ]
-        );
-        assert_eq!(prune_candidates(vec!["konak-1".into(), "konak-3".into(), "konak-2".into()], 1), ["konak-2", "konak-1"]);
-        assert!(prune_candidates(vec!["a".into()], 5).is_empty());
+        assert!(left.contains(&"konak-20261124-030000.konakbackup".to_string()));
+        assert!(left.contains(&"konak-20261123-030000.konakbackup".to_string()) && left.contains(&"konak-20261122-030000.konakbackup".to_string()));
+        assert_eq!(left.len(), 17 - 2, "only the two oldest real ones are gone: {left:?}");
+        assert_eq!(prune_candidates(vec![("a".into(), 1), ("b".into(), 3), ("c".into(), 2)], 1), ["c", "a"]);
+        assert!(prune_candidates(vec![("a".into(), 1)], 5).is_empty());
+    }
+
+    #[test]
+    fn retention_with_keep_one_keeps_only_the_written_file() {
+        use crate::backup_format::tests::{manifest, pw, write_sample};
+        let paths = crate::settings::tests::temp_paths("retention-one");
+        let dir = temp_dir("retention-one");
+        let t = now();
+        write_sample(&dir.join("konak-20261120-030000.konakbackup"), "the backup password", &manifest(t - 100), b"x");
+        let written = dir.join("konak-20261121-030000.konakbackup");
+        write_sample(&written, "the backup password", &manifest(t), b"x");
+        let deleted = prune(&paths, &dir, 1, &pw("the backup password"), &written);
+        let written_left = written.is_file();
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(deleted, ["konak-20261120-030000.konakbackup"]);
+        assert!(written_left);
     }
 
     struct FakeHost {
@@ -1020,7 +1157,7 @@ mod tests {
         st.done = true;
         st.save(&paths);
         let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]) };
-        let guard = Guard::acquire().unwrap();
+        let guard = test_guard();
         assert_eq!(Guard::acquire().err().as_deref(), Some("backup_running"));
         let r = run(&paths, &host, &FakeApps::new(true), &guard, 10);
         drop(guard);
@@ -1149,7 +1286,7 @@ mod tests {
         // A partial left by an earlier run is cleared.
         std::fs::write(out.join("konak-20200101-000000.konakbackup.partial"), b"").unwrap();
         let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]) };
-        let guard = Guard::acquire().unwrap();
+        let guard = test_guard();
         let r = run(&paths, &host, &FakeApps::new(true), &guard, 10);
         drop(guard);
         let file = r.unwrap();
@@ -1166,7 +1303,8 @@ mod tests {
         assert!(m.apps.is_empty() && m.media_bytes.is_none());
         let paths_in: Vec<&str> = sums.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths_in, ["manifest.json", "konak/state.json", "konak/settings.json", "photos/b.png", "photos/2026/a.jpg"]);
-        assert_eq!(inspected, m);
+        assert_eq!(inspected.manifest, m);
+        assert_eq!((inspected.ca_fingerprint, inspected.ca_valid), (None, false));
         assert_eq!(wrong.unwrap_err(), "backup_wrong_password");
         assert_eq!(listed.len(), 1);
         assert_eq!((listed[0].status, listed[0].error.as_deref()), ("ok", None));

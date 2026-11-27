@@ -171,7 +171,9 @@ fn run_all(app: AppHandle, set_private: bool) {
         state.started_unix = installer::now();
         log(&paths, "install started");
     }
-    installer::register_autostart();
+    if let Err(e) = installer::register_autostart() {
+        log(&paths, &format!("autostart: {e}"));
+    }
 
     let pre = match installer::preflight(&paths) {
         Ok(p) => p,
@@ -869,7 +871,7 @@ async fn list_backups(app: AppHandle) -> Result<Vec<backup::BackupEntry>, String
 
 /// The manifest of a backup file; an empty `password` uses the stored one.
 #[tauri::command]
-async fn inspect_backup(app: AppHandle, path: String, password: String) -> Result<backup_format::Manifest, String> {
+async fn inspect_backup(app: AppHandle, path: String, password: String) -> Result<backup::Inspected, String> {
     blocking(app, move |p| backup::inspect(p, &path, &password)).await?
 }
 
@@ -913,11 +915,13 @@ impl restore::Host for RestoreHost {
 }
 
 /// Starts a restore; progress arrives as `restore-progress` events, the last one with a summary.
-/// An empty `password` uses the stored one.
+/// An empty `password` uses the stored one. `ca` (default false): also restore the backup's root
+/// CA, only on a Konak with no apps.
 #[tauri::command]
-fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<String>, replace: bool, photos: bool, media: bool) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<String>, replace: bool, photos: bool, media: bool, ca: Option<bool>) -> Result<(), String> {
     let paths = app.state::<Konak>().paths.clone();
-    let req = restore::Request { path, password, apps, replace, photos, media };
+    let req = restore::Request { path, password, apps, replace, photos, media, ca: ca.unwrap_or(false) };
     restore::precheck(&paths, &req)?;
     let guard = backup::Guard::acquire()?;
     log(&paths, &format!("restore of {} starting", req.path));
@@ -928,6 +932,8 @@ fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<Stri
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| restore::run(&k.paths, &host, &target, &guard, &req)));
         if r.is_err() {
             log(&k.paths, "restore: the run panicked");
+            // The app whose turn was cut short goes back to its previous data, as at the next start.
+            restore::recover(&k.paths, &target);
             let held = host.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             for id in held {
                 restore::Host::release(&host, &id, &Err("internal error".into()));
@@ -1022,7 +1028,9 @@ pub fn run() {
                 // An uninstall that kept the data removed the Run value; put it back (not in dev
                 // runs), unless the user turned "start with Windows" off in Settings.
                 if settings::load(&paths).autostart {
-                    installer::register_autostart();
+                    if let Err(e) = installer::register_autostart() {
+                        log(&paths, &format!("autostart: {e}"));
+                    }
                 }
                 let (paths, sup) = (paths.clone(), Arc::clone(&sup));
                 std::thread::spawn(move || {
@@ -1031,8 +1039,14 @@ pub fn run() {
                         Ok(s) if s == "nothing running" => {}
                         r => log(&paths, &format!("leftover processes: {r:?}")),
                     }
-                    // An app a backup stopped before Konak ended is started again.
+                    // An app a backup stopped before Konak ended is started again, and one a restore
+                    // left half done goes back to its previous data.
                     backup::recover(&paths, &backup::DistroApps(&paths));
+                    // Under the run guard, so a restore started meanwhile does not race it (that one
+                    // recovers the app itself first).
+                    if let Ok(_guard) = backup::Guard::acquire() {
+                        restore::recover(&paths, &restore::DistroTarget(&paths));
+                    }
                     sup.start();
                 });
             }

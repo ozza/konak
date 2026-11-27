@@ -134,11 +134,26 @@ fn absolute_windows_path(p: &str) -> bool {
     drive || unc
 }
 
-/// Checks a backup location: absolute, an existing folder, writable, and outside the folders a
-/// backup reads from or a purge deletes. Error codes as `validate`.
+/// A path into a WSL distro (`\\wsl$\...`, `\\wsl.localhost\...`), as written or once resolved
+/// (a mapped drive, a link or a junction that leads there).
+pub fn wsl_path(p: &str) -> bool {
+    let wsl = |s: &str| {
+        let l = s.replace('/', "\\").to_lowercase();
+        ["\\\\wsl$", "\\\\wsl.localhost"].iter().any(|h| l == *h || l.starts_with(&format!("{h}\\")))
+    };
+    wsl(p) || wsl(&norm(Path::new(p)))
+}
+
+/// Checks a backup location: absolute, not inside a WSL distro, an existing folder, writable, and
+/// outside the folders a backup reads from or a purge deletes. Error codes as `validate`.
 pub fn check_location(paths: &Paths, location: &str) -> Result<(), String> {
     if !absolute_windows_path(location) {
         return Err("settings_location_relative".into());
+    }
+    // Backups inside the distro they protect would be lost with it, and could sit in a folder an
+    // app's container mounts.
+    if wsl_path(location) {
+        return Err("settings_location_wsl".into());
     }
     let dir = Path::new(location);
     if !dir.is_dir() {
@@ -215,11 +230,20 @@ fn apply_autostart(on: bool) -> Result<(), String> {
         return Ok(());
     }
     if on {
-        crate::installer::register_autostart();
-        return Ok(());
+        return crate::installer::register_autostart().map_err(|_| "autostart_failed".to_string());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    crate::uninstall::remove_run_value(&exe).map(|_| ()).map_err(|_| "autostart_failed".to_string())
+    autostart_off_result(crate::uninstall::remove_run_value(&exe))
+}
+
+/// Turning autostart off succeeded only when no Run value starts Konak any more: one that points at
+/// another Konak exe stays, and says so (`autostart_other_value`).
+fn autostart_off_result(removed: Result<String, String>) -> Result<(), String> {
+    match removed {
+        Ok(s) if s.starts_with(crate::uninstall::KEPT_ELSEWHERE) => Err("autostart_other_value".into()),
+        Ok(_) => Ok(()),
+        Err(_) => Err("autostart_failed".into()),
+    }
 }
 
 /// Writes a temporary file, flushes it and renames it over `path`.
@@ -421,6 +445,9 @@ pub(crate) mod tests {
             (with(&|s| s.backup.include.apps = vec!["jellyfin".into(), "nosuch".into()]), Some("settings_unknown_app")),
             (with(&|s| s.backup.location = Some("backups".into())), Some("settings_location_relative")),
             (with(&|s| s.backup.location = Some(r"\\?\C:\x".into())), Some("settings_location_relative")),
+            (with(&|s| s.backup.location = Some(r"\\wsl.localhost\konak\var\lib\konak\apps\jellyfin\config".into())), Some("settings_location_wsl")),
+            (with(&|s| s.backup.location = Some(r"\\WSL$\konak\tmp".into())), Some("settings_location_wsl")),
+            (with(&|s| s.backup.location = Some("//wsl.localhost/konak/tmp".into())), Some("settings_location_relative")),
             (with(&|s| s.backup.location = Some(out.join("missing").to_string_lossy().into())), Some("settings_location_missing")),
             (with(&|s| s.backup.location = Some(paths.home.to_string_lossy().into())), Some("settings_location_in_konak")),
             (with(&|s| s.backup.location = Some(paths.photos.join("sub").to_string_lossy().into())), Some("settings_location_in_library")),
@@ -434,6 +461,9 @@ pub(crate) mod tests {
         }
         assert_eq!(leftovers, 0, "the write probe is removed");
         assert!(absolute_windows_path(r"\\nas\share\konak") && !absolute_windows_path(r"\\nas"));
+        assert!(wsl_path(r"\\wsl$\konak\x") && wsl_path("//wsl.localhost/konak/x") && wsl_path(r"\\wsl.localhost"));
+        // Local paths only here: resolving a UNC path would ask that host.
+        assert!(!wsl_path(r"C:\wsl.localhost\x") && !wsl_path(r"D:\wsl$\x"));
         assert_eq!(parse_time("23:59"), Some((23, 59)));
     }
 
@@ -451,6 +481,15 @@ pub(crate) mod tests {
         assert_eq!(saved.language, "en");
         assert!(text.contains("\"password_set\": false"));
         assert!(save(&paths, &Settings { language: "xx".into(), ..Settings::default() }).is_err());
+    }
+
+    #[test]
+    fn autostart_off_reports_a_value_that_stays() {
+        assert_eq!(autostart_off_result(Ok("removed".into())), Ok(()));
+        assert_eq!(autostart_off_result(Ok("no Run value".into())), Ok(()));
+        let other = format!("{}: Konak REG_SZ \"D:\\Other\\konak.exe\" --autostart", crate::uninstall::KEPT_ELSEWHERE);
+        assert_eq!(autostart_off_result(Ok(other)).unwrap_err(), "autostart_other_value");
+        assert_eq!(autostart_off_result(Err("access denied".into())).unwrap_err(), "autostart_failed");
     }
 
     #[test]
