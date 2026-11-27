@@ -121,6 +121,8 @@
   let addFocus = $state<string | null>(null);
 
   async function select(id: string) {
+    // Leaving the settings: a schedule turned off there clears the failed-schedule notice.
+    if (view === "settings" && id !== "settings") loadScheduled();
     view = id;
     // In the stacked (narrow) layout the detail sits below the sidebar: bring it into view.
     await tick();

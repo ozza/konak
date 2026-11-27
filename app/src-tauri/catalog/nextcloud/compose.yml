@@ -47,6 +47,9 @@ services:
       - nextcloud:/var/www/html:z
       # NOTE: The `volumes` config of the `cron` and `app` containers must match
     entrypoint: /cron.sh
+    # Konak: busybox crond runs as PID 1 and ignores SIGTERM, so every stop waited the full timeout
+    # (60 s) and then killed it. It keeps no state of its own; a killed job runs again next time.
+    stop_signal: SIGKILL
     depends_on:
       - db
       - redis

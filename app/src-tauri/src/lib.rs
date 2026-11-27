@@ -839,7 +839,7 @@ impl backup::Host for BackupHost {
 fn start_backup(app: AppHandle, why: &'static str) -> Result<(), String> {
     let paths = app.state::<Konak>().paths.clone();
     backup::precheck(&paths)?;
-    let guard = backup::Guard::acquire()?;
+    let guard = backup::Guard::acquire("backup")?;
     let scheduled = why == "scheduled";
     if scheduled {
         backup::consume_slot(&paths);
@@ -965,7 +965,7 @@ fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<Stri
     let paths = app.state::<Konak>().paths.clone();
     let req = restore::Request { path, password, apps, replace, photos, media, ca: ca.unwrap_or(false) };
     restore::precheck(&paths, &req)?;
-    let guard = backup::Guard::acquire()?;
+    let guard = backup::Guard::acquire("restore")?;
     log(&paths, &format!("restore of {} starting", req.path));
     std::thread::spawn(move || {
         let _awake = backup::KeepAwake::new();
@@ -1031,7 +1031,7 @@ fn start_services_and_recover(app: AppHandle, sup: Arc<Supervisor>) {
     let k = app.state::<Konak>();
     let paths = k.paths.clone();
     // Only with something to recover: otherwise Quit and "Back up now" would be refused meanwhile.
-    let guard = if has_unfinished_run(&paths) { backup::Guard::acquire().ok() } else { None };
+    let guard = if has_unfinished_run(&paths) { backup::Guard::acquire("recover").ok() } else { None };
     let held = if guard.is_some() { hold_busy(&k.busy, &recovery_apps(&paths)) } else { vec![] };
     std::thread::spawn(move || {
         let k = app.state::<Konak>();
@@ -1050,6 +1050,9 @@ fn start_services_and_recover(app: AppHandle, sup: Arc<Supervisor>) {
                     return;
                 }
                 let _awake = backup::KeepAwake::new();
+                // Seen by an uninstall or the installer's `--stop`, which wait for it instead of
+                // cutting a rollback in the middle.
+                let _marker = backup::RunMarker::new(&paths, "recover");
                 // An app a backup stopped before Konak ended is started again, and one a restore
                 // left half done goes back to its previous data.
                 backup::recover(&paths, &backup::DistroApps(&paths));

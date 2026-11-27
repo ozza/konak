@@ -313,8 +313,11 @@ pub fn untrust_if_trusted(paths: &Paths) -> Result<String, String> {
     if trusted_here(paths)? {
         return Err("the current root is still trusted on this PC (removal declined?)".into());
     }
-    Ok("the current root was removed from this PC's trusted roots".into())
+    Ok(UNTRUSTED.into())
 }
+
+/// `untrust_if_trusted`'s answer when it removed the root (the caller may have to trust it again).
+pub const UNTRUSTED: &str = "the current root was removed from this PC's trusted roots";
 
 #[cfg(test)]
 mod tests {

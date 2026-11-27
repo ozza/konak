@@ -33,7 +33,8 @@
   let dataClashes = $derived(chosen.filter((a) => leftData.includes(a) && !installedClashes.includes(a)));
   let clashes = $derived([...installedClashes, ...dataClashes]);
   let replace = $derived(!!replaceFor && replaceFor.length === clashes.length && clashes.every((a) => replaceFor!.includes(a)));
-  // After a run that failed before changing anything, the choices stay and it can be started again.
+  // After a failed run it can be started again: with the same choices when nothing changed, else
+  // with the failed apps only (see the restore-progress listener).
   let canStart = $derived(!progress || progress.state === "failed");
   let running = $derived(starting || progress?.state === "running");
   // The backup's certificate is put back only into a Konak with no apps yet (restore.rs `ca_action`).
@@ -55,6 +56,13 @@
     const off = listen<BackupProgress>("restore-progress", ({ payload }) => {
       progress = payload;
       starting = false;
+      // A run that restored some apps before it failed: a new start covers only the failed ones, so
+      // the restored apps are not replaced again and Photos and Media are not merged twice.
+      if (payload.state === "failed" && payload.summary?.restored.length) {
+        const failedIds = payload.summary.failed.map((f) => f.id);
+        chosen = chosen.filter((a) => failedIds.includes(a));
+        photos = media = ca = false;
+      }
       const left = payload.summary?.failed.filter((f) => f.error === "restore_app_data_left").map((f) => f.id) ?? [];
       if (left.length) leftData = [...new Set([...leftData, ...left])];
     });

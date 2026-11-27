@@ -280,6 +280,9 @@ pub trait Target {
     /// trusted roots when it is there (Windows asks to confirm), so no root Konak no longer has stays
     /// trusted. What it did, or why it could not.
     fn untrust_old_root(&self) -> Result<String, String>;
+    /// Trusts the current root on this PC again (after `untrust_old_root`, when the backup's could
+    /// not be installed).
+    fn trust_old_root(&self) -> Result<(), String>;
     /// Bytes free for this user on the Windows volume that holds `dir` (or would: the nearest
     /// folder that exists on the way).
     fn windows_free(&self, dir: &Path) -> Result<u64, String> {
@@ -385,6 +388,9 @@ impl Target for DistroTarget<'_> {
     }
     fn untrust_old_root(&self) -> Result<String, String> {
         crate::ca::untrust_if_trusted(self.0)
+    }
+    fn trust_old_root(&self) -> Result<(), String> {
+        crate::ca::trust_on_this_pc(self.0)
     }
 }
 
@@ -1104,18 +1110,31 @@ fn restore_ca(paths: &Paths, host: &dyn Host, target: &dyn Target, v: &Verified,
                 log(paths, &format!("restore: the backup's root CA is not a Konak root ({e}); not restored"));
                 summary.notes.push("restore_ca_invalid");
             }
-            Ok(root) => match target.untrust_old_root().and_then(|did| {
-                log(paths, &format!("restore: {did}"));
-                crate::ca::install_root(paths, &root)
-            }) {
-                Ok(()) => {
-                    log(paths, &format!("restore: root CA {} installed", root.fingerprint));
-                    summary.notes.push("restore_ca_restored");
-                    host.ca_changed();
-                }
+            Ok(root) => match target.untrust_old_root() {
                 Err(e) => {
                     log(paths, &format!("restore: the root CA was not restored: {e}"));
                     summary.notes.push("restore_ca_failed");
+                }
+                Ok(did) => {
+                    log(paths, &format!("restore: {did}"));
+                    match crate::ca::install_root(paths, &root) {
+                        Ok(()) => {
+                            log(paths, &format!("restore: root CA {} installed", root.fingerprint));
+                            summary.notes.push("restore_ca_restored");
+                            host.ca_changed();
+                        }
+                        Err(e) => {
+                            log(paths, &format!("restore: the root CA was not restored: {e}"));
+                            // The current root stays in use: trusted again if it was untrusted above.
+                            match (did == crate::ca::UNTRUSTED).then(|| target.trust_old_root()) {
+                                Some(Err(e)) => {
+                                    log(paths, &format!("restore: the current root could not be trusted again: {e}"));
+                                    summary.notes.push("restore_ca_untrusted");
+                                }
+                                _ => summary.notes.push("restore_ca_failed"),
+                            }
+                        }
+                    }
                 }
             },
         },
@@ -1715,7 +1734,11 @@ mod tests {
             if self.keep_old_root {
                 return Err("the current root is still trusted on this PC (removal declined?)".into());
             }
-            Ok("removed".into())
+            Ok(crate::ca::UNTRUSTED.into())
+        }
+        fn trust_old_root(&self) -> Result<(), String> {
+            self.call("trust old root".into());
+            Ok(())
         }
     }
 
@@ -2332,6 +2355,19 @@ mod tests {
         }
         assert_eq!(results[0], (vec!["restore_ca_restored", "restore_settings_kept"], true, vec!["untrust old root".to_string()]));
         assert_eq!(results[1], (vec!["restore_ca_failed", "restore_settings_kept"], false, vec!["untrust old root".to_string()]), "still trusted: not replaced");
+        // Untrusted, then the install fails (its temp file cannot be written): trusted again, kept.
+        let (paths, file) = setup("ca-install-fails", &[]);
+        std::fs::create_dir_all(paths.ca_dir().join("root.crt.tmp")).unwrap();
+        std::fs::write(paths.ca_cert(), &here.cert_pem).unwrap();
+        std::fs::write(paths.ca_key(), &here.key_pem).unwrap();
+        write_backup(&file, &[], Some((&old.cert_pem, &old.key_pem)), &[("p.jpg", b"p")]);
+        let target = FakeTarget::default();
+        let summary = restore(&paths, &FakeHost::default(), &target, &Request { ca: true, ..request(&file, &[], false, true) }).unwrap();
+        let crt = std::fs::read_to_string(paths.ca_cert()).unwrap();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(summary.notes, ["restore_ca_failed", "restore_settings_kept"]);
+        assert_eq!(*target.calls.borrow(), ["untrust old root", "trust old root"]);
+        assert_eq!(crt.trim(), here.cert_pem.trim());
     }
 
     #[test]

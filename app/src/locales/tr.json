@@ -596,6 +596,7 @@
         "restore_ca_restored": "Yedekteki Konak sertifikası geri geldi; ona güvenen cihazlar çalışmaya devam eder.",
         "restore_ca_kept": "Bu Konak'ın zaten kendi sertifikası vardı, o korundu. Eski sertifikaya güvenen cihazların bu bilgisayarın sertifikasını kurması gerekir.",
         "restore_ca_invalid": "Yedekteki sertifika geçerli değil, bu yüzden bu bilgisayarın sertifikası korundu.",
+        "restore_ca_untrusted": "Yedekteki Konak sertifikası geri yüklenmedi ve bu bilgisayar mevcut sertifikasına artık güvenmiyor: sertifika ayarlarındaki 'Bu bilgisayarda güven' düğmesini kullanın.",
         "restore_ca_failed": "Yedekteki Konak sertifikası geri yüklenmedi; bu bilgisayar mevcut sertifikasını korur.",
         "restore_settings_kept": "Bu bilgisayardaki ayarlarınız korundu; yedekteki ayarlar uygulanmadı.",
         "restore_volume_ignored": "Yedekte, uygulamanın bu sürümünün kullanmadığı veriler vardı; bunlar dışarıda bırakıldı.",

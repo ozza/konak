@@ -659,8 +659,8 @@ pub fn host_info(paths: &Paths, category: Option<String>) -> serde_json::Value {
             "lan_ip": net.as_ref().map_or_else(crate::services::lan_ip, |n| n.lan_ip.clone()),
             "adapter": adapter.map(|a| a.alias.clone()),
             "category": category,
-            // As the panel's firewall notice does: rules that cannot be read are not reported missing.
-            "firewall_ok": net.as_ref().is_none_or(|n| !crate::installer::rules_missing(&n.facts.firewall)),
+            // As the panel's firewall notice does: rules that cannot be read, or a dev run without elevation (never any rules), are not reported missing.
+            "firewall_ok": crate::paths::skip_elevation() || net.as_ref().is_none_or(|n| !crate::installer::rules_missing(&n.facts.firewall)),
             "konak_owns_port80": net.as_ref().is_some_and(|n| n.konak_owns_port80),
         },
     })

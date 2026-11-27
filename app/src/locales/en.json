@@ -596,6 +596,7 @@
         "restore_ca_restored": "Konak's certificate from the backup is back, so devices that trusted it keep working.",
         "restore_ca_kept": "This Konak already has its own certificate, so it was kept. Devices that trusted the old one need this PC's certificate.",
         "restore_ca_invalid": "The certificate in the backup is not valid, so this PC's certificate was kept.",
+        "restore_ca_untrusted": "Konak's certificate from the backup was not restored, and this PC no longer trusts its current one: use 'Trust on this PC' under the certificate settings.",
         "restore_ca_failed": "Konak's certificate from the backup was not restored; this PC keeps its current one.",
         "restore_settings_kept": "Your settings on this PC were kept; settings in the backup were not applied.",
         "restore_volume_ignored": "The backup had app data this version of the app does not use; it was left out.",

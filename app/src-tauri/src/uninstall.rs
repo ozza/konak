@@ -184,6 +184,12 @@ pub fn parse_stop(args: &[String]) -> Option<Option<PathBuf>> {
 pub fn run_stop(target: Option<PathBuf>) -> i32 {
     let exe = target.or_else(|| std::env::current_exe().ok()).unwrap_or_default();
     let paths = Paths::for_uninstall(exe.parent().unwrap_or(Path::new(".")).to_path_buf());
+    // An update must not cut a backup, restore or startup recovery in the middle: it waits, then
+    // refuses (`hooks.nsh` aborts the installer on REFUSED_EXIT before any file is written).
+    if let Err(e) = wait_for_backup(&paths, &exe, BACKUP_WAIT) {
+        println!("Konak stop: refused: {e}");
+        return REFUSED_EXIT;
+    }
     match stop_processes(&paths, &exe) {
         Ok(s) => {
             println!("Konak stop: {s}");

@@ -115,7 +115,7 @@
         <li class="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-b border-border-soft py-2.5 text-[13px] last:border-0">
           <span class="w-4 {h.status === 'ok' ? 'text-ok' : h.status === 'failed' ? 'text-error' : h.status === 'cancelled' ? 'text-muted' : 'text-warn'}" aria-hidden="true">{h.status === "ok" ? "●" : h.status === "failed" ? "✕" : h.status === "cancelled" ? "–" : "!"}</span>
           <span class="font-medium">{when(h.created_unix)}</span>
-          <span class="text-muted">{formatBytes(h.size_bytes)}</span>
+          {#if h.file}<span class="text-muted">{formatBytes(h.size_bytes)}</span>{/if}
           <span class="text-muted">{h.apps.map(appName).join(", ")}</span>
           <span class="sr-only">{t(`panel.backup.status_${h.status}`)}</span>
           {#if h.error}<span class="w-full pl-7 text-xs {h.status === 'cancelled' ? 'text-muted' : 'text-error'}">{message(h.error)}</span>{/if}

@@ -45,13 +45,19 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 pub struct Guard(());
 
 impl Guard {
-    pub fn acquire() -> Result<Guard, String> {
-        RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).map(|_| Guard(())).map_err(|_| "backup_running".to_string())
+    /// `op` is what `running_op` reports while the guard is held: `backup`, `restore` or `recover`.
+    pub fn acquire(op: &str) -> Result<Guard, String> {
+        RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| "backup_running".to_string())?;
+        // A cancel counts from here: one sent before the run's first step is not lost.
+        CANCEL.store(false, Ordering::SeqCst);
+        *CURRENT_OP.lock().unwrap_or_else(|e| e.into_inner()) = Some(op.to_string());
+        Ok(Guard(()))
     }
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
+        *CURRENT_OP.lock().unwrap_or_else(|e| e.into_inner()) = None;
         RUNNING.store(false, Ordering::SeqCst);
     }
 }
@@ -60,11 +66,11 @@ pub fn running() -> bool {
     RUNNING.load(Ordering::SeqCst)
 }
 
-/// The op of the run in progress (`RunMarker`), for the panel and the tray's Quit.
+/// The op of the run in progress (set with the guard), for the panel and the tray's Quit.
 static CURRENT_OP: Mutex<Option<String>> = Mutex::new(None);
 
 /// What holds the run guard: `backup`, `restore`, or `recover` (the startup recovery of an
-/// unfinished run, or the moment before a run's marker is written); `None` when nothing runs.
+/// unfinished run); `None` when nothing runs.
 pub fn running_op() -> Option<String> {
     if !running() {
         return None;
@@ -86,14 +92,12 @@ impl RunMarker {
         if let Err(e) = settings::write_atomic(&file, serde_json::json!({ "pid": std::process::id(), "op": op }).to_string().as_bytes()) {
             crate::log(paths, &format!("{op}: cannot write {}: {e}", file.display()));
         }
-        *CURRENT_OP.lock().unwrap_or_else(|e| e.into_inner()) = Some(op.to_string());
         RunMarker(file)
     }
 }
 
 impl Drop for RunMarker {
     fn drop(&mut self) {
-        *CURRENT_OP.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let _ = std::fs::remove_file(&self.0);
     }
 }
@@ -528,8 +532,18 @@ pub struct ScheduledRun {
     pub skipped: u64,
 }
 
+/// `None` once it no longer needs a notice: the schedule is off, or a newer run (manual too) wrote a file.
 pub fn last_scheduled(paths: &Paths) -> Option<ScheduledRun> {
-    load_history(paths).into_iter().find(|h| h.scheduled).map(|h| ScheduledRun { created_unix: h.created_unix, status: h.status, error: h.error, detail: h.detail, skipped: h.skipped })
+    if settings::load(paths).backup.schedule.kind == "off" {
+        return None;
+    }
+    let history = load_history(paths);
+    let i = history.iter().position(|h| h.scheduled)?;
+    if history[..i].iter().any(|h| has_file(&h.status)) {
+        return None;
+    }
+    let h = history.into_iter().nth(i)?;
+    Some(ScheduledRun { created_unix: h.created_unix, status: h.status, error: h.error, detail: h.detail, skipped: h.skipped })
 }
 
 fn same_file(a: &str, b: &str) -> bool {
@@ -977,7 +991,6 @@ pub fn recover(paths: &Paths, apps: &dyn Apps) -> Option<String> {
 /// and reported through `host` (`done`, `failed` or `cancelled`).
 pub fn run(paths: &Paths, host: &dyn Host, apps: &dyn Apps, _guard: &Guard, log_n: u8, scheduled: bool) -> Result<PathBuf, Failed> {
     let t0 = Instant::now();
-    CANCEL.store(false, Ordering::SeqCst);
     let _marker = RunMarker::new(paths, "backup");
     let created = now();
     let ctx = Ctx { host, total: Cell::new(0), last: Cell::new(None) };
@@ -1240,7 +1253,7 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
     file.sync_all().map_err(|e| fail("finish", write_error(e)))?;
     drop(file);
     if !sums.skipped.is_empty() {
-        crate::log(paths, &format!("backup: {} files left out or changed while read", sums.skipped.len()));
+        crate::log(paths, &format!("backup: {} entries (apps or files) left out or changed while read", sums.skipped.len()));
     }
 
     // The whole file read back (decrypted, every checksum) before it gets its final name.
@@ -1439,7 +1452,7 @@ pub(crate) mod tests {
     /// The run guard, once another test (backup's or restore's) has let it go.
     pub(crate) fn test_guard() -> Guard {
         loop {
-            match Guard::acquire() {
+            match Guard::acquire("backup") {
                 Ok(g) => return g,
                 Err(_) => std::thread::sleep(Duration::from_millis(20)),
             }
@@ -1545,6 +1558,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_failed_scheduled_run_needs_no_notice_after_a_newer_good_run_or_with_the_schedule_off() {
+        let paths = crate::settings::tests::temp_paths("last-scheduled");
+        let e = |status: &str, scheduled: bool| HistoryEntry { file: String::new(), created_unix: 1, size_bytes: 0, apps: vec![], status: status.into(), error: None, detail: None, step: None, skipped: 0, notes: vec![], scheduled };
+        record(&paths, e("failed", true));
+        let failed = last_scheduled(&paths).map(|r| r.status);
+        record(&paths, e("cancelled", false));
+        let after_cancel = last_scheduled(&paths).map(|r| r.status);
+        record(&paths, e("ok", false));
+        let after_manual = last_scheduled(&paths);
+        record(&paths, e("failed", true));
+        let mut s = settings::load(&paths);
+        s.backup.schedule.kind = "off".into();
+        settings::save(&paths, &s).unwrap();
+        let schedule_off = last_scheduled(&paths);
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(failed.as_deref(), Some("failed"));
+        assert_eq!(after_cancel.as_deref(), Some("failed"), "a run without a file does not clear it");
+        assert_eq!(after_manual, None, "a newer manual backup wrote a file");
+        assert_eq!(schedule_off, None);
+    }
+
+    #[test]
     fn a_run_without_a_location_fails_cleanly_and_is_recorded() {
         let paths = crate::settings::tests::temp_paths("run-noloc");
         let mut st = State::default();
@@ -1552,7 +1587,7 @@ pub(crate) mod tests {
         st.save(&paths);
         let host = FakeHost { events: RefCell::new(vec![]), busy: RefCell::new(vec![]), released: RefCell::new(vec![]) };
         let guard = test_guard();
-        assert_eq!(Guard::acquire().err().as_deref(), Some("backup_running"));
+        assert_eq!(Guard::acquire("backup").err().as_deref(), Some("backup_running"));
         let r = run(&paths, &host, &FakeApps::new(true), &guard, 10, true);
         drop(guard);
         let listed = list(&paths);
@@ -1631,7 +1666,7 @@ pub(crate) mod tests {
         let apps = DistroApps(&paths);
         let before: Vec<bool> = ["vaultwarden", "nextcloud"].iter().map(|id| apps.running(id).unwrap()).collect();
         let t1 = Instant::now();
-        let guard = Guard::acquire().unwrap();
+        let guard = Guard::acquire("backup").unwrap();
         let file = run(&paths, &Print, &apps, &guard, fmt::SCRYPT_LOG_N, false).unwrap();
         println!("backup took {:.1} s, {} bytes: {}", t1.elapsed().as_secs_f64(), std::fs::metadata(&file).unwrap().len(), file.display());
         let after: Vec<bool> = ["vaultwarden", "nextcloud"].iter().map(|id| apps.running(id).unwrap()).collect();
@@ -1879,9 +1914,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_op_is_known_from_the_moment_the_guard_is_taken() {
+        let g = test_guard();
+        let during = running_op();
+        drop(g);
+        assert_eq!(during.as_deref(), Some("backup"), "not `recover` before the run's marker is written");
+        assert_eq!(running_op(), None);
+    }
+
+    #[test]
     fn a_cancelled_run_restarts_the_app_and_leaves_no_file() {
         {
-            let _g = test_guard();
+            let _g = loop {
+                if let Ok(g) = Guard::acquire("recover") {
+                    break g;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
             assert_eq!(cancel().unwrap_err(), "backup_not_running", "nothing to cancel while no backup runs");
         }
         let (paths, out) = konak_with_apps("run-cancel", &["nextcloud"]);

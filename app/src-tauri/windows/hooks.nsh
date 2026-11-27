@@ -14,6 +14,18 @@
     ExecWait '"$PLUGINSDIR\konak-stop.exe" --stop "$INSTDIR\${MAINBINARYNAME}.exe"' $R7
     DetailPrint "Konak stop finished with exit code $R7"
     Delete "$PLUGINSDIR\konak-stop.exe"
+    ; 3 (uninstall::REFUSED_EXIT): a backup, restore or startup recovery still runs; nothing was
+    ; written yet, so the old install stays whole.
+    ${If} $R7 = 3
+      ${If} $LANGUAGE = 1055 ; Turkish
+        StrCpy $R8 "Konak şu anda bir yedekleme, geri yükleme ya da başlangıç kurtarması yapıyor. Hiçbir şey değiştirilmedi.$\n$\nİşlem bitince kurulumu yeniden başlatın."
+      ${Else}
+        StrCpy $R8 "Konak is running a backup, a restore or a startup recovery right now. Nothing was changed.$\n$\nStart the installation again once it is done."
+      ${EndIf}
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$R8" /SD IDOK
+      SetErrorLevel 3
+      Abort "$R8"
+    ${EndIf}
   ${EndIf}
 !macroend
 
