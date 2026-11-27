@@ -102,5 +102,6 @@ open an issue before starting on a larger change.
 
 ## License
 
-Konak is free software, licensed under the [GNU General Public License v3.0](LICENSE). The apps it
+Konak is free software, licensed under the [GNU General Public License](LICENSE), version 3 or (at your option) any later
+version. The apps it
 installs, and the tools it bundles such as Caddy, keep their own licenses.
