@@ -1311,17 +1311,7 @@ mod tests {
     /// list then.
     #[test]
     fn every_backend_code_has_a_text() {
-        const PENDING: &[&str] = &[
-            // Audit 2026-11-27 (05 M1 / 07 T7): known missing before this round.
-            "autostart_other_value",
-            "backup_path_refused",
-            "restore_no_space",
-            "restore_volume_ignored",
-            "settings_location_wsl",
-            // New in this round (stream B).
-            "backup_cancelled",
-            "backup_not_running",
-        ];
+        const PENDING: &[&str] = &[];
         let sources = [
             include_str!("backup.rs"),
             include_str!("backup_format.rs"),

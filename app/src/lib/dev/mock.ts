@@ -196,6 +196,14 @@ export function installMock() {
           return null;
         case "list_backups":
           return backups;
+        case "backup_status":
+          return { running: null };
+        case "cancel_backup":
+          throw "backup_not_running";
+        case "last_scheduled_backup":
+          return new URLSearchParams(location.search).has("backupfail")
+            ? { created_unix: 1795575600, status: "failed", error: "backup_no_space", detail: null, skipped: 0 }
+            : null;
         case "backup_now":
           progress("backup-progress", [["prepare", null], ["app", "jellyfin"], ["app", "nextcloud"], ["photos", null], ["verify", null]]);
           setTimeout(() => (backups = [{ ...backups[0], file: "konak-new.konakbackup", created_unix: Date.now() / 1000 }, ...backups]), 3100);

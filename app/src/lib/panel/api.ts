@@ -61,9 +61,22 @@ export type BackupEntry = {
   created_unix: number;
   size_bytes: number;
   apps: string[];
-  status: "ok" | "failed" | "unverified";
+  status: "ok" | "partial" | "failed" | "cancelled" | "unverified";
   error: string | null;
+  /** How many items were left out, and the first notes on them (as the backend wrote them). */
+  skipped?: number;
+  notes?: string[];
 };
+/** The newest run the schedule started (`last_scheduled_backup`). */
+export type ScheduledRun = {
+  created_unix: number;
+  status: "ok" | "partial" | "failed" | "cancelled";
+  error: string | null;
+  detail: string | null;
+  skipped: number;
+};
+/** What runs now (`backup_status`): "recover" is the startup recovery of an interrupted run. */
+export type BackupStatus = { running: "backup" | "restore" | "recover" | null };
 export type BackupManifest = {
   format: number;
   konak_version: string;
@@ -79,7 +92,7 @@ export type BackupManifest = {
 };
 export type FolderResult = { written: number; identical: number; kept_both: number; failed: number; error: string | null };
 export type BackupProgress = {
-  state: "running" | "done" | "failed";
+  state: "running" | "done" | "failed" | "cancelled";
   step: string;
   app: string | null;
   done_bytes: number | null;
@@ -87,6 +100,9 @@ export type BackupProgress = {
   /** A locale code (`errors.<code>`); the technical text is in `detail`. */
   error: string | null;
   detail?: string | null;
+  /** Backup, on the final `done` event: items left out and notes on them. */
+  skipped?: number | null;
+  notes?: string[] | null;
   /** Restore only, on the final event. */
   summary?: {
     restored: { id: string; name: string; renamed_from: string | null }[];

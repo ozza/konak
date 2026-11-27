@@ -93,7 +93,7 @@
     "restore_nothing_chosen": "Choose at least one thing to restore.",
     "restore_app_exists": "This app is already installed. Tick 'Replace' to restore it over the current one.",
     "restore_app_not_in_backup": "This app is not in the backup.",
-    "restore_aside_exists": "An earlier restore of this app did not finish cleanly. Its previous data is still kept aside; remove it before restoring again.",
+    "restore_aside_exists": "An earlier restore of this app did not finish and could not be undone automatically. Restart Konak. If this message stays, the log at %LOCALAPPDATA%\\Konak\\logs\\install.log says why.",
     "restore_no_free_name": "No free name was found for this app on your network.",
     "restore_path_refused": "The backup contains a file path Konak will not write.",
     "restore_file_changed": "The backup file changed while it was being restored.",
@@ -105,11 +105,17 @@
     "restore_no_space": "There is not enough free disk space for this restore. Free up space or restore fewer items.",
     "backup_path_refused": "Konak cannot use a file inside its Linux system. Choose a file on a Windows disk or share.",
     "settings_location_wsl": "Konak cannot keep backups inside its Linux system. Choose a folder on a Windows disk or share.",
-    "autostart_other_value": "Another copy of Konak on this PC is still set to start with Windows. Konak left that setting as it is."
+    "autostart_other_value": "Another copy of Konak on this PC is still set to start with Windows. Konak left that setting as it is.",
+    "backup_cancelled": "The backup was cancelled. No file was kept.",
+    "backup_not_running": "No backup is running.",
+    "restore_app_data_left": "Data from an earlier copy of this app is still on this PC. Tick 'Replace' to restore over it; replacing deletes that data.",
+    "restore_app_newer": "This backup was made with a newer version of the app than this Konak has. Update Konak, then restore it."
   },
   "tray": {
     "open": "Open Konak",
-    "quit": "Quit Konak"
+    "quit": "Quit Konak",
+    "quit_refused_backup": "A backup is running. Quitting now would leave an app stopped. Wait until it is done, or cancel it on the Settings page, then quit Konak.",
+    "quit_refused_restore": "A restore is running. Quitting now would cut it in the middle. Wait until it is done, then quit Konak."
   },
   "home": {
     "apps": "Apps",
@@ -555,7 +561,15 @@
         "restore_photos": "Restoring the Photos folder",
         "restore_media": "Restoring the Media folder",
         "restore_done": "Done"
-      }
+      },
+      "cancel": "Cancel backup",
+      "cancelled": "Backup cancelled. No file was kept.",
+      "done_partial": "Backup finished, but {n} items were left out.",
+      "status_partial": "Made, with items left out",
+      "status_cancelled": "Cancelled",
+      "left_out": "Left out:",
+      "busy_restore": "A restore is running.",
+      "busy_recover": "Konak is finishing an interrupted backup or restore."
     },
     "restore": {
       "title": "Restore from a backup",
@@ -582,9 +596,11 @@
         "restore_ca_restored": "Konak's certificate from the backup is back, so devices that trusted it keep working.",
         "restore_ca_kept": "This Konak already has its own certificate, so it was kept. Devices that trusted the old one need this PC's certificate.",
         "restore_ca_invalid": "The certificate in the backup is not valid, so this PC's certificate was kept.",
-        "restore_ca_failed": "The certificate from the backup could not be restored; this PC's certificate was kept.",
+        "restore_ca_failed": "Konak's certificate from the backup was not restored; this PC keeps its current one.",
         "restore_settings_kept": "Your settings on this PC were kept; settings in the backup were not applied.",
-        "restore_volume_ignored": "The backup had app data this version of the app does not use; it was left out."
+        "restore_volume_ignored": "The backup had app data this version of the app does not use; it was left out.",
+        "restore_app_older": "An app was restored from a backup made with an older database version. If it does not start, restore it with the Konak version that made the backup.",
+        "restore_volume_missing": "The backup has no data for a part this app version added; that part starts empty."
       },
       "log_saved": "The app's log was saved to:",
       "immich_needs_photos": "Immich keeps its photos in the Photos folder. Restore the Photos folder too, unless your photos are already there; otherwise Immich will not start.",
@@ -594,7 +610,14 @@
       "ca": "Also restore Konak's certificate",
       "ca_hint": "Phones and browsers that trusted it keep working without installing a new one.",
       "ca_not_empty": "Only possible while no app is installed here. This PC keeps its own certificate; devices need to trust it once.",
-      "ca_fingerprint": "Fingerprint (SHA-256): {fp}"
+      "ca_fingerprint": "Fingerprint (SHA-256): {fp}",
+      "replace_data_left": "Data an earlier removal kept is still here for: {apps}. Replace it with the backup; that data is deleted once the restore succeeds and cannot be brought back.",
+      "ca_windows": "If this PC trusts its current Konak certificate, Windows asks you to confirm removing it first.",
+      "running_elsewhere": "A restore is running. Its progress is in the restore window."
+    },
+    "notice": {
+      "backup_failed": "The last scheduled backup failed: {reason}",
+      "backup_open": "Backup settings"
     }
   },
   "apps": {

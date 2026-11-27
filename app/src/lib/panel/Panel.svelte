@@ -3,7 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount, tick } from "svelte";
   import { t } from "$lib/i18n";
-  import { appName, errorText, portSuffix, type AppInfo, type AppProgress, type AppStats, type Check, type Failure, type HostInfo, type Manifest, type Op, type WebPorts } from "./api";
+  import { appName, errorText, portSuffix, type AppInfo, type AppProgress, type AppStats, type Check, type Failure, type HostInfo, type Manifest, type Op, type ScheduledRun, type WebPorts } from "./api";
   import AddApp from "./AddApp.svelte";
   import AppDetail from "./AppDetail.svelte";
   import Header from "./Header.svelte";
@@ -65,6 +65,9 @@
       return null;
     }
   }
+  /** The newest run the schedule started, for the failed-backup notice. */
+  let lastScheduled = $state<ScheduledRun | null>(null);
+  const loadScheduled = () => invoke<ScheduledRun | null>("last_scheduled_backup").then((r) => (lastScheduled = r)).catch(() => {});
   let logsFor = $state<AppInfo | null>(null);
   let removeFor = $state<AppInfo | null>(null);
 
@@ -134,6 +137,7 @@
     const diagRefresh = setInterval(() => visible() && checks !== null && !diagnosing && diagnose(), DIAG_REFRESH_MS);
     // Network category and firewall rules can change while Konak is not running; both reads are cheap.
     invoke("refresh_network");
+    loadScheduled();
     // Poll only while the window is visible; the tray keeps Konak running when it is hidden.
     const visible = () => document.visibilityState === "visible";
     const timer = setInterval(() => visible() && refresh(), POLL_MS);
@@ -154,7 +158,9 @@
       addFocus = p.op === "install" ? p.app : null;
       select(p.op === "install" ? "add" : p.app);
     });
+    const unlistenBackup = listen<{ state: string }>("backup-progress", ({ payload }) => payload.state !== "running" && loadScheduled());
     return () => {
+      unlistenBackup.then((f) => f());
       clearTimeout(diagTimer);
       clearInterval(diagRefresh);
       clearInterval(timer);
@@ -184,7 +190,7 @@
     <Sidebar {apps} selected={shown ?? ""} {host} {checks} {busy} onselect={select} />
 
     <main bind:this={mainEl} class="flex min-w-0 flex-[999_1_480px] flex-col gap-5 px-4 pt-6 pb-8 sm:px-7">
-      <Notices {networkCategory} {firewallMissing} {repairing} {repairError} {webPorts} />
+      <Notices {networkCategory} {firewallMissing} {repairing} {repairError} {webPorts} backupFailure={lastScheduled?.status === "failed" && shown !== "settings" ? lastScheduled : null} onbackup={() => select("settings")} />
 
       {#if shown === "add"}
         <AddApp

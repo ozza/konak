@@ -2393,7 +2393,7 @@ mod tests {
     #[test]
     fn a_missing_chunk_fails_the_app() {
         let (paths, file) = setup("chunk", &[]);
-        let m = Manifest { format: fmt::FORMAT, konak_version: "0.1.0".into(), created_unix: 1, apps: vec![app("forgejo", "git-c", false, &[])], photos_bytes: None, media_bytes: None, konak_files: vec![] };
+        let m = Manifest { format: fmt::FORMAT, konak_version: "0.1.0".into(), install_id: None, created_unix: 1, apps: vec![app("forgejo", "git-c", false, &[])], photos_bytes: None, media_bytes: None, konak_files: vec![] };
         let f = io::BufWriter::new(std::fs::File::create(&file).unwrap());
         let mut w = fmt::Writer::new(f, &pw("the backup password"), &m, TEST_LOG_N).unwrap();
         w.add_bytes("apps/forgejo/folder/000000", b"first", 0o600, 1).unwrap();

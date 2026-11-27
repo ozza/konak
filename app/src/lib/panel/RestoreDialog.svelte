@@ -133,6 +133,7 @@
           <span class="flex min-w-0 flex-col gap-0.5">
             {t("panel.restore.ca")}
             <span id="{id}-ca-hint" class="text-xs text-muted">{caAllowed ? t("panel.restore.ca_hint") : t("panel.restore.ca_not_empty")}</span>
+            {#if caAllowed}<span class="text-xs text-muted">{t("panel.restore.ca_windows")}</span>{/if}
             <span class="font-mono text-[11px] break-all text-muted">{t("panel.restore.ca_fingerprint", { fp: manifest.ca_fingerprint ?? "" })}</span>
           </span>
         </label>

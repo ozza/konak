@@ -93,7 +93,7 @@
     "restore_nothing_chosen": "Geri yüklenecek en az bir şey seçin.",
     "restore_app_exists": "Bu uygulama zaten kurulu. Mevcut olanın üzerine geri yüklemek için 'Değiştir'i işaretleyin.",
     "restore_app_not_in_backup": "Bu uygulama yedekte yok.",
-    "restore_aside_exists": "Bu uygulamanın önceki bir geri yüklemesi düzgün bitmedi. Eski verileri hâlâ kenarda duruyor; yeniden geri yüklemeden önce onları kaldırın.",
+    "restore_aside_exists": "Bu uygulamanın önceki bir geri yüklemesi bitmedi ve kendiliğinden geri alınamadı. Konak'ı yeniden başlatın. Bu ileti kalırsa nedenini %LOCALAPPDATA%\\Konak\\logs\\install.log günlüğü söyler.",
     "restore_no_free_name": "Bu uygulama için ağınızda boş bir ad bulunamadı.",
     "restore_path_refused": "Yedekte Konak'ın yazmayacağı bir dosya yolu var.",
     "restore_file_changed": "Yedek dosyası geri yükleme sırasında değişti.",
@@ -105,11 +105,17 @@
     "restore_no_space": "Bu geri yükleme için yeterli boş disk alanı yok. Yer açın ya da daha az öğe geri yükleyin.",
     "backup_path_refused": "Konak, Linux sisteminin içindeki bir dosyayı kullanamaz. Windows diskinde ya da paylaşımında bir dosya seçin.",
     "settings_location_wsl": "Konak yedekleri Linux sisteminin içinde tutamaz. Windows diskinde ya da paylaşımında bir klasör seçin.",
-    "autostart_other_value": "Bu bilgisayardaki başka bir Konak kopyası hâlâ Windows ile başlayacak şekilde ayarlı. Konak o ayarı olduğu gibi bıraktı."
+    "autostart_other_value": "Bu bilgisayardaki başka bir Konak kopyası hâlâ Windows ile başlayacak şekilde ayarlı. Konak o ayarı olduğu gibi bıraktı.",
+    "backup_cancelled": "Yedekleme iptal edildi. Dosya tutulmadı.",
+    "backup_not_running": "Çalışan bir yedekleme yok.",
+    "restore_app_data_left": "Bu uygulamanın önceki bir kopyasının verileri hâlâ bu bilgisayarda. Üzerine geri yüklemek için 'Değiştir'i işaretleyin; değiştirmek o verileri siler.",
+    "restore_app_newer": "Bu yedek, uygulamanın bu Konak'takinden daha yeni bir sürümüyle alınmış. Konak'ı güncelleyin, sonra geri yükleyin."
   },
   "tray": {
     "open": "Konak'ı aç",
-    "quit": "Konak'tan çık"
+    "quit": "Konak'tan çık",
+    "quit_refused_backup": "Bir yedekleme çalışıyor. Şimdi çıkmak bir uygulamayı durmuş bırakır. Bitmesini bekleyin ya da Ayarlar sayfasında iptal edin, sonra Konak'tan çıkın.",
+    "quit_refused_restore": "Bir geri yükleme çalışıyor. Şimdi çıkmak onu yarıda keser. Bitmesini bekleyin, sonra Konak'tan çıkın."
   },
   "home": {
     "apps": "Uygulamalar",
@@ -555,7 +561,15 @@
         "restore_photos": "Fotoğraflar klasörü geri yükleniyor",
         "restore_media": "Medya klasörü geri yükleniyor",
         "restore_done": "Tamamlandı"
-      }
+      },
+      "cancel": "Yedeklemeyi iptal et",
+      "cancelled": "Yedekleme iptal edildi. Dosya tutulmadı.",
+      "done_partial": "Yedekleme bitti, ancak {n} öğe dışarıda kaldı.",
+      "status_partial": "Alındı, bazı öğeler dışarıda kaldı",
+      "status_cancelled": "İptal edildi",
+      "left_out": "Dışarıda kalanlar:",
+      "busy_restore": "Bir geri yükleme çalışıyor.",
+      "busy_recover": "Konak yarım kalan bir yedeklemeyi ya da geri yüklemeyi tamamlıyor."
     },
     "restore": {
       "title": "Yedekten geri yükle",
@@ -582,9 +596,11 @@
         "restore_ca_restored": "Yedekteki Konak sertifikası geri geldi; ona güvenen cihazlar çalışmaya devam eder.",
         "restore_ca_kept": "Bu Konak'ın zaten kendi sertifikası vardı, o korundu. Eski sertifikaya güvenen cihazların bu bilgisayarın sertifikasını kurması gerekir.",
         "restore_ca_invalid": "Yedekteki sertifika geçerli değil, bu yüzden bu bilgisayarın sertifikası korundu.",
-        "restore_ca_failed": "Yedekteki sertifika geri yüklenemedi; bu bilgisayarın sertifikası korundu.",
+        "restore_ca_failed": "Yedekteki Konak sertifikası geri yüklenmedi; bu bilgisayar mevcut sertifikasını korur.",
         "restore_settings_kept": "Bu bilgisayardaki ayarlarınız korundu; yedekteki ayarlar uygulanmadı.",
-        "restore_volume_ignored": "Yedekte, uygulamanın bu sürümünün kullanmadığı veriler vardı; bunlar dışarıda bırakıldı."
+        "restore_volume_ignored": "Yedekte, uygulamanın bu sürümünün kullanmadığı veriler vardı; bunlar dışarıda bırakıldı.",
+        "restore_app_older": "Bir uygulama, daha eski bir veritabanı sürümüyle alınmış bir yedekten geri yüklendi. Başlamazsa, yedeği alan Konak sürümüyle geri yükleyin.",
+        "restore_volume_missing": "Yedekte, uygulamanın bu sürümünün eklediği bir bölümün verisi yok; o bölüm boş başlar."
       },
       "log_saved": "Uygulamanın kaydı şuraya kaydedildi:",
       "immich_needs_photos": "Immich fotoğraflarını Fotoğraflar klasöründe tutar. Fotoğraflarınız zaten orada değilse Fotoğraflar klasörünü de geri yükleyin; yoksa Immich başlamaz.",
@@ -594,7 +610,14 @@
       "ca": "Konak'ın sertifikasını da geri yükle",
       "ca_hint": "Ona güvenen telefonlar ve tarayıcılar yeni bir sertifika kurmadan çalışmaya devam eder.",
       "ca_not_empty": "Yalnızca burada hiç uygulama kurulu değilken yapılabilir. Bu bilgisayar kendi sertifikasını korur; cihazların ona bir kez güvenmesi gerekir.",
-      "ca_fingerprint": "Parmak izi (SHA-256): {fp}"
+      "ca_fingerprint": "Parmak izi (SHA-256): {fp}",
+      "replace_data_left": "Önceki bir kaldırmada saklanan veriler hâlâ burada: {apps}. Onları yedektekilerle değiştir; bu veriler geri yükleme başarılı olunca silinir ve geri getirilemez.",
+      "ca_windows": "Bu bilgisayar mevcut Konak sertifikasına güveniyorsa, Windows önce onu kaldırmayı onaylamanızı ister.",
+      "running_elsewhere": "Bir geri yükleme çalışıyor. İlerlemesi geri yükleme penceresinde."
+    },
+    "notice": {
+      "backup_failed": "Son zamanlanmış yedekleme başarısız oldu: {reason}",
+      "backup_open": "Yedekleme ayarları"
     }
   },
   "apps": {
