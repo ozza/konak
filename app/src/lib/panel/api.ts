@@ -20,7 +20,7 @@ export type AppInfo = {
 };
 export type Manifest = { id: string; default_name: string; port: number; https: boolean; min_ram_mb: number };
 export type CaInfo = { path: string; fingerprint: string };
-export type Op = "install" | "remove" | "rename" | "restart" | "claim" | "stop" | "start";
+export type Op = "install" | "remove" | "rename" | "restart" | "claim" | "stop" | "start" | "backup" | "restore";
 export type AppStats = { id: string; cpu_percent: number; mem_bytes: number };
 type Usage = { used_bytes: number; total_bytes: number };
 export type HostInfo = {
@@ -39,6 +39,80 @@ export type AppProgress = { id: string; op: Op; state: "running" | "done" | "fai
 /** A backend error: `message` when it is a known error code, otherwise `details` holds technical text. */
 export type ErrorText = { message: string | null; details: string | null };
 export type Failure = ErrorText & { op: Op };
+
+// Settings and backups: the contract in .audit/plan-backup-settings.md.
+export type Language = "system" | "tr" | "en";
+export type Schedule = { kind: "off" | "daily" | "weekly"; time: string; weekday: number };
+export type Settings = {
+  language: Language;
+  autostart: boolean;
+  backup: {
+    location: string | null;
+    schedule: Schedule;
+    keep: number;
+    /** `apps` empty = every installed app. */
+    include: { apps: string[]; photos: boolean; media: boolean };
+    /** Read-only: whether a backup password is stored. */
+    password_set: boolean;
+  };
+};
+export type BackupEntry = {
+  file: string;
+  created_unix: number;
+  size_bytes: number;
+  apps: string[];
+  status: "ok" | "partial" | "failed" | "cancelled" | "unverified";
+  error: string | null;
+  /** How many items were left out, and the first notes on them (as the backend wrote them). */
+  skipped?: number;
+  notes?: string[];
+};
+/** The newest run the schedule started (`last_scheduled_backup`). */
+export type ScheduledRun = {
+  created_unix: number;
+  status: "ok" | "partial" | "failed" | "cancelled";
+  error: string | null;
+  detail: string | null;
+  skipped: number;
+};
+/** What runs now (`backup_status`): "recover" is the startup recovery of an interrupted run. */
+export type BackupStatus = { running: "backup" | "restore" | "recover" | null };
+export type BackupManifest = {
+  format: number;
+  konak_version: string;
+  created_unix: number;
+  apps: { id: string; name: string; claimed: boolean; stopped: boolean; size_bytes: number }[];
+  photos_bytes: number | null;
+  media_bytes: number | null;
+  /** Konak files in the backup, e.g. "ca/root.crt". */
+  konak_files: string[];
+  /** SHA-256 of the backup root certificate, when it has one; `ca_valid`: it passes the restore check. */
+  ca_fingerprint: string | null;
+  ca_valid: boolean;
+};
+export type FolderResult = { written: number; identical: number; kept_both: number; failed: number; error: string | null };
+export type BackupProgress = {
+  state: "running" | "done" | "failed" | "cancelled";
+  step: string;
+  app: string | null;
+  done_bytes: number | null;
+  total_bytes: number | null;
+  /** A locale code (`errors.<code>`); the technical text is in `detail`. */
+  error: string | null;
+  detail?: string | null;
+  /** Backup, on the final `done` event: items left out and notes on them. */
+  skipped?: number | null;
+  notes?: string[] | null;
+  /** Restore only, on the final event. */
+  summary?: {
+    restored: { id: string; name: string; renamed_from: string | null }[];
+    /** `log`: a saved, redacted container log of the failed app. */
+    failed: { id: string; error: string; detail: string | null; log: string | null }[];
+    photos: FolderResult | null;
+    media: FolderResult | null;
+    notes: string[];
+  };
+};
 
 /** Ports Caddy serves on. `http` is not 80 while another program holds port 80 (`port80_owner`). */
 export type WebPorts = { http: number; https: number; port80_owner: string | null };
@@ -83,6 +157,7 @@ export const tileColor = (id: string) => TILE[id] ?? "#475569";
 
 /** 1536 MiB -> "1.5 GB", 300 MiB -> "300 MB" (binary units, shown with the usual short names). */
 export function formatBytes(bytes: number): string {
+  if (bytes < 1_048_576) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   const mb = bytes / 1_048_576;
   if (mb < 1024) return `${Math.round(mb)} MB`;
   const gb = mb / 1024;

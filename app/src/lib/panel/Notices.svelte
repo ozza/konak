@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { t } from "$lib/i18n";
-  import { errorText, type WebPorts } from "./api";
+  import { errorText, type ScheduledRun, type WebPorts } from "./api";
   import Icon from "./Icon.svelte";
 
   let {
@@ -10,8 +10,18 @@
     repairing,
     repairError,
     webPorts,
-  }: { networkCategory: string | null; firewallMissing: boolean; repairing: boolean; repairError: string | null; webPorts: WebPorts | null } =
-    $props();
+    backupFailure,
+    onbackup,
+  }: {
+    networkCategory: string | null;
+    firewallMissing: boolean;
+    repairing: boolean;
+    repairError: string | null;
+    webPorts: WebPorts | null;
+    backupFailure: ScheduledRun | null;
+    onbackup: () => void;
+  } = $props();
+  let backupReason = $derived(backupFailure ? (errorText(backupFailure.error ?? "").message ?? backupFailure.detail ?? backupFailure.error ?? "") : "");
   let repairFailure = $derived(repairError ? errorText(repairError) : null);
 </script>
 
@@ -60,4 +70,12 @@
   <p class="flex items-start gap-3 rounded-xl border border-warn-border bg-warn-bg px-[18px] py-3.5 text-[13px] text-warn-text" role="status">
     <span class="mt-0.5 text-warn-title"><Icon name="warn" /></span>{t("panel.network.public")}
   </p>
+{/if}
+
+{#if backupFailure}
+  <section class="flex flex-wrap items-start gap-4 rounded-xl border border-warn-border bg-warn-bg px-[18px] py-4" aria-labelledby="backup-failed-title">
+    <span class="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-warn-icon text-warn-title"><Icon name="warn" size={18} /></span>
+    <p id="backup-failed-title" class="min-w-0 flex-[1_1_320px] text-[13px] text-warn-text">{t("panel.notice.backup_failed", { reason: backupReason })}</p>
+    <button type="button" class="btn" onclick={onbackup}>{t("panel.notice.backup_open")}</button>
+  </section>
 {/if}

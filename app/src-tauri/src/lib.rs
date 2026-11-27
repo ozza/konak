@@ -1,4 +1,6 @@
 pub mod apps;
+pub mod backup;
+pub mod backup_format;
 pub mod ca;
 pub mod catalog;
 pub mod confirm;
@@ -8,7 +10,9 @@ pub mod mcp;
 pub mod paths;
 pub mod pipe;
 pub mod redact;
+pub mod restore;
 pub mod services;
+pub mod settings;
 pub mod shell;
 pub mod uninstall;
 
@@ -167,7 +171,9 @@ fn run_all(app: AppHandle, set_private: bool) {
         state.started_unix = installer::now();
         log(&paths, "install started");
     }
-    installer::register_autostart();
+    if let Err(e) = installer::register_autostart() {
+        log(&paths, &format!("autostart: {e}"));
+    }
 
     let pre = match installer::preflight(&paths) {
         Ok(p) => p,
@@ -777,6 +783,290 @@ async fn trust_ca_on_this_pc(app: AppHandle) -> Result<(), String> {
     blocking(app, |p| ca::ensure(p).and_then(|_| ca::trust_on_this_pc(p))).await?
 }
 
+// ---- Settings and backup -----------------------------------------------------------------------
+
+#[tauri::command]
+async fn get_settings(app: AppHandle) -> Result<settings::Settings, String> {
+    blocking(app, settings::load).await
+}
+
+/// Validated; errors are `errors.*` locale keys (`settings_time`, ...).
+#[tauri::command]
+async fn save_settings(app: AppHandle, settings: settings::Settings) -> Result<settings::Settings, String> {
+    blocking(app, move |p| settings::save(p, &settings)).await?
+}
+
+/// `current` is required once a password is set. The password is never logged or returned.
+#[tauri::command]
+async fn set_backup_password(app: AppHandle, current: Option<String>, new: String) -> Result<(), String> {
+    blocking(app, move |p| {
+        let r = settings::set_password(p, current.as_deref(), &new);
+        log(p, &format!("backup password {}", if r.is_ok() { "set" } else { "not changed" }));
+        r
+    })
+    .await?
+}
+
+/// `backup::Host` for the running Konak: `backup-progress` events, and the panel's busy set (op
+/// `backup`, reported through `app-progress` like any app operation).
+struct BackupHost(AppHandle);
+
+impl backup::Host for BackupHost {
+    fn progress(&self, p: &backup::Progress) {
+        let _ = self.0.emit("backup-progress", p);
+    }
+    fn try_busy(&self, id: &str) -> bool {
+        let k = self.0.state::<Konak>();
+        if !k.busy.lock().unwrap().insert(id.to_string()) {
+            return false;
+        }
+        let _ = self.0.emit("app-progress", AppProgress { id: id.to_string(), op: "backup", state: "running", error: None });
+        true
+    }
+    fn release(&self, id: &str, result: &Result<(), String>) {
+        let k = self.0.state::<Konak>();
+        k.busy.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
+        let (state, error) = match result {
+            Ok(()) => ("done", None),
+            Err(e) => ("failed", Some(redact::Redactor::new(vec![]).apply(e))),
+        };
+        let _ = self.0.emit("app-progress", AppProgress { id: id.to_string(), op: "backup", state, error });
+    }
+}
+
+/// Starts a backup on its own thread; `why` is for the log (`manual`, `scheduled`). A scheduled
+/// run marks its slot as done only here, once it has passed the checks and holds the run guard.
+fn start_backup(app: AppHandle, why: &'static str) -> Result<(), String> {
+    let paths = app.state::<Konak>().paths.clone();
+    backup::precheck(&paths)?;
+    let guard = backup::Guard::acquire()?;
+    let scheduled = why == "scheduled";
+    if scheduled {
+        backup::consume_slot(&paths);
+    }
+    log(&paths, &format!("backup ({why}) starting"));
+    std::thread::spawn(move || {
+        let _awake = backup::KeepAwake::new();
+        let k = app.state::<Konak>();
+        let host = BackupHost(app.clone());
+        let apps = backup::DistroApps(&k.paths);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| backup::run(&k.paths, &host, &apps, &guard, backup_format::SCRYPT_LOG_N, scheduled)));
+        if r.is_err() {
+            // The app being archived, if any, is started again and released, as at the next start.
+            log(&k.paths, "backup: the run panicked");
+            if let Some(id) = backup::recover(&k.paths, &apps) {
+                backup::Host::release(&host,&id, &Err("internal error".into()));
+            }
+            let _ = app.emit("backup-progress", backup::Progress { state: "failed", step: "prepare", app: None, done_bytes: None, total_bytes: None, error: Some("backup_failed".into()), detail: Some("internal error".into()), skipped: None, notes: None });
+        }
+        drop(guard);
+    });
+    Ok(())
+}
+
+/// Asks the running backup to stop; it ends with a `backup-progress` event of state `cancelled`.
+/// `backup_not_running` when no backup runs (a restore cannot be cancelled).
+#[tauri::command]
+fn cancel_backup() -> Result<(), String> {
+    backup::cancel()
+}
+
+/// What runs now, for the panel after a reload and for the tray's Quit.
+#[derive(Serialize)]
+struct RunStatus {
+    /// `backup`, `restore`, `recover` (the startup recovery of an unfinished run), or null.
+    running: Option<String>,
+}
+
+#[tauri::command]
+fn backup_status() -> RunStatus {
+    RunStatus { running: backup::running_op() }
+}
+
+/// The newest run the schedule started (null when none did), for a failed-backup notice.
+#[tauri::command]
+async fn last_scheduled_backup(app: AppHandle) -> Result<Option<backup::ScheduledRun>, String> {
+    blocking(app, backup::last_scheduled).await
+}
+
+/// The tray's Quit: refused, with a dialog of Konak's own, while a backup, restore or startup
+/// recovery runs, because quitting would cut it and leave an app stopped or half restored until
+/// the next start. Returns whether Konak may quit.
+fn quit_allowed(app: &AppHandle) -> bool {
+    let Some(op) = backup::running_op() else { return true };
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    let key = if op == "backup" { "tray.quit_refused_backup" } else { "tray.quit_refused_restore" };
+    app.dialog().message(ui_text(key)).title("Konak").kind(MessageDialogKind::Warning).show(|_| {});
+    false
+}
+
+/// Starts a backup; progress arrives as `backup-progress` events.
+#[tauri::command]
+fn backup_now(app: AppHandle) -> Result<(), String> {
+    start_backup(app, "manual")
+}
+
+#[tauri::command]
+async fn list_backups(app: AppHandle) -> Result<Vec<backup::BackupEntry>, String> {
+    blocking(app, backup::list).await
+}
+
+/// The manifest of a backup file; an empty `password` uses the stored one.
+#[tauri::command]
+async fn inspect_backup(app: AppHandle, path: String, password: String) -> Result<backup::Inspected, String> {
+    blocking(app, move |p| backup::inspect(p, &path, &password)).await?
+}
+
+/// `restore::Host` for the running Konak: `restore-progress` events, the busy set (op `restore`,
+/// through `app-progress`), and the supervisor. Remembers the apps it holds, so a run that panics
+/// releases them.
+struct RestoreHost {
+    app: AppHandle,
+    held: Mutex<Vec<String>>,
+}
+
+impl restore::Host for RestoreHost {
+    fn progress(&self, p: &restore::Progress) {
+        let _ = self.app.emit("restore-progress", p);
+    }
+    fn try_busy(&self, id: &str) -> bool {
+        let k = self.app.state::<Konak>();
+        if !k.busy.lock().unwrap().insert(id.to_string()) {
+            return false;
+        }
+        self.held.lock().unwrap().push(id.to_string());
+        let _ = self.app.emit("app-progress", AppProgress { id: id.to_string(), op: "restore", state: "running", error: None });
+        true
+    }
+    fn release(&self, id: &str, result: &Result<(), String>) {
+        let k = self.app.state::<Konak>();
+        k.busy.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
+        self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|h| h != id);
+        let (state, error) = match result {
+            Ok(()) => ("done", None),
+            Err(e) => ("failed", Some(redact::Redactor::new(vec![]).apply(e))),
+        };
+        let _ = self.app.emit("app-progress", AppProgress { id: id.to_string(), op: "restore", state, error });
+    }
+    fn apps_changed(&self) {
+        self.app.state::<Konak>().sup.tick();
+    }
+    fn ca_changed(&self) {
+        self.app.state::<Konak>().sup.restart_web();
+    }
+}
+
+/// Starts a restore; progress arrives as `restore-progress` events, the last one with a summary.
+/// An empty `password` uses the stored one. `ca` (default false): also restore the backup's root
+/// CA, only on a Konak with no apps.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<String>, replace: Vec<String>, photos: bool, media: bool, ca: Option<bool>) -> Result<(), String> {
+    let paths = app.state::<Konak>().paths.clone();
+    let req = restore::Request { path, password, apps, replace, photos, media, ca: ca.unwrap_or(false) };
+    restore::precheck(&paths, &req)?;
+    let guard = backup::Guard::acquire()?;
+    log(&paths, &format!("restore of {} starting", req.path));
+    std::thread::spawn(move || {
+        let _awake = backup::KeepAwake::new();
+        let k = app.state::<Konak>();
+        let host = RestoreHost { app: app.clone(), held: Mutex::new(vec![]) };
+        let target = restore::DistroTarget(&k.paths);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| restore::run(&k.paths, &host, &target, &guard, &req)));
+        if r.is_err() {
+            log(&k.paths, "restore: the run panicked");
+            // The app whose turn was cut short goes back to its previous data, as at the next start.
+            restore::recover(&k.paths, &target);
+            let held = host.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            for id in held {
+                restore::Host::release(&host, &id, &Err("internal error".into()));
+            }
+            let _ = app.emit("restore-progress", restore::Progress { state: "failed", step: "restore_done", app: None, done_bytes: None, total_bytes: None, error: Some("backup_restore_failed".into()), detail: Some("internal error".into()), summary: None });
+        }
+        k.sup.tick();
+        drop(guard);
+    });
+    Ok(())
+}
+
+/// The apps an unfinished backup or restore left behind, with the op the panel shows while the
+/// startup recovery works on them: `start` (a backup's app is started again) or `restore` (a
+/// restore's app is rolled back or committed). Reads the `app` field of `restore-inflight.json`
+/// (`restore.rs`).
+fn recovery_apps(paths: &Paths) -> Vec<(String, &'static str)> {
+    let restore_app = std::fs::read(paths.home.join("restore-inflight.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["app"].as_str().map(String::from));
+    let mut out: Vec<(String, &'static str)> = backup::inflight_app(paths).into_iter().map(|id| (id, "start")).collect();
+    out.extend(restore_app.filter(|id| !out.iter().any(|(o, _)| o == id)).map(|id| (id, "restore")));
+    out
+}
+
+/// Whether a backup or a restore did not finish (its record is still there).
+fn has_unfinished_run(paths: &Paths) -> bool {
+    ["backup-inflight.json", "restore-inflight.json"].iter().any(|f| paths.home.join(f).exists())
+}
+
+/// Marks `ids` busy; returns those it marked (an id already busy is left to its holder).
+fn hold_busy(busy: &Mutex<HashSet<String>>, ids: &[(String, &'static str)]) -> Vec<(String, &'static str)> {
+    let mut set = busy.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    ids.iter().filter(|(id, _)| set.insert(id.clone())).cloned().collect()
+}
+
+/// The startup order: leftover processes stopped, then the web stack started (the LAN reaches the
+/// apps at once), then the recovery of an unfinished backup or restore, which can take minutes.
+fn startup_sequence(stop_leftovers: impl FnOnce(), start_services: impl FnOnce(), recover: impl FnOnce()) {
+    stop_leftovers();
+    start_services();
+    recover();
+}
+
+/// At start of a set-up Konak: Caddy, mDNS and the keepalive first, then the recovery of an
+/// unfinished backup or restore, under the run guard (no backup or restore can start meanwhile)
+/// and with the apps it touches held busy (no panel, MCP or re-render operation on them). The
+/// guard and the busy entries are taken here, before the window and the MCP pipe can ask for
+/// anything.
+fn start_services_and_recover(app: AppHandle, sup: Arc<Supervisor>) {
+    let k = app.state::<Konak>();
+    let paths = k.paths.clone();
+    // Only with something to recover: otherwise Quit and "Back up now" would be refused meanwhile.
+    let guard = if has_unfinished_run(&paths) { backup::Guard::acquire().ok() } else { None };
+    let held = if guard.is_some() { hold_busy(&k.busy, &recovery_apps(&paths)) } else { vec![] };
+    std::thread::spawn(move || {
+        let k = app.state::<Konak>();
+        for (id, op) in &held {
+            let _ = app.emit("app-progress", AppProgress { id: id.clone(), op, state: "running", error: None });
+        }
+        startup_sequence(
+            // A Caddy left from an earlier run would keep port 80 and serve its old config.
+            || match uninstall::stop_leftovers(&paths) {
+                Ok(s) if s == "nothing running" => {}
+                r => log(&paths, &format!("leftover processes: {r:?}")),
+            },
+            || sup.start(),
+            || {
+                if guard.is_none() {
+                    return;
+                }
+                let _awake = backup::KeepAwake::new();
+                // An app a backup stopped before Konak ended is started again, and one a restore
+                // left half done goes back to its previous data.
+                backup::recover(&paths, &backup::DistroApps(&paths));
+                restore::recover(&paths, &restore::DistroTarget(&paths));
+            },
+        );
+        for (id, op) in &held {
+            k.busy.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
+            let _ = app.emit("app-progress", AppProgress { id: id.clone(), op, state: "done", error: None });
+        }
+        drop(guard);
+        if !held.is_empty() {
+            k.sup.tick();
+        }
+    });
+}
+
 extern "system" {
     fn GetUserDefaultUILanguage() -> u16;
 }
@@ -818,6 +1108,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // For `call_attention` only; the webview gets no notification permission.
         .plugin(tauri_plugin_notification::init())
+        // Folder and file pickers for the Settings page (capability: `dialog:allow-open` only).
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let paths = Paths::new(app.path().resource_dir()?);
             let sup = Supervisor::new(paths.clone());
@@ -830,6 +1122,17 @@ pub fn run() {
             });
             let handle = app.handle().clone();
             sup.set_rerender(move |_, ports| rerender_for_ports(&handle, ports));
+            // The backup schedule, checked every tick; the run itself has a thread of its own.
+            let handle = app.handle().clone();
+            sup.set_after_tick(move || {
+                let Some(k) = handle.try_state::<Konak>() else { return };
+                if backup::scheduled_due(&k.paths) {
+                    // The slot stays due, so this is retried every tick: logged once per slot.
+                    if let Err(e) = start_backup(handle.clone(), "scheduled") {
+                        backup::log_once_per_slot(&k.paths, &format!("scheduled backup not started: {e}"));
+                    }
+                }
+            });
             // A damaged state.json is left alone: nothing starts, and the window shows the error.
             let mut state = State::try_load(&paths).unwrap_or_default();
 
@@ -844,25 +1147,24 @@ pub fn run() {
                 resume = true;
             }
             if state.done {
-                // An uninstall that kept the data removed the Run value; put it back (not in dev runs).
-                installer::register_autostart();
-                let (paths, sup) = (paths.clone(), Arc::clone(&sup));
-                std::thread::spawn(move || {
-                    // A Caddy left from an earlier run would keep port 80 and serve its old config.
-                    match uninstall::stop_leftovers(&paths) {
-                        Ok(s) if s == "nothing running" => {}
-                        r => log(&paths, &format!("leftover processes: {r:?}")),
+                // An uninstall that kept the data removed the Run value; put it back (not in dev
+                // runs), unless the user turned "start with Windows" off in Settings.
+                if settings::load(&paths).autostart {
+                    if let Err(e) = installer::register_autostart() {
+                        log(&paths, &format!("autostart: {e}"));
                     }
-                    sup.start();
-                });
+                }
             }
             app.manage(Konak {
                 paths: paths.clone(),
-                sup,
+                sup: Arc::clone(&sup),
                 rt: Mutex::new(Runtime::default()),
                 busy: Mutex::new(HashSet::new()),
                 confirm: Mutex::new(confirm::Slot::default()),
             });
+            if state.done {
+                start_services_and_recover(app.handle().clone(), sup);
+            }
             // MCP write requests; each one waits for the user's answer in the window.
             let handle = app.handle().clone();
             std::thread::spawn(move || serve_pipe(handle));
@@ -891,7 +1193,7 @@ pub fn run() {
                             let _ = w.set_focus();
                         }
                     }
-                    "quit" => {
+                    "quit" if quit_allowed(app) => {
                         app.state::<Konak>().sup.stop_all();
                         app.exit(0);
                     }
@@ -954,7 +1256,17 @@ pub fn run() {
             host_info,
             diagnose,
             ca_info,
-            trust_ca_on_this_pc
+            trust_ca_on_this_pc,
+            get_settings,
+            save_settings,
+            set_backup_password,
+            backup_now,
+            cancel_backup,
+            backup_status,
+            last_scheduled_backup,
+            list_backups,
+            inspect_backup,
+            restore_backup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -973,6 +1285,71 @@ mod tests {
         }));
         assert!(r.is_err());
         assert_eq!(*busy.lock().unwrap(), HashSet::from(["immich".to_string()]));
+    }
+
+    #[test]
+    fn startup_starts_the_web_stack_before_the_recovery() {
+        let calls = std::cell::RefCell::new(vec![]);
+        startup_sequence(|| calls.borrow_mut().push("leftovers"), || calls.borrow_mut().push("services"), || calls.borrow_mut().push("recover"));
+        assert_eq!(*calls.borrow(), ["leftovers", "services", "recover"]);
+    }
+
+    #[test]
+    fn the_startup_recovery_holds_the_apps_it_works_on() {
+        let paths = settings::tests::temp_paths("recovery-apps");
+        let none = recovery_apps(&paths);
+        let unfinished_none = has_unfinished_run(&paths);
+        std::fs::write(paths.home.join("restore-inflight.json"), r#"{"app":"immich","phase":"aside"}"#).unwrap();
+        let unfinished_restore = has_unfinished_run(&paths);
+        std::fs::write(paths.home.join("backup-inflight.json"), r#"{"app":"jellyfin"}"#).unwrap();
+        let both = recovery_apps(&paths);
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert!(none.is_empty());
+        assert!(!unfinished_none, "a plain start takes no run guard");
+        assert!(unfinished_restore);
+        assert_eq!(both, [("jellyfin".to_string(), "start"), ("immich".to_string(), "restore")]);
+        // An operation already holding one keeps it; the other is held for the recovery, so a
+        // panel or MCP operation on it is refused as busy meanwhile.
+        let busy = Mutex::new(HashSet::from(["jellyfin".to_string()]));
+        let held = hold_busy(&busy, &both);
+        assert_eq!(held, [("immich".to_string(), "restore")]);
+        assert!(!busy.lock().unwrap().insert("immich".to_string()), "busy for anyone else");
+    }
+
+    /// Every error, note and step code the backend can send has a text in both locale files. Codes
+    /// listed in `PENDING` are new and get their texts in the panel round; remove them from the
+    /// list then.
+    #[test]
+    fn every_backend_code_has_a_text() {
+        const PENDING: &[&str] = &[];
+        let sources = [
+            include_str!("backup.rs"),
+            include_str!("backup_format.rs"),
+            include_str!("settings.rs"),
+            include_str!("restore.rs"),
+            include_str!("lib.rs"),
+            include_str!("redact.rs"),
+        ];
+        let locales: Vec<serde_json::Value> = [LOCALE_EN, LOCALE_TR].iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let has_text = |code: &str| {
+            locales.iter().all(|l| {
+                [&l["errors"][code], &l["panel"]["restore"]["note"][code], &l["panel"]["backup"]["step"][code]].iter().any(|v| v.is_string())
+            })
+        };
+        let re = regex::Regex::new(r#""((?:backup|restore|settings|password|autostart)_[a-z_]+)""#).unwrap();
+        // Literals of that shape that are not codes (a settings field in tests).
+        const NOT_CODES: &[&str] = &["password_set"];
+        let mut missing: Vec<&str> = sources
+            .iter()
+            .flat_map(|s| re.captures_iter(s).map(|c| c.get(1).unwrap().as_str()))
+            .filter(|c| !has_text(c) && !PENDING.contains(c) && !NOT_CODES.contains(c))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        assert!(missing.is_empty(), "codes without a text in en.json and tr.json: {missing:?}");
+        // Once the texts exist, the pending list must shrink with them.
+        let stale: Vec<&&str> = PENDING.iter().filter(|c| has_text(c)).collect();
+        assert!(stale.is_empty(), "remove from PENDING, they have texts now: {stale:?}");
     }
 
     #[test]

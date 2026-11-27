@@ -20,7 +20,17 @@ mounts=$(dash "$7" | base64 -d) hook=$(dash "${8:--}" | base64 -d) mode="${9:-up
 dir=${KONAK_APPS_DIR:-/var/lib/konak/apps}/$id
 mkdir -p "$dir"
 cd "$dir"
-printf '%s\n' "$compose" > compose.yml
+# compose.yml and .env are written to fresh temp files and renamed over the old ones, so no write
+# ever follows a link that sits at those names (`mv -T` also refuses a folder there).
+tmp="" envtmp=""
+trap '[ -z "$tmp" ] || rm -f -- "$tmp"; [ -z "$envtmp" ] || rm -f -- "$envtmp"' EXIT
+rm -f .env.new
+tmp=$(mktemp "$dir/.compose.yml.XXXXXX")
+printf '%s\n' "$compose" > "$tmp"
+chmod 644 "$tmp"
+mv -fT "$tmp" compose.yml
+tmp=""
+envtmp=$(mktemp "$dir/.env.XXXXXX")
 (
   umask 077
   {
@@ -38,16 +48,21 @@ printf '%s\n' "$compose" > compose.yml
       fi
       printf '%s=%s\n' "$s" "$val"
     done
-  } > .env.new
-  chmod 600 .env.new
-  mv -f .env.new .env
+  } > "$envtmp"
+  chmod 600 "$envtmp"
+  mv -fT "$envtmp" .env
 )
+envtmp=""
+trap - EXIT
 if [ "$mode" = render ]; then echo rendered; exit 0; fi
 
 export DOCKER_HOST=unix:///run/podman/podman.sock
+# Only the compose.yml written above, never another compose file in the folder or one the
+# environment names (docker-compose would take a compose.yaml over it, or merge an override on top).
+unset COMPOSE_FILE COMPOSE_PATH_SEPARATOR
 # Progress goes to stdout with the rest, so the success line at the end is the output's last line
 # (Konak reads stdout, then stderr).
-docker-compose -p "$id" up -d --quiet-pull --remove-orphans 2>&1
+docker-compose -f compose.yml -p "$id" up -d --quiet-pull --remove-orphans 2>&1
 
 # "<container IP>:<container port>" of the app's container that publishes host port $port, or
 # nothing yet (container not created or not running). The probe goes to the container directly:

@@ -3,11 +3,12 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount, tick } from "svelte";
   import { t } from "$lib/i18n";
-  import { appName, errorText, portSuffix, type AppInfo, type AppProgress, type AppStats, type Check, type Failure, type HostInfo, type Manifest, type Op, type WebPorts } from "./api";
+  import { appName, errorText, portSuffix, type AppInfo, type AppProgress, type AppStats, type Check, type Failure, type HostInfo, type Manifest, type Op, type ScheduledRun, type WebPorts } from "./api";
   import AddApp from "./AddApp.svelte";
   import AppDetail from "./AppDetail.svelte";
   import Header from "./Header.svelte";
   import HostDetail from "./HostDetail.svelte";
+  import SettingsPage from "./SettingsPage.svelte";
   import LogsDrawer from "./LogsDrawer.svelte";
   import McpConfirm from "./McpConfirm.svelte";
   import Notices from "./Notices.svelte";
@@ -52,14 +53,28 @@
   /** Bumped per app when an operation finishes, so its log preview reloads. */
   let versions = $state<Record<string, number>>({});
   /** "host", "add" or an installed app's id. */
-  let view = $state<string | null>(null);
+  let view = $state<string | null>(takeReturnView());
+
+  /** A view to reopen after a reload the panel started itself (the language switch). */
+  function takeReturnView(): string | null {
+    try {
+      const v = sessionStorage.getItem("konak.returnView");
+      sessionStorage.removeItem("konak.returnView");
+      return v;
+    } catch {
+      return null;
+    }
+  }
+  /** The newest run the schedule started, for the failed-backup notice. */
+  let lastScheduled = $state<ScheduledRun | null>(null);
+  const loadScheduled = () => invoke<ScheduledRun | null>("last_scheduled_backup").then((r) => (lastScheduled = r)).catch(() => {});
   let logsFor = $state<AppInfo | null>(null);
   let removeFor = $state<AppInfo | null>(null);
 
   let showCert = $derived(catalog.some((m) => m.https) || (apps?.some((a) => a.https) ?? false));
   // Nothing picked yet, or the picked app was removed: the first app, else This PC.
   let shown = $derived(
-    view === "add" || view === "host" || apps?.some((a) => a.id === view) ? view : apps === null ? null : (apps[0]?.id ?? "host"),
+    view === "add" || view === "host" || view === "settings" || apps?.some((a) => a.id === view) ? view : apps === null ? null : (apps[0]?.id ?? "host"),
   );
   let current = $derived(apps?.find((a) => a.id === shown) ?? null);
 
@@ -122,6 +137,7 @@
     const diagRefresh = setInterval(() => visible() && checks !== null && !diagnosing && diagnose(), DIAG_REFRESH_MS);
     // Network category and firewall rules can change while Konak is not running; both reads are cheap.
     invoke("refresh_network");
+    loadScheduled();
     // Poll only while the window is visible; the tray keeps Konak running when it is hidden.
     const visible = () => document.visibilityState === "visible";
     const timer = setInterval(() => visible() && refresh(), POLL_MS);
@@ -142,7 +158,9 @@
       addFocus = p.op === "install" ? p.app : null;
       select(p.op === "install" ? "add" : p.app);
     });
+    const unlistenBackup = listen<{ state: string }>("backup-progress", ({ payload }) => payload.state !== "running" && loadScheduled());
     return () => {
+      unlistenBackup.then((f) => f());
       clearTimeout(diagTimer);
       clearInterval(diagRefresh);
       clearInterval(timer);
@@ -159,13 +177,20 @@
 </script>
 
 <div class="flex min-h-dvh flex-col">
-  <Header engineRunning={host ? host.distro.running : null} {networkCategory} {homeUrl} onadd={() => select("add")} />
+  <Header
+    engineRunning={host ? host.distro.running : null}
+    {networkCategory}
+    {homeUrl}
+    settingsOpen={shown === "settings"}
+    onadd={() => select("add")}
+    onsettings={() => select("settings")}
+  />
 
   <div class="flex flex-1 flex-wrap items-stretch">
     <Sidebar {apps} selected={shown ?? ""} {host} {checks} {busy} onselect={select} />
 
     <main bind:this={mainEl} class="flex min-w-0 flex-[999_1_480px] flex-col gap-5 px-4 pt-6 pb-8 sm:px-7">
-      <Notices {networkCategory} {firewallMissing} {repairing} {repairError} {webPorts} />
+      <Notices {networkCategory} {firewallMissing} {repairing} {repairError} {webPorts} backupFailure={lastScheduled?.status === "failed" && shown !== "settings" ? lastScheduled : null} onbackup={() => select("settings")} />
 
       {#if shown === "add"}
         <AddApp
@@ -182,6 +207,8 @@
           onopen={select}
           ondismiss={(id) => (failed = patch(failed, id, null))}
         />
+      {:else if shown === "settings"}
+        <SettingsPage apps={apps ?? []} />
       {:else if shown === "host"}
         <HostDetail {host} {checks} {diagnosing} {diagError} appCount={apps?.length ?? 0} {showCert} {summary} {homeUrl} ondiagnose={diagnose} />
       {:else if current && apps}

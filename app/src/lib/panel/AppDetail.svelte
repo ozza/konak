@@ -43,9 +43,11 @@
   let stopped = $derived(app.stopped || app.status === "stopped");
   let installed = $derived(new Date(app.installed_unix * 1000).toLocaleDateString(locale, { day: "numeric", month: "short", year: "numeric" }));
 
-  // A new app selection closes an open rename form.
+  // A new app selection closes an open rename form. The id is derived so that the status refresh,
+  // which hands in a new `app` object every 5 s, does not count as a new selection.
+  let appId = $derived(app.id);
   $effect(() => {
-    void app.id;
+    void appId;
     renaming = false;
   });
 
