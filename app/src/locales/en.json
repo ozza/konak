@@ -127,8 +127,8 @@
   },
   "panel": {
     "repair": {
-      "title": "Other devices may not reach Konak",
-      "body": "Konak's firewall rules are missing, for example after Konak was reinstalled. Without them, Windows blocks your apps for other devices or asks for permission. Repairing needs administrator permission once.",
+      "title": "Other devices cannot reach Konak",
+      "body": "Konak's firewall rules are missing, for example after Konak was reinstalled. Until they are back, Konak keeps your apps off the network, so Windows does not ask to open them on every network. Repairing needs administrator permission once.",
       "button": "Repair network access",
       "running": "Repairing network access…",
       "failed": "Repair did not finish."

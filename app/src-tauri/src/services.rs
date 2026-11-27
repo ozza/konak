@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::Path;
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -367,6 +368,10 @@ pub struct Supervisor {
     rerender: OnceLock<Rerender>,
     /// Called at the end of every tick, off the process lock (the backup schedule).
     after_tick: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// Konak's firewall rules are missing: Caddy and mDNS stay off the LAN until a repair adds
+    /// them. Listening there without a rule would make Windows ask "allow access?", and Allow
+    /// opens the program on Public networks too.
+    lan_blocked: AtomicBool,
 }
 
 fn alive(c: &mut Option<Child>) -> bool {
@@ -399,7 +404,15 @@ impl Supervisor {
             notify: OnceLock::new(),
             rerender: OnceLock::new(),
             after_tick: OnceLock::new(),
+            lan_blocked: AtomicBool::new(false),
         })
+    }
+
+    /// Keeps Caddy and mDNS off the LAN (`true`) or lets them run; takes effect at the next tick.
+    pub fn set_lan_blocked(&self, blocked: bool) {
+        if self.lan_blocked.swap(blocked, Ordering::SeqCst) != blocked {
+            crate::log(&self.paths, if blocked { "supervisor: firewall rules missing; Caddy and mDNS stay off the LAN until Repair" } else { "supervisor: firewall rules present; Caddy and mDNS may run" });
+        }
     }
 
     /// Set once, before `start`: run at the end of every tick. It must return quickly (start long
@@ -639,7 +652,14 @@ impl Supervisor {
         names.extend(routes.iter().map(|r| r.name.clone()));
         let ip = lan_ip();
         let (mut web_changed, mut active) = (false, None);
-        if let Some(ip) = &ip {
+        let blocked = self.lan_blocked.load(Ordering::SeqCst);
+        if blocked && (p.caddy.is_some() || p.mdns.is_some()) {
+            kill(&mut p.caddy);
+            kill(&mut p.mdns);
+            // Written again (and the processes started) once the block is lifted.
+            p.config = None;
+        }
+        if let Some(ip) = ip.as_ref().filter(|_| !blocked) {
             let https = self.ca_ready(&mut p);
             let (ports, look_up_owner) = self.choose_ports(&mut p, ip);
             web_changed = self.set_web(ports);

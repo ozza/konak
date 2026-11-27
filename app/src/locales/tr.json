@@ -127,8 +127,8 @@
   },
   "panel": {
     "repair": {
-      "title": "Diğer cihazlar Konak'a ulaşamayabilir",
-      "body": "Konak'ın güvenlik duvarı kuralları eksik; örneğin Konak yeniden kurulduğunda bu olur. Bu kurallar olmadan Windows uygulamalarınızı diğer cihazlara kapatır ya da izin ister. Onarmak için bir kez yönetici izni gerekir.",
+      "title": "Diğer cihazlar Konak'a ulaşamıyor",
+      "body": "Konak'ın güvenlik duvarı kuralları eksik; örneğin Konak yeniden kurulduğunda bu olur. Kurallar geri gelene kadar Konak uygulamalarınızı ağa açmaz; böylece Windows onları her ağda açmak için izin istemez. Onarmak için bir kez yönetici izni gerekir.",
       "button": "Ağ erişimini onar",
       "running": "Ağ erişimi onarılıyor…",
       "failed": "Onarım tamamlanmadı."
