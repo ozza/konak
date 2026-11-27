@@ -17,9 +17,9 @@ firewall and the certificates, and it backs everything up.
 ## What it does
 
 - **One-click setup.** Konak asks for administrator permission once, then installs WSL 2 if it is
-  missing, along with its own hidden Linux environment (Debian with Podman), the firewall rules and a local
-  certificate authority. It does not need Docker Desktop, and it runs side by side with it and with your other
-  WSL distributions.
+  missing, along with its own hidden Linux environment (Debian with Podman), the firewall rules and
+  a local certificate authority. It does not need Docker Desktop, and it runs side by side with it
+  and with your other WSL distributions.
 - **An app catalog.** Jellyfin, Immich, Nextcloud, Vaultwarden and Forgejo, each from its upstream
   compose file with images pinned by digest. Konak checks memory and network before an install. You
   finish each app's own setup on this PC before other devices can reach it.
@@ -28,10 +28,10 @@ firewall and the certificates, and it backs everything up.
 - **HTTPS where it matters.** Apps that need a secure connection, such as Vaultwarden, get certificates
   from Konak's own certificate authority. That authority can only issue certificates for `.local` names.
   Each device installs its root certificate once, with guides for iPhone, Android, Windows and macOS.
-- **Home network only.** Apps are reachable on private networks and blocked on public ones. During setup,
-  Konak offers to switch a home network that Windows marks as Public to Private, and later it warns
-  when the network is Public. It also never triggers Windows' "allow access" prompt. Before any administrator prompt, it shows exactly
-  which firewall rules it will add.
+- **Home network only.** Apps are reachable on private networks and blocked on public ones. During
+  setup, Konak offers to switch a home network that Windows marks as Public to Private, and later it
+  warns when the network is Public. It also never triggers Windows' "allow access" prompt. Before
+  any administrator prompt, it shows exactly which firewall rules it will add.
 - **Backup and restore.** Konak backs up your apps, their data and your Photos and Media folders into one
   encrypted file, on a schedule or on demand, and keeps the newest copies. You can restore everything,
   or only some apps, on the same PC or on a new one. A restore that fails part-way puts back what was
