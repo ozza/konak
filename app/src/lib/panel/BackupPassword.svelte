@@ -28,7 +28,7 @@
     if (next !== repeat) return (error = t("panel.settings.password_mismatch"));
     saving = true;
     try {
-      await invoke("set_backup_password", { current: passwordSet ? current : null, new: next });
+      await invoke("set_backup_password", { current: passwordSet && current ? current : null, new: next });
       reset();
       open = false;
       saved = true;

@@ -118,7 +118,7 @@
   {/if}
   {#snippet actions()}
     <button type="button" class="btn" disabled={running} onclick={onclose}>{progress?.state === "done" ? t("panel.logs.close") : t("panel.rename.cancel")}</button>
-    {#if manifest && progress?.state !== "done"}
+    {#if manifest && (!progress || progress.state === "running")}
       <button type="button" class={clashes.length ? "btn-danger" : "btn-primary"} disabled={running || chosen.length + Number(photos) + Number(media) === 0 || (clashes.length > 0 && !replace)} onclick={restore}>
         {t("panel.restore.start")}
       </button>

@@ -20,7 +20,7 @@ export type AppInfo = {
 };
 export type Manifest = { id: string; default_name: string; port: number; https: boolean; min_ram_mb: number };
 export type CaInfo = { path: string; fingerprint: string };
-export type Op = "install" | "remove" | "rename" | "restart" | "claim" | "stop" | "start";
+export type Op = "install" | "remove" | "rename" | "restart" | "claim" | "stop" | "start" | "backup" | "restore";
 export type AppStats = { id: string; cpu_percent: number; mem_bytes: number };
 type Usage = { used_bytes: number; total_bytes: number };
 export type HostInfo = {
@@ -133,6 +133,7 @@ export const tileColor = (id: string) => TILE[id] ?? "#475569";
 
 /** 1536 MiB -> "1.5 GB", 300 MiB -> "300 MB" (binary units, shown with the usual short names). */
 export function formatBytes(bytes: number): string {
+  if (bytes < 1_048_576) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   const mb = bytes / 1_048_576;
   if (mb < 1024) return `${Math.round(mb)} MB`;
   const gb = mb / 1024;

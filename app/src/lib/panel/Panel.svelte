@@ -53,7 +53,18 @@
   /** Bumped per app when an operation finishes, so its log preview reloads. */
   let versions = $state<Record<string, number>>({});
   /** "host", "add" or an installed app's id. */
-  let view = $state<string | null>(null);
+  let view = $state<string | null>(takeReturnView());
+
+  /** A view to reopen after a reload the panel started itself (the language switch). */
+  function takeReturnView(): string | null {
+    try {
+      const v = sessionStorage.getItem("konak.returnView");
+      sessionStorage.removeItem("konak.returnView");
+      return v;
+    } catch {
+      return null;
+    }
+  }
   let logsFor = $state<AppInfo | null>(null);
   let removeFor = $state<AppInfo | null>(null);
 

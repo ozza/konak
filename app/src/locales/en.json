@@ -137,7 +137,9 @@
       "restart": "Restarting…",
       "claim": "Making it available…",
       "start": "Starting…",
-      "stop": "Stopping…"
+      "stop": "Stopping…",
+      "backup": "Backing up…",
+      "restore": "Restoring…"
     },
     "failed": {
       "install": "Install failed. Konak stopped the app and kept its data, so you can try again.",
@@ -146,7 +148,9 @@
       "restart": "Restart failed.",
       "claim": "Could not make it available on your network.",
       "start": "Start failed.",
-      "stop": "Stop failed."
+      "stop": "Stop failed.",
+      "backup": "Backup of this app failed.",
+      "restore": "Restore of this app failed."
     },
     "dismiss": "Dismiss",
     "actions": {
@@ -506,7 +510,9 @@
       "weekday_3": "Wednesday",
       "weekday_4": "Thursday",
       "weekday_5": "Friday",
-      "weekday_6": "Saturday"
+      "weekday_6": "Saturday",
+      "schedule_hour": "Hour",
+      "schedule_minute": "Minute"
     },
     "backup": {
       "now": "Back up now",

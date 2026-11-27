@@ -34,10 +34,32 @@
     if (typeof dir === "string") update({ location: dir });
   }
 
-  function toggleApp(appId: string, on: boolean) {
-    const list = on ? [...b.include.apps, appId] : b.include.apps.filter((a) => a !== appId);
+  // An empty list means "all apps", so the last chosen app cannot be unticked here: the user picks
+  // "All installed apps" for that instead.
+  function toggleApp(appId: string, input: HTMLInputElement) {
+    const list = input.checked ? [...b.include.apps, appId] : b.include.apps.filter((a) => a !== appId);
+    if (list.length === 0) {
+      input.checked = true;
+      return;
+    }
     update({ include: { ...b.include, apps: list } });
   }
+
+  let keepError = $state(false);
+  // Whole numbers 1–100 only; anything else puts the stored value back in the field.
+  async function setKeep(input: HTMLInputElement) {
+    const n = Number(input.value);
+    keepError = !Number.isInteger(n) || n < 1 || n > 100 || !(await update({ keep: n }));
+    if (keepError) input.value = String(b.keep);
+  }
+
+  // The time is two lists, not <input type="time">, which follows the WebView's locale (AM/PM in
+  // Turkish). Minutes come in 5-minute steps, plus the stored minute if it is not one of them.
+  const HOURS = Array.from({ length: 24 }, (_, h) => String(h).padStart(2, "0"));
+  let hour = $derived(b.schedule.time.split(":")[0] ?? "03");
+  let minute = $derived(b.schedule.time.split(":")[1] ?? "00");
+  let minutes = $derived([...new Set([...Array.from({ length: 12 }, (_, i) => String(i * 5).padStart(2, "0")), minute])].sort());
+  const setTime = (h: string, m: string) => update({ schedule: { ...b.schedule, time: `${h}:${m}` } });
 </script>
 
 <section aria-labelledby="backup-title" class="card gap-5">
@@ -74,13 +96,33 @@
       </label>
     {/if}
     {#if b.schedule.kind !== "off"}
-      <label class="flex flex-col gap-1 text-xs text-muted" for="{id}-time">{t("panel.settings.schedule_time")}
-        <input id="{id}-time" type="time" class={field} value={b.schedule.time} onchange={(e) => update({ schedule: { ...b.schedule, time: (e.currentTarget as HTMLInputElement).value } })} />
-      </label>
+      <fieldset class="flex flex-col gap-1 text-xs text-muted">
+        <legend>{t("panel.settings.schedule_time")}</legend>
+        <div class="flex items-center gap-1">
+          <select aria-label={t("panel.settings.schedule_hour")} class={field} value={hour} onchange={(e) => setTime((e.currentTarget as HTMLSelectElement).value, minute)}>
+            {#each HOURS as h (h)}<option value={h}>{h}</option>{/each}
+          </select>
+          <span aria-hidden="true">:</span>
+          <select aria-label={t("panel.settings.schedule_minute")} class={field} value={minute} onchange={(e) => setTime(hour, (e.currentTarget as HTMLSelectElement).value)}>
+            {#each minutes as m (m)}<option value={m}>{m}</option>{/each}
+          </select>
+        </div>
+      </fieldset>
     {/if}
     <label class="flex flex-col gap-1 text-xs text-muted" for="{id}-keep">{t("panel.settings.keep")}
-      <input id="{id}-keep" type="number" min="1" max="100" class="{field} w-24" value={b.keep} onchange={(e) => update({ keep: Number((e.currentTarget as HTMLInputElement).value) })} />
+      <input
+        id="{id}-keep"
+        type="number"
+        min="1"
+        max="100"
+        step="1"
+        class="{field} w-24"
+        value={b.keep}
+        aria-invalid={keepError ? "true" : undefined}
+        onchange={(e) => setKeep(e.currentTarget as HTMLInputElement)}
+      />
     </label>
+    {#if keepError}<p class="w-full text-xs text-error" role="alert">{t("errors.settings_keep")}</p>{/if}
   </fieldset>
 
   <fieldset class="flex flex-col gap-2">
@@ -97,7 +139,7 @@
       <div class="ml-7 flex flex-wrap gap-x-5 gap-y-2">
         {#each apps as a (a.id)}
           <label class="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={b.include.apps.includes(a.id)} onchange={(e) => toggleApp(a.id, (e.currentTarget as HTMLInputElement).checked)} class="size-4 accent-accent" />
+            <input type="checkbox" checked={b.include.apps.includes(a.id)} onchange={(e) => toggleApp(a.id, e.currentTarget as HTMLInputElement)} class="size-4 accent-accent" />
             {appName(a.id)}
           </label>
         {/each}
@@ -113,5 +155,5 @@
     </label>
   </fieldset>
 
-  <BackupRun ready={!!b.location && b.password_set} {onrestore} />
+  <BackupRun ready={!!b.location && b.password_set} location={b.location} {onrestore} />
 </section>

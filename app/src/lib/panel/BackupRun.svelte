@@ -7,7 +7,13 @@
   import Icon from "./Icon.svelte";
 
   // "Back up now", its progress, the list of backups in the location, and the way into restore.
-  let { ready, onrestore }: { ready: boolean; onrestore: () => void } = $props();
+  let { ready, location: folder, onrestore }: { ready: boolean; location: string | null; onrestore: () => void } = $props();
+
+  // The list shows the chosen folder, so it reloads when the folder changes.
+  $effect(() => {
+    void folder;
+    refresh();
+  });
 
   let progress = $state<BackupProgress | null>(null);
   let startError = $state<string | null>(null);
@@ -33,7 +39,6 @@
   }
 
   onMount(() => {
-    refresh();
     const off = listen<BackupProgress>("backup-progress", ({ payload }) => {
       progress = payload;
       if (payload.state !== "running") refresh();

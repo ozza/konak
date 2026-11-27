@@ -11,7 +11,13 @@
 
   async function setLanguage(language: Language) {
     // The new language applies on reload, so every text in the window switches at once.
-    if (await onsave({ ...settings, language })) location.reload();
+    if (!(await onsave({ ...settings, language }))) return;
+    try {
+      sessionStorage.setItem("konak.returnView", "settings");
+    } catch {
+      // Without storage the window reopens on its default page; the language still switches.
+    }
+    location.reload();
   }
 </script>
 

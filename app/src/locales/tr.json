@@ -137,7 +137,9 @@
       "restart": "Yeniden başlatılıyor…",
       "claim": "Ağda erişime açılıyor…",
       "start": "Başlatılıyor…",
-      "stop": "Durduruluyor…"
+      "stop": "Durduruluyor…",
+      "backup": "Yedekleniyor…",
+      "restore": "Geri yükleniyor…"
     },
     "failed": {
       "install": "Kurulum başarısız oldu. Konak uygulamayı durdurdu ve verilerini sakladı, yeniden deneyebilirsiniz.",
@@ -146,7 +148,9 @@
       "restart": "Yeniden başlatma başarısız oldu.",
       "claim": "Ağda erişime açılamadı.",
       "start": "Başlatma başarısız oldu.",
-      "stop": "Durdurma başarısız oldu."
+      "stop": "Durdurma başarısız oldu.",
+      "backup": "Bu uygulamanın yedeklemesi başarısız oldu.",
+      "restore": "Bu uygulamanın geri yüklemesi başarısız oldu."
     },
     "dismiss": "Kapat",
     "actions": {
@@ -506,7 +510,9 @@
       "weekday_3": "Çarşamba",
       "weekday_4": "Perşembe",
       "weekday_5": "Cuma",
-      "weekday_6": "Cumartesi"
+      "weekday_6": "Cumartesi",
+      "schedule_hour": "Saat",
+      "schedule_minute": "Dakika"
     },
     "backup": {
       "now": "Şimdi yedekle",
