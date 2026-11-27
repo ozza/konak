@@ -591,6 +591,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_wrong_password_is_refused_at_the_age_header() {
+        // Only the magic line, the age header and the payload nonce are left: a wrong password is
+        // told from the scrypt stanza alone, without any payload, and the right one meets the
+        // missing payload.
+        let dir = temp("header");
+        let path = dir.join("b.konakbackup");
+        write_sample(&path, "the backup password", &manifest(1), b"data");
+        let raw = std::fs::read(&path).unwrap();
+        let end = raw.windows(4).position(|w| w == b"\n---").unwrap();
+        let header_end = end + raw[end + 1..].iter().position(|&b| b == b'\n').unwrap() + 2;
+        std::fs::write(&path, &raw[..header_end + 16]).unwrap();
+        let wrong = open(&path, &pw("not the password")).err().unwrap().code;
+        let right = open(&path, &pw("the backup password")).err().unwrap().code;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(wrong, "backup_wrong_password");
+        assert_eq!(right, "backup_damaged");
+    }
+
+    #[test]
     fn a_changed_byte_or_a_cut_is_detected() {
         let dir = temp("tamper");
         let path = dir.join("b.konakbackup");
