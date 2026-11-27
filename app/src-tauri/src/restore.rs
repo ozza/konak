@@ -21,8 +21,9 @@
 //!      One app's failure never stops the others.
 //!
 //!    An app that mounts Photos or Media (Immich checks its folders at start) must find them
-//!    restored before it starts. Files written since this order have Photos and Media before the
-//!    apps; in an older file they come after, so then the folders get a pass of their own first.
+//!    restored before it starts. When a chosen folder comes after such an app in the file (backups
+//!    write the apps' data first, so a folder never holds less than their databases reference),
+//!    the folders get a pass of their own first.
 //!
 //! Errors the panel explains are short codes (`restore_app_exists`, ...), with the technical text
 //! apart (`detail`); `Summary` lists the result.
@@ -67,6 +68,23 @@ const PHOTOS: &str = "restore_photos";
 const MEDIA: &str = "restore_media";
 const DONE: &str = "restore_done";
 
+thread_local! {
+    /// The redactor of this thread's restore (or recovery): the installed apps' secrets, loaded
+    /// from the target at its start and again once an app's folder (its `.env`) is in place.
+    static REDACTOR: std::cell::RefCell<crate::redact::Redactor> = std::cell::RefCell::new(crate::redact::Redactor::new(vec![]));
+}
+
+fn load_redactor(target: &dyn Target) {
+    let r = target.redactor();
+    REDACTOR.with(|c| *c.borrow_mut() = r);
+}
+
+/// `install.log`, redacted: error texts here carry script and container output.
+fn log(paths: &Paths, msg: &str) {
+    let line = REDACTOR.with(|c| c.borrow().apply(msg));
+    crate::log(paths, &line);
+}
+
 // ---- Request, progress, result ---------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
@@ -107,8 +125,11 @@ pub struct Summary {
     pub photos: Option<FolderResult>,
     pub media: Option<FolderResult>,
     /// Codes: `restore_volume_ignored` (a volume the catalog's compose does not declare for that
-    /// app), `restore_ca_restored`, `restore_ca_kept` (chosen, but this Konak has apps), `restore_ca_invalid`
-    /// (not a root as Konak makes it), `restore_ca_failed`, `restore_settings_kept`.
+    /// app), `restore_volume_missing` (a volume the catalog declares that the backup does not have:
+    /// it starts empty), `restore_app_older` (a database image older than this Konak's can take
+    /// over by itself; the app may not start), `restore_ca_restored`, `restore_ca_kept` (chosen, but
+    /// this Konak has apps), `restore_ca_invalid` (not a root as Konak makes it), `restore_ca_failed`
+    /// (also: this PC still trusts the current root), `restore_settings_kept`.
     pub notes: Vec<&'static str>,
 }
 
@@ -123,7 +144,9 @@ pub struct Restored {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct AppFailure {
     pub id: String,
-    /// A locale code: `restore_app_exists`, `restore_app_not_in_backup`, `unknown_app`,
+    /// A locale code: `restore_app_exists`, `restore_app_data_left` (not installed, but data a
+    /// removal kept is in the distro: `replace` restores over it), `restore_app_newer` (made with
+    /// newer images than this Konak's), `restore_app_not_in_backup`, `unknown_app`,
     /// `restore_aside_exists`, `restore_no_free_name`, `busy`, `backup_damaged`,
     /// `restore_path_refused`, `restore_app_unhealthy` (started, but it did not pass its health
     /// checks), `restore_app_failed` (anything else).
@@ -248,6 +271,12 @@ pub trait Target {
     fn name_free_on_lan(&self, name: &str) -> Result<bool, String>;
     /// Bytes free on the distro's disk.
     fn distro_free(&self) -> Result<u64, String>;
+    /// The secret values of the apps in the distro, for the log.
+    fn redactor(&self) -> crate::redact::Redactor;
+    /// Before the backup's root CA replaces this Konak's: takes the current root out of this user's
+    /// trusted roots when it is there (Windows asks to confirm), so no root Konak no longer has stays
+    /// trusted. What it did, or why it could not.
+    fn untrust_old_root(&self) -> Result<String, String>;
     /// Bytes free for this user on the Windows volume that holds `dir` (or would: the nearest
     /// folder that exists on the way).
     fn windows_free(&self, dir: &Path) -> Result<u64, String> {
@@ -266,7 +295,7 @@ impl DistroTarget<'_> {
 
     fn script(&self, args: &[&str]) -> Result<String, String> {
         let out = shell::distro_script(&self.0.distro, RESTORE_SH, args);
-        crate::log(self.0, &format!("restore {} {}: {}", args[0], args[1], shell::tail(&out.text, 2)));
+        log(self.0, &format!("restore {} {}: {}", args[0], args[1], shell::tail(&out.text, 2)));
         if out.ok {
             Ok(out.text)
         } else {
@@ -346,6 +375,12 @@ impl Target for DistroTarget<'_> {
         }
         text.lines().last().and_then(|l| l.trim().parse().ok()).ok_or_else(|| format!("cannot read the distro's free space: {text}"))
     }
+    fn redactor(&self) -> crate::redact::Redactor {
+        crate::redact::Redactor::load(self.0)
+    }
+    fn untrust_old_root(&self) -> Result<String, String> {
+        crate::ca::untrust_if_trusted(self.0)
+    }
 }
 
 // ---- An app's turn in progress, across a crash -----------------------------------------------------
@@ -371,7 +406,7 @@ fn mark(paths: &Paths, m: &Inflight) -> Result<(), String> {
 fn unmark(paths: &Paths) {
     if let Err(e) = std::fs::remove_file(inflight_file(paths)) {
         if e.kind() != io::ErrorKind::NotFound {
-            crate::log(paths, &format!("restore: cannot remove {}: {e}", inflight_file(paths).display()));
+            log(paths, &format!("restore: cannot remove {}: {e}", inflight_file(paths).display()));
         }
     }
 }
@@ -382,9 +417,15 @@ fn unmark(paths: &Paths) {
 /// the next start tries again (and a new restore of the app meets `restore_aside_exists`). Returns
 /// the app's id.
 pub fn recover(paths: &Paths, target: &dyn Target) -> Option<String> {
+    recover_turn(paths, target).map(|(id, _)| id)
+}
+
+/// `recover`, with why the marker stays when it does.
+fn recover_turn(paths: &Paths, target: &dyn Target) -> Option<(String, Result<(), String>)> {
     let body = std::fs::read(inflight_file(paths)).ok()?;
+    load_redactor(target);
     let Ok(m) = serde_json::from_slice::<Inflight>(&body) else {
-        crate::log(paths, "restore: the record of an unfinished restore is unreadable; removed");
+        log(paths, "restore: the record of an unfinished restore is unreadable; removed");
         unmark(paths);
         return None;
     };
@@ -392,16 +433,19 @@ pub fn recover(paths: &Paths, target: &dyn Target) -> Option<String> {
     if m.phase == "commit" {
         match target.commit(&id) {
             Ok(()) => {
-                crate::log(paths, &format!("restore {id}: an unfinished restore had been recorded; its set-aside copy is deleted now"));
+                log(paths, &format!("restore {id}: an unfinished restore had been recorded; its set-aside copy is deleted now"));
                 unmark(paths);
             }
-            Err(e) => crate::log(paths, &format!("restore {id}: deleting the set-aside copy failed again: {e}")),
+            Err(e) => {
+                log(paths, &format!("restore {id}: deleting the set-aside copy failed again: {e}"));
+                return Some((id, Err(format!("deleting the set-aside copy failed: {e}"))));
+            }
         }
-        return Some(id);
+        return Some((id, Ok(())));
     }
     if let Err(e) = target.roll_back(&id, m.had_old) {
-        crate::log(paths, &format!("restore {id}: rolling back an unfinished restore failed, the set-aside data stays in the distro: {e}"));
-        return Some(id);
+        log(paths, &format!("restore {id}: rolling back an unfinished restore failed, the set-aside data stays in the distro: {e}"));
+        return Some((id, Err(format!("rolling back failed: {e}"))));
     }
     let old = m.old.clone();
     let put_back = apps::update_state(paths, |s| match (s.apps.iter().position(|a| a.id == id), old) {
@@ -416,9 +460,9 @@ pub fn recover(paths: &Paths, target: &dyn Target) -> Option<String> {
         Some(o) if !o.stopped => Some(target.start_old(&id)),
         _ => None,
     };
-    crate::log(paths, &format!("restore {id}: an unfinished restore was rolled back to the previous data (state.json: {put_back:?}, started again: {started:?})"));
+    log(paths, &format!("restore {id}: an unfinished restore was rolled back to the previous data (state.json: {put_back:?}, started again: {started:?})"));
     unmark(paths);
-    Some(id)
+    Some((id, Ok(())))
 }
 
 // ---- Rules ---------------------------------------------------------------------------------------
@@ -762,7 +806,7 @@ fn verify(backup: fmt::Backup, ctx: &Ctx) -> Result<Verified, Failed> {
         .map_err(|e| {
             // A read error inside the callback is the archive's: report it as damaged.
             let code = if e.code == "backup_restore_failed" { "backup_damaged" } else { e.code };
-            crate::log(ctx.paths, &format!("restore: {code}: {}", e.detail));
+            log(ctx.paths, &format!("restore: {code}: {}", e.detail));
             fail(VERIFY, format!("{code}: {}", e.detail))
         })?;
     let total = sums.entries.iter().skip(1).map(|e| e.size).sum();
@@ -831,6 +875,7 @@ fn password(paths: &Paths, given: &str) -> Result<SecretString, String> {
 pub fn run(paths: &Paths, host: &dyn Host, target: &dyn Target, _guard: &Guard, req: &Request) -> Result<Summary, Failed> {
     let t0 = Instant::now();
     let _marker = crate::backup::RunMarker::new(paths, "restore");
+    load_redactor(target);
     let ctx = Ctx { paths, host, total: Cell::new(0), last: Cell::new(None) };
     let mut summary = Summary::default();
     let result = run_steps(&ctx, target, req, &mut summary);
@@ -842,14 +887,14 @@ pub fn run(paths: &Paths, host: &dyn Host, target: &dyn Target, _guard: &Guard, 
         Ok(()) if !summary.failed.is_empty() || [&summary.photos, &summary.media].iter().any(|f| f.as_ref().is_some_and(|f| f.failed > 0)) => (Some("restore_some_failed".to_string()), None),
         Ok(()) => (None, None),
     };
-    crate::log(paths, &format!("restore finished in {:.0} s: {}", t0.elapsed().as_secs_f64(), serde_json::to_string(&summary).unwrap_or_default()));
+    log(paths, &format!("restore finished in {:.0} s: {}", t0.elapsed().as_secs_f64(), serde_json::to_string(&summary).unwrap_or_default()));
     let (state, step) = match (&result, &error) {
         (Err(f), _) => ("failed", f.step),
         (Ok(()), Some(_)) => ("failed", DONE),
         (Ok(()), None) => ("done", DONE),
     };
     if let Some(e) = &error {
-        crate::log(paths, &format!("restore failed at {step}: {e}{}", detail.as_deref().map(|d| format!(" ({d})")).unwrap_or_default()));
+        log(paths, &format!("restore failed at {step}: {e}{}", detail.as_deref().map(|d| format!(" ({d})")).unwrap_or_default()));
     }
     host.progress(&Progress { state, step, app: None, done_bytes: Some(ctx.total.get()), total_bytes: Some(ctx.total.get()), error: error.clone(), detail, summary: Some(summary.clone()) });
     match result {
@@ -865,22 +910,27 @@ fn narrowed(req: &Request, m: &Manifest) -> Request {
 
 /// The chosen apps the restore would refuse, told from the manifest, the catalog, `state.json` and
 /// a probe of the distro, before the long read of the file: not in the backup, not in the catalog,
-/// a manifest that lacks one of its volumes, or installed here (or data of it left in the distro)
-/// without `replace`. Each app's turn checks again later (`Walk::begin`).
+/// made with newer images than this Konak's catalog (`restore_app_newer`), or installed here
+/// (`restore_app_exists`) or data of it left in the distro (`restore_app_data_left`, after a
+/// removal that kept the data) without `replace`. Each app's turn checks again later
+/// (`Walk::begin`).
 fn refusals(target: &dyn Target, state: &State, m: &Manifest, req: &Request) -> Vec<AppFailure> {
     let refused = |id: &str| -> Option<String> {
         let Some(mut am) = m.apps.iter().find(|a| a.id == id).cloned() else { return Some("restore_app_not_in_backup".into()) };
         let Some(cm) = catalog::get(id) else { return Some("unknown_app".into()) };
-        if let Err(e) = catalog_volumes(cm, &mut am) {
-            return Some(e);
+        if let Some(newer) = image_versions(cm, &am).newer.first() {
+            return Some(format!("restore_app_newer: {newer}"));
         }
+        catalog_volumes(cm, &mut am);
         if req.replace {
             return None;
         }
+        if state.apps.iter().any(|a| a.id == id) {
+            return Some("restore_app_exists".into());
+        }
         let volumes: Vec<&str> = am.volumes.iter().map(|v| v.podman_name.as_str()).collect();
         // A probe that fails is left to the app's turn, which probes again.
-        let exists = state.apps.iter().any(|a| a.id == id) || target.probe(id, &volumes).is_ok_and(|p| p.folder || p.volumes);
-        exists.then(|| "restore_app_exists".into())
+        target.probe(id, &volumes).is_ok_and(|p| p.folder || p.volumes).then(|| "restore_app_data_left".into())
     };
     req.apps.iter().filter_map(|id| refused(id).map(|e| app_failure(id, &e, None))).collect()
 }
@@ -896,25 +946,39 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
     // An earlier turn that did not finish (its rollback failed at the last start): tried again
     // now; while it stays, no restore runs, so its record is never overwritten.
     if inflight_file(paths).is_file() {
-        recover(paths, target);
+        let left = recover_turn(paths, target);
         if inflight_file(paths).is_file() {
-            return Err(fail(CHECK, "restore_aside_exists"));
+            let why = match left {
+                Some((id, Err(e))) => format!("{id}: {e}"),
+                Some((id, Ok(()))) => format!("{id}: the record of the earlier restore could not be removed"),
+                None => "the record of the earlier restore cannot be read".into(),
+            };
+            return Err(fail(CHECK, format!("restore_aside_exists: {why}")));
         }
     }
     let file = Path::new(&req.path);
     let before = stamp(file);
     // A wrong password fails here, at the age header (one scrypt), long before the full read.
     let backup = fmt::open(file, &pw).map_err(|e| {
-        crate::log(paths, &format!("restore: {e}"));
+        log(paths, &format!("restore: {e}"));
         fail(CHECK, e.code)
     })?;
     let req = &narrowed(req, &backup.manifest);
     let refused = refusals(target, &state, &backup.manifest, req);
     if let Some(first) = refused.first() {
         let code = first.error.clone();
-        crate::log(paths, &format!("restore: refused before reading the file: {:?}", refused.iter().map(|f| (&f.id, &f.error)).collect::<Vec<_>>()));
+        log(paths, &format!("restore: refused before reading the file: {:?}", refused.iter().map(|f| (&f.id, &f.error)).collect::<Vec<_>>()));
         summary.failed = refused;
         return Err(fail(CHECK, code));
+    }
+    for am in backup.manifest.apps.iter().filter(|a| req.apps.contains(&a.id)) {
+        let older = catalog::get(&am.id).map(|cm| image_versions(cm, am).older).unwrap_or_default();
+        if !older.is_empty() {
+            log(paths, &format!("restore {}: made with older images this Konak's cannot take over by themselves: {older:?}", am.id));
+            if !summary.notes.contains(&"restore_app_older") {
+                summary.notes.push("restore_app_older");
+            }
+        }
     }
     if !chosen_something(req) {
         return Err(fail(CHECK, "restore_nothing_chosen"));
@@ -922,11 +986,11 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
 
     ctx.step(VERIFY, None, 0);
     let v = verify(backup, ctx)?;
-    crate::log(paths, &format!("restore: {} verified ({} apps in it; chosen {:?}, replace {}, photos {}, media {})", file.display(), v.manifest.apps.len(), req.apps, req.replace, req.photos, req.media));
+    log(paths, &format!("restore: {} verified ({} apps in it; chosen {:?}, replace {}, photos {}, media {})", file.display(), v.manifest.apps.len(), req.apps, req.replace, req.photos, req.media));
     check_space(paths, target, req, &v.sizes).map_err(|e| fail(CHECK, e))?;
 
     ctx.step(KONAK, None, 0);
-    restore_ca(paths, ctx.host, &v, req.ca, state.apps.is_empty(), summary);
+    restore_ca(paths, ctx.host, target, &v, req.ca, state.apps.is_empty(), summary);
     if v.manifest.konak_files.iter().any(|f| f == "settings.json") {
         summary.notes.push("restore_settings_kept");
     }
@@ -934,7 +998,7 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
     // The second read, in archive order; Photos and Media first in a pass of their own when an app
     // that mounts them comes before them in the file.
     let passes = if v.order.folders_late(req) {
-        crate::log(paths, "restore: Photos/Media come after the apps in this file; restoring them first in a pass of their own");
+        log(paths, "restore: Photos/Media come after the apps in this file; restoring them first in a pass of their own");
         vec![Request { apps: vec![], ca: false, ..req.clone() }, Request { photos: false, media: false, ..req.clone() }]
     } else {
         vec![req.clone()]
@@ -954,7 +1018,7 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
             Ok(()) => walk.end_current(),
             Err(e) => {
                 walk.fail_current("backup_damaged".into());
-                crate::log(paths, &format!("restore: the second read failed: {e}"));
+                log(paths, &format!("restore: the second read failed: {e}"));
             }
         }
         seen.append(&mut walk.seen);
@@ -973,7 +1037,8 @@ fn run_steps(ctx: &Ctx, target: &dyn Target, req: &Request, summary: &mut Summar
 /// What a restore writes, per destination: the distro (the chosen apps' folders and volumes) and
 /// the Photos and Media folders (when chosen). The sizes are the archive's, so a merge that finds
 /// identical files needs less. `restore_no_space` when a destination lacks room for its part plus
-/// a margin; nothing has been changed then. Photos and Media on one Windows volume count together.
+/// a margin; nothing has been changed then. The apps' part counts both inside the distro (its ext4)
+/// and on the Windows volume of its VHDX; parts on one Windows volume count together.
 fn check_space(paths: &Paths, target: &dyn Target, req: &Request, sizes: &[(String, u64)]) -> Result<(), String> {
     let (mut apps, mut photos, mut media) = (0u64, 0u64, 0u64);
     for (path, size) in sizes {
@@ -987,54 +1052,64 @@ fn check_space(paths: &Paths, target: &dyn Target, req: &Request, sizes: &[(Stri
     if apps > 0 {
         let free = target.distro_free()?;
         if free < apps + DISTRO_MARGIN {
-            crate::log(paths, &format!("restore: {free} bytes free in the distro, {apps} needed plus a margin"));
+            log(paths, &format!("restore: {free} bytes free in the distro, {apps} needed plus a margin"));
             return Err("restore_no_space".into());
         }
     }
+    // The distro's disk is a VHDX that grows on a Windows volume (and never shrinks), so the apps'
+    // part also needs room there, together with Photos/Media when they share that volume; with the
+    // distro's margin on top, since a full volume stops every app's database.
     let volume = |p: &Path| p.ancestors().last().map(|r| r.to_string_lossy().to_lowercase());
-    let mut wanted: Vec<(&Path, u64)> = vec![];
-    for (dir, need) in [(paths.photos.as_path(), photos), (paths.media.as_path(), media)] {
+    let distro_dir = paths.distro_dir();
+    let mut wanted: Vec<(&Path, u64, u64)> = vec![];
+    for (dir, need, margin) in [(distro_dir.as_path(), apps, DISTRO_MARGIN), (paths.photos.as_path(), photos, 0), (paths.media.as_path(), media, 0)] {
         if need == 0 {
             continue;
         }
-        match wanted.iter_mut().find(|(d, _)| volume(d) == volume(dir)) {
-            Some(w) => w.1 += need,
-            None => wanted.push((dir, need)),
+        match wanted.iter_mut().find(|(d, _, _)| volume(d) == volume(dir)) {
+            Some(w) => {
+                w.1 += need;
+                w.2 += margin;
+            }
+            None => wanted.push((dir, need, margin)),
         }
     }
-    for (dir, need) in wanted {
+    for (dir, need, margin) in wanted {
         let free = target.windows_free(dir)?;
-        if free < need + crate::backup::SPACE_MARGIN {
-            crate::log(paths, &format!("restore: {free} bytes free for {}, {need} needed plus a margin", dir.display()));
+        if free < need + margin + crate::backup::SPACE_MARGIN {
+            log(paths, &format!("restore: {free} bytes free for {}, {need} needed plus a margin", dir.display()));
             return Err("restore_no_space".into());
         }
     }
     Ok(())
 }
 
-fn restore_ca(paths: &Paths, host: &dyn Host, v: &Verified, chosen: bool, fresh: bool, summary: &mut Summary) {
+fn restore_ca(paths: &Paths, host: &dyn Host, target: &dyn Target, v: &Verified, chosen: bool, fresh: bool, summary: &mut Summary) {
     let Some((crt, key)) = &v.ca else { return };
     let current = std::fs::read_to_string(paths.ca_cert()).ok().filter(|_| paths.ca_key().is_file());
     let same = current.as_deref().and_then(crate::ca::restored_fingerprint).is_some_and(|f| Some(f) == crate::ca::restored_fingerprint(crt));
     match ca_action(chosen, same, fresh) {
         CaAction::Nothing => {}
         CaAction::Keep => {
-            crate::log(paths, "restore: this Konak's root CA differs from the backup's and is in use; kept");
+            log(paths, "restore: this Konak's root CA differs from the backup's and is in use; kept");
             summary.notes.push("restore_ca_kept");
         }
         CaAction::Install => match crate::ca::check_restored_root(crt, key) {
             Err(e) => {
-                crate::log(paths, &format!("restore: the backup's root CA is not a Konak root ({e}); not restored"));
+                log(paths, &format!("restore: the backup's root CA is not a Konak root ({e}); not restored"));
                 summary.notes.push("restore_ca_invalid");
             }
-            Ok(root) => match crate::ca::install_root(paths, &root) {
+            Ok(root) => match target.untrust_old_root().and_then(|did| {
+                log(paths, &format!("restore: {did}"));
+                crate::ca::install_root(paths, &root)
+            }) {
                 Ok(()) => {
-                    crate::log(paths, &format!("restore: root CA {} installed", root.fingerprint));
+                    log(paths, &format!("restore: root CA {} installed", root.fingerprint));
                     summary.notes.push("restore_ca_restored");
                     host.ca_changed();
                 }
                 Err(e) => {
-                    crate::log(paths, &format!("restore: the root CA was not restored: {e}"));
+                    log(paths, &format!("restore: the root CA was not restored: {e}"));
                     summary.notes.push("restore_ca_failed");
                 }
             },
@@ -1132,7 +1207,7 @@ impl Walk<'_> {
                         Err(err) => {
                             f.failed += 1;
                             if f.error.is_none() {
-                                crate::log(self.ctx.paths, &format!("restore {step}: {err}"));
+                                log(self.ctx.paths, &format!("restore {step}: {err}"));
                                 f.error = Some(err);
                             }
                         }
@@ -1164,17 +1239,17 @@ impl Walk<'_> {
             self.record_failure(id, "unknown_app".into());
             return skip;
         };
-        let ignored_volumes = match catalog_volumes(m, &mut am) {
-            Ok(ignored) => ignored,
-            Err(e) => {
-                self.record_failure(id, e);
-                return skip;
-            }
-        };
+        let (ignored_volumes, missing_volumes) = catalog_volumes(m, &mut am);
         if !ignored_volumes.is_empty() {
-            crate::log(self.ctx.paths, &format!("restore {id}: volumes {ignored_volumes:?} of the backup are not the catalog's; ignored"));
+            log(self.ctx.paths, &format!("restore {id}: volumes {ignored_volumes:?} of the backup are not the catalog's; ignored"));
             if !self.summary.notes.contains(&"restore_volume_ignored") {
                 self.summary.notes.push("restore_volume_ignored");
+            }
+        }
+        if !missing_volumes.is_empty() {
+            log(self.ctx.paths, &format!("restore {id}: the backup has no volumes {missing_volumes:?} (made before the catalog declared them); they start empty"));
+            if !self.summary.notes.contains(&"restore_volume_missing") {
+                self.summary.notes.push("restore_volume_missing");
             }
         }
         if !self.ctx.host.try_busy(id) {
@@ -1188,11 +1263,11 @@ impl Walk<'_> {
             let volumes: Vec<&str> = am.volumes.iter().map(|v| v.podman_name.as_str()).collect();
             let probe = self.target.probe(id, &volumes)?;
             if probe.aside {
-                return Err("restore_aside_exists".to_string());
+                return Err(format!("restore_aside_exists: {id}: data an earlier restore set aside is still in the distro"));
             }
             let had_old = old.is_some() || probe.folder || probe.volumes;
             if had_old && !self.req.replace {
-                return Err("restore_app_exists".to_string());
+                return Err(if old.is_some() { "restore_app_exists" } else { "restore_app_data_left" }.to_string());
             }
             let (name, reservation) = pick_name(self.ctx.paths, &state, &am, old.as_ref().map(|a| a.name.as_str()), self.target)?;
             Ok((old, had_old, name, reservation))
@@ -1207,7 +1282,7 @@ impl Walk<'_> {
         };
         let renamed_from = (name != am.name).then(|| am.name.clone());
         if let Some(from) = &renamed_from {
-            crate::log(self.ctx.paths, &format!("restore {id}: {from}.local is taken; restoring it as {name}.local"));
+            log(self.ctx.paths, &format!("restore {id}: {from}.local is taken; restoring it as {name}.local"));
         }
         // Recorded before anything changes, so a Konak that ends mid-turn rolls it back at its next start.
         if let Err(e) = mark(self.ctx.paths, &Inflight { app: id.to_string(), had_old, old: old.clone(), phase: "restore".into() }) {
@@ -1240,7 +1315,10 @@ impl Walk<'_> {
             if let Some((s, sink)) = t.sink.take() {
                 sink.finish().map_err(|e| format!("{} of {id}: {e}", stage_name(&s)))?;
                 match s {
-                    Stage::Folder => t.folder_done = true,
+                    Stage::Folder => {
+                        t.folder_done = true;
+                        load_redactor(self.target);
+                    }
                     Stage::Volume(v) => t.volumes_done.push(v),
                 }
             }
@@ -1285,19 +1363,19 @@ impl Walk<'_> {
                 if t.had_old {
                     // From here a crash redoes the commit instead of rolling back.
                     if let Err(e) = mark(paths, &Inflight { app: id.clone(), had_old: true, old: t.old.clone(), phase: "commit".into() }) {
-                        crate::log(paths, &format!("restore {id}: {e}"));
+                        log(paths, &format!("restore {id}: {e}"));
                     }
                     match self.target.commit(&id) {
                         Ok(()) => unmark(paths),
                         // The marker stays: the next start deletes the set-aside copy.
-                        Err(e) => crate::log(paths, &format!("restore {id}: the set-aside copy was not deleted: {e}")),
+                        Err(e) => log(paths, &format!("restore {id}: the set-aside copy was not deleted: {e}")),
                     }
                 } else {
                     unmark(paths);
                 }
                 self.ctx.host.release(&id, &Ok(()));
                 self.ctx.host.apps_changed();
-                crate::log(self.ctx.paths, &format!("restore {id}: restored as {}.local", t.name));
+                log(self.ctx.paths, &format!("restore {id}: restored as {}.local", t.name));
                 self.summary.restored.push(Restored { id, name: t.name.clone(), renamed_from: t.renamed_from.clone() });
             }
             Err(e) => {
@@ -1322,10 +1400,10 @@ impl Walk<'_> {
             }
         }
         // Before the rollback, which removes the containers and their logs.
-        let log = if t.up_tried { save_logs(self.ctx.paths, self.target, &id) } else { None };
+        let saved_log = if t.up_tried { save_logs(self.ctx.paths, self.target, &id) } else { None };
         if let Err(e) = self.target.roll_back(&id, t.had_old) {
             // The marker stays: the next start tries the rollback again.
-            crate::log(self.ctx.paths, &format!("restore {id}: rolling back failed, the set-aside data stays in the distro: {e}"));
+            log(self.ctx.paths, &format!("restore {id}: rolling back failed, the set-aside data stays in the distro: {e}"));
             error = format!("{error}; rolling back failed: {e}");
         } else {
             unmark(self.ctx.paths);
@@ -1335,10 +1413,10 @@ impl Walk<'_> {
                 }
             }
         }
-        let logs = log.as_deref().map(|l| format!(" (container logs: {l})")).unwrap_or_default();
-        crate::log(self.ctx.paths, &format!("restore {id} failed: {error}{logs}"));
+        let logs = saved_log.as_deref().map(|l| format!(" (container logs: {l})")).unwrap_or_default();
+        log(self.ctx.paths, &format!("restore {id} failed: {error}{logs}"));
         self.release_failed(&id, &error);
-        self.summary.failed.push(app_failure(&id, &error, log));
+        self.summary.failed.push(app_failure(&id, &error, saved_log));
     }
 
     fn record_failure(&mut self, id: &str, error: String) {
@@ -1357,10 +1435,10 @@ fn save_logs(paths: &Paths, target: &dyn Target, id: &str) -> Option<String> {
     let saved = target.app_logs(id).and_then(|text| {
         let t = crate::backup::local_of(now()).ok_or("cannot read the local time")?;
         let file = paths.log_dir().join(format!("restore-{id}-{:04}{:02}{:02}-{:02}{:02}{:02}.log", t.year(), t.month() as u8, t.day(), t.hour(), t.minute(), t.second()));
-        std::fs::create_dir_all(paths.log_dir()).and_then(|()| std::fs::write(&file, crate::redact::Redactor::new(vec![]).apply(&text))).map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+        std::fs::create_dir_all(paths.log_dir()).and_then(|()| std::fs::write(&file, REDACTOR.with(|c| c.borrow().apply(&text)))).map_err(|e| format!("cannot write {}: {e}", file.display()))?;
         Ok(file.display().to_string())
     });
-    saved.map_err(|e| crate::log(paths, &format!("restore {id}: the containers' logs were not saved: {e}"))).ok()
+    saved.map_err(|e| log(paths, &format!("restore {id}: the containers' logs were not saved: {e}"))).ok()
 }
 
 fn stage_name(s: &Stage) -> String {
@@ -1372,8 +1450,11 @@ fn stage_name(s: &Stage) -> String {
 
 /// Sets the app's volumes to those the catalog's compose declares for it (less `SKIP_VOLUMES`),
 /// with the Podman names docker-compose gives them (`<id>_<name>`), never the manifest's names.
-/// Returns the manifest's other volumes (ignored); every declared one must be in the backup.
-fn catalog_volumes(m: &catalog::Manifest, am: &mut AppManifest) -> Result<Vec<String>, String> {
+/// Returns the manifest's other volumes (ignored), and the declared ones the backup does not have
+/// (made before the catalog declared them: the app starts with them empty, as a new install does).
+/// The manifest is authenticated with the file, so a missing volume is not damage; a volume the
+/// manifest lists but the file lacks is (`complete`).
+fn catalog_volumes(m: &catalog::Manifest, am: &mut AppManifest) -> (Vec<String>, Vec<String>) {
     let id = am.id.clone();
     let declared: Vec<String> = m.named_volumes().into_iter().filter(|v| !crate::backup::SKIP_VOLUMES.contains(&(id.as_str(), v.as_str()))).collect();
     let mut ignored = vec![];
@@ -1385,11 +1466,51 @@ fn catalog_volumes(m: &catalog::Manifest, am: &mut AppManifest) -> Result<Vec<St
             kept.push(VolumeManifest { podman_name: format!("{id}_{}", v.name), name: v.name });
         }
     }
-    if let Some(missing) = declared.iter().find(|d| !kept.iter().any(|k| &k.name == *d)) {
-        return Err(format!("backup_damaged: volume {missing} is missing"));
-    }
+    let missing = declared.into_iter().filter(|d| !kept.iter().any(|k| &k.name == d)).collect();
     am.volumes = kept;
-    Ok(ignored)
+    (ignored, missing)
+}
+
+/// Databases that refuse data of another major version (Postgres), or upgrade only one major at a
+/// time (Nextcloud): the image repository and how many majors it can step up by itself.
+const MIGRATION_LIMITS: [(&str, u64); 3] = [("docker.io/library/postgres", 0), ("ghcr.io/immich-app/postgres", 0), ("docker.io/library/nextcloud", 1)];
+
+#[derive(Default, Debug, PartialEq)]
+struct ImageVersions {
+    /// `repo: backup major > catalog major`: this Konak's images would downgrade the data.
+    newer: Vec<String>,
+    /// `repo: backup major < catalog major` beyond what the image migrates by itself.
+    older: Vec<String>,
+}
+
+/// `(repository, major)` of an image reference such as `docker.io/library/postgres:18.7-alpine@sha256:..`
+/// or `ghcr.io/immich-app/immich-server:v3.4.2`; the major is `None` without a numeric tag.
+fn image_major(image: &str) -> (&str, Option<u64>) {
+    let image = image.split('@').next().unwrap_or(image);
+    let slash = image.rfind('/').map_or(0, |i| i + 1);
+    let (repo, tag) = match image[slash..].rfind(':') {
+        Some(i) => (&image[..slash + i], &image[slash + i + 1..]),
+        None => (image, ""),
+    };
+    let digits: String = tag.trim_start_matches('v').chars().take_while(char::is_ascii_digit).collect();
+    (repo, digits.parse().ok())
+}
+
+/// The backup's image versions against the catalog's, per repository both have. A backup made
+/// before the manifest recorded images has none and passes.
+fn image_versions(cm: &catalog::Manifest, am: &AppManifest) -> ImageVersions {
+    let ours = fmt::compose_images(cm.compose);
+    let mut out = ImageVersions::default();
+    for theirs in &am.images {
+        let (repo, Some(was)) = image_major(theirs) else { continue };
+        let Some(now) = ours.iter().map(|i| image_major(i)).find(|(r, _)| *r == repo).and_then(|(_, m)| m) else { continue };
+        if was > now {
+            out.newer.push(format!("{repo} {was} > {now}"));
+        } else if MIGRATION_LIMITS.iter().any(|(r, step)| *r == repo && now - was > *step) {
+            out.older.push(format!("{repo} {was} < {now}"));
+        }
+    }
+    out
 }
 
 /// The app's data is all in: render, start, check, and record it.
@@ -1409,6 +1530,8 @@ fn complete(ctx: &Ctx, target: &dyn Target, t: &mut Turn) -> Result<(), String> 
         return Err(format!("backup_damaged: volume {} is missing", v.name));
     }
     t.up_tried = true;
+    // The restored .env is in place: its secrets are masked in the log from here.
+    load_redactor(target);
     target.bring_up(&id, &t.name, t.am.claimed, !t.am.stopped).map_err(|e| format!("{}: {e}", if apps::health_failed(&e) { "restore_app_unhealthy" } else { "restore_app_failed" }))?;
     let (name, claimed, stopped) = (t.name.clone(), t.am.claimed, t.am.stopped);
     apps::update_state(ctx.paths, |s| {
@@ -1468,6 +1591,13 @@ mod tests {
         panic_up: bool,
         /// A file whose presence `bring_up` records (`seen <name> true|false`).
         watch: Option<PathBuf>,
+        /// `untrust_old_root` fails (the user declined Windows' confirmation).
+        keep_old_root: bool,
+        /// `bring_up` fails with this text.
+        up_error: Option<String>,
+        /// `distro_free` (between the verify and the second read) appends a byte to this file.
+        touch_on_space: Option<PathBuf>,
+        fail_commit: bool,
     }
 
     struct FakeSink {
@@ -1523,6 +1653,9 @@ mod tests {
         }
         fn commit(&self, id: &str) -> Result<(), String> {
             self.call(format!("commit {id}"));
+            if self.fail_commit {
+                return Err("commit failed".into());
+            }
             Ok(())
         }
         fn folder(&self, id: &str) -> Result<Box<dyn Sink>, String> {
@@ -1542,6 +1675,9 @@ mod tests {
             if self.fail_up.iter().any(|f| f == id) {
                 return Err(format!("{id} did not answer on /health within 5 minutes"));
             }
+            if let Some(e) = &self.up_error {
+                return Err(e.clone());
+            }
             Ok(())
         }
         fn start_old(&self, id: &str) -> Result<(), String> {
@@ -1557,12 +1693,28 @@ mod tests {
             Ok(!self.lan_taken.iter().any(|t| t == name))
         }
         fn distro_free(&self) -> Result<u64, String> {
+            if let Some(f) = &self.touch_on_space {
+                std::fs::OpenOptions::new().append(true).open(f).unwrap().write_all(b"x").unwrap();
+            }
             Ok(self.distro_free.unwrap_or(u64::MAX / 2))
         }
         fn windows_free(&self, _: &Path) -> Result<u64, String> {
             Ok(self.windows_free.unwrap_or(u64::MAX / 2))
         }
+        fn redactor(&self) -> crate::redact::Redactor {
+            crate::redact::Redactor::new(vec![FAKE_SECRET.into()])
+        }
+        fn untrust_old_root(&self) -> Result<String, String> {
+            self.call("untrust old root".into());
+            if self.keep_old_root {
+                return Err("the current root is still trusted on this PC (removal declined?)".into());
+            }
+            Ok("removed".into())
+        }
     }
+
+    /// A secret value of an app's `.env`, as the fake target reports it.
+    const FAKE_SECRET: &str = "s3cr3t-from-the-env-file";
 
     #[derive(Default)]
     struct FakeHost {
@@ -1596,6 +1748,7 @@ mod tests {
             stopped,
             size_bytes: 100,
             volumes: volumes.iter().map(|v| VolumeManifest { name: v.to_string(), podman_name: format!("{id}_{v}") }).collect(),
+            images: vec![],
         }
     }
 
@@ -1623,8 +1776,8 @@ mod tests {
         write_backup_ordered(path, apps, ca, photos, false);
     }
 
-    /// `photos_first`: the order backups are written in now; without, the order of older files
-    /// (apps first, Photos last).
+    /// `photos_first`: Photos before the apps; without, apps first and Photos last (the order the
+    /// backup writes, so Immich's database never references a photo the file misses).
     fn write_backup_ordered(path: &Path, apps: &[AppManifest], ca: Option<(&str, &str)>, photos: &[(&str, &[u8])], photos_first: bool) {
         let m = Manifest {
             format: fmt::FORMAT,
@@ -1786,7 +1939,7 @@ mod tests {
         let last = host.events.borrow().last().cloned().unwrap();
         let summary = last.summary.unwrap();
         let failed: Vec<(&str, &str)> = summary.failed.iter().map(|f| (f.id.as_str(), f.error.as_str())).collect();
-        assert_eq!(failed, [("vaultwarden", "restore_app_exists"), ("jellyfin", "restore_app_exists"), ("immich", "restore_app_not_in_backup")]);
+        assert_eq!(failed, [("vaultwarden", "restore_app_exists"), ("jellyfin", "restore_app_data_left"), ("immich", "restore_app_not_in_backup")]);
         assert!(summary.restored.is_empty());
         assert_eq!(*target.calls.borrow(), ["probe forgejo", "probe jellyfin"], "only looked at");
         assert_eq!(state.apps.len(), 1);
@@ -1848,7 +2001,8 @@ mod tests {
         nc.volumes[0].podman_name = "immich_pgdata".into();
         // Forgejo declares no volumes; one in the backup is ignored too.
         let fj = app("forgejo", "git-v", false, &["extra"]);
-        // Nextcloud without its file volume: incomplete, refused before anything changes.
+        // Nextcloud without its file volume (a catalog that declared it later): restored, the volume
+        // starts empty; one app never makes the whole run "damaged".
         let short = app("nextcloud", "cloud-s", false, &["db"]);
         write_backup(&file, &[nc, fj], None, &[]);
         let (host, target) = (FakeHost::default(), FakeTarget::default());
@@ -1857,7 +2011,7 @@ mod tests {
         let (paths2, file2) = setup("volumes-short", &[]);
         write_backup(&file2, &[short], None, &[]);
         let (host2, target2) = (FakeHost::default(), FakeTarget::default());
-        let refused2 = restore(&paths2, &host2, &target2, &request(&file2, &["nextcloud"], false, false));
+        let short_run = restore(&paths2, &host2, &target2, &request(&file2, &["nextcloud"], false, false));
         let _ = std::fs::remove_dir_all(&paths.home);
         let _ = std::fs::remove_dir_all(&paths2.home);
         assert!(summary.failed.is_empty(), "{:?}", summary.failed);
@@ -1865,10 +2019,12 @@ mod tests {
         let volumes: Vec<&String> = calls.iter().filter(|c| c.starts_with("volume ")).collect();
         assert_eq!(volumes, ["volume nextcloud nextcloud_db", "volume nextcloud nextcloud_nextcloud"]);
         assert!(!calls.iter().any(|c| c.contains("immich") || c.contains("pgdata") || c.contains("extra")), "{calls:?}");
-        assert_eq!(refused2.unwrap_err(), fail(CHECK, "backup_damaged"));
-        let summary2 = host2.events.borrow().last().cloned().unwrap().summary.unwrap();
-        assert_eq!(summary2.failed, [AppFailure { id: "nextcloud".into(), error: "backup_damaged".into(), detail: Some("volume nextcloud is missing".into()), log: None }]);
-        assert!(target2.calls.borrow().is_empty(), "{:?}", target2.calls.borrow());
+        let summary2 = short_run.unwrap();
+        assert!(summary2.failed.is_empty(), "{:?}", summary2.failed);
+        assert_eq!(summary2.restored.len(), 1);
+        assert_eq!(summary2.notes, ["restore_settings_kept", "restore_volume_missing"]);
+        let volumes2: Vec<String> = target2.calls.borrow().iter().filter(|c| c.starts_with("volume ")).cloned().collect();
+        assert_eq!(volumes2, ["volume nextcloud nextcloud_db"]);
     }
 
     #[test]
@@ -2019,8 +2175,250 @@ mod tests {
             assert!(steps.contains(&PHOTOS) && steps.contains(&APP) && *steps.last().unwrap() == DONE, "{steps:?}");
             results.push(last.total_bytes.unwrap());
         }
-        // An older file is read twice after the verify (the folders' pass, then the apps'); a new one once.
+        // Apps first: read twice after the verify (the folders' pass, then the apps'); Photos first: once.
         assert_eq!(results[0], 2 * results[1]);
+    }
+
+    #[test]
+    fn every_restore_log_line_is_redacted() {
+        let (paths, file) = setup("redact", &[("vaultwarden", "vault-z", false)]);
+        write_backup(&file, &[app("vaultwarden", "vault-z", false, &[])], None, &[]);
+        let leak = format!("install of vaultwarden failed: DB_PASSWORD=hunter22; key {FAKE_SECRET} rejected");
+        let target = FakeTarget { up_error: Some(leak), fail_rollback: true, ..Default::default() };
+        let summary = restore(&paths, &FakeHost::default(), &target, &request(&file, &["vaultwarden"], true, false)).unwrap();
+        // The next start, whose rollback fails again.
+        recover(&paths, &target);
+        let log = std::fs::read_to_string(paths.install_log()).unwrap();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(summary.failed.len(), 1);
+        assert!(log.contains("restore vaultwarden failed") && log.contains("DB_PASSWORD=[redacted]"), "{log}");
+        assert!(!log.contains("hunter22") && !log.contains(FAKE_SECRET), "{log}");
+        let detail = summary.failed[0].detail.clone().unwrap_or_default();
+        assert!(!detail.contains("hunter22"), "{detail}");
+    }
+
+    #[test]
+    fn the_apps_need_room_on_the_windows_volume_that_holds_the_distro_disk() {
+        let (paths, file) = setup("vhdx", &[]);
+        write_backup(&file, &[app("nextcloud", "cloud-h", false, &["db", "nextcloud"])], None, &[("big.jpg", &[7u8; 100_000])]);
+        // The ext4 inside the VHDX has plenty (`df` sees its virtual size); the Windows volume under it does not.
+        let margins = DISTRO_MARGIN + crate::backup::SPACE_MARGIN;
+        let tight = FakeTarget { windows_free: Some(margins + 12_000), ..Default::default() };
+        let apps_only = restore(&paths, &FakeHost::default(), &tight, &request(&file, &["nextcloud"], false, false));
+        let enough = FakeTarget { windows_free: Some(margins + 13_000), ..Default::default() };
+        let ok = restore(&paths, &FakeHost::default(), &enough, &request(&file, &["nextcloud"], false, false));
+        // Photos on the same volume count together with the apps.
+        let shared = FakeTarget { windows_free: Some(margins + 13_000 + 99_999), ..Default::default() };
+        let both = restore(&paths, &FakeHost::default(), &shared, &request(&file, &["nextcloud"], true, true));
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(apps_only.unwrap_err(), fail(CHECK, "restore_no_space"));
+        assert!(!tight.calls.borrow().iter().any(|c| c.starts_with("folder")), "{:?}", tight.calls.borrow());
+        assert!(ok.unwrap().failed.is_empty());
+        assert_eq!(both.unwrap_err(), fail(CHECK, "restore_no_space"));
+    }
+
+    #[test]
+    fn data_kept_by_a_removal_needs_replace_and_is_then_restored_over() {
+        // Immich was removed with "keep data": not installed, but its folder is in the distro.
+        let (paths, file) = setup("kept", &[]);
+        write_backup(&file, &[app("vaultwarden", "vault-k", false, &[])], None, &[]);
+        let probes = HashMap::from([("vaultwarden".to_string(), Probe { folder: true, ..Default::default() })]);
+        let refused_target = FakeTarget { probes: probes.clone(), ..Default::default() };
+        let host = FakeHost::default();
+        let refused = restore(&paths, &host, &refused_target, &request(&file, &["vaultwarden"], false, false));
+        let target = FakeTarget { probes, ..Default::default() };
+        let summary = restore(&paths, &FakeHost::default(), &target, &request(&file, &["vaultwarden"], true, false)).unwrap();
+        let state = State::load(&paths);
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(refused.unwrap_err(), fail(CHECK, "restore_app_data_left"));
+        let failed = host.events.borrow().last().cloned().unwrap().summary.unwrap().failed;
+        assert_eq!(failed[0].error, "restore_app_data_left", "not 'already installed'");
+        assert_eq!(summary.restored.len(), 1);
+        let calls = target.calls.borrow().clone();
+        assert!(calls.contains(&"aside vaultwarden".to_string()) && calls.contains(&"commit vaultwarden".to_string()), "{calls:?}");
+        assert_eq!(state.apps.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["vault-k"]);
+    }
+
+    #[test]
+    fn a_leftover_turn_that_cannot_be_undone_says_which_app_and_why() {
+        let (paths, file) = setup("leftover-why", &[]);
+        write_backup(&file, &[app("forgejo", "git-w", false, &[])], None, &[]);
+        mark(&paths, &Inflight { app: "vaultwarden".into(), had_old: true, old: None, phase: "restore".into() }).unwrap();
+        let host = FakeHost::default();
+        let failing = FakeTarget { fail_rollback: true, ..Default::default() };
+        let blocked = restore(&paths, &host, &failing, &request(&file, &["forgejo"], false, false));
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(blocked.unwrap_err(), fail(CHECK, "restore_aside_exists"));
+        let last = host.events.borrow().last().cloned().unwrap();
+        assert_eq!(last.error.as_deref(), Some("restore_aside_exists"));
+        assert_eq!(last.detail.as_deref(), Some("vaultwarden: rolling back failed: rollback failed"));
+    }
+
+    #[test]
+    fn backups_from_newer_images_are_refused_and_older_databases_noted() {
+        let (paths, file) = setup("images", &[]);
+        let with = |images: &[&str]| {
+            let mut a = app("nextcloud", "cloud-i", false, &["db", "nextcloud"]);
+            a.images = images.iter().map(|i| i.to_string()).collect();
+            a
+        };
+        let run_with = |tag: &str, images: &[&str]| {
+            write_backup(&file, &[with(images)], None, &[]);
+            let (host, target) = (FakeHost::default(), FakeTarget::default());
+            let r = restore(&paths, &host, &target, &request(&file, &["nextcloud"], true, false));
+            let calls = target.calls.borrow().clone();
+            let _ = tag;
+            let last = host.events.borrow().last().cloned().unwrap();
+            (r, calls, last)
+        };
+        let (newer, newer_calls, newer_event) = run_with("newer", &["docker.io/library/postgres:19.1-alpine@sha256:aa", "docker.io/library/nextcloud:35.0.3-apache@sha256:bb"]);
+        let (older_db, _, _) = run_with("older", &["docker.io/library/postgres:17.6-alpine@sha256:aa", "docker.io/library/nextcloud:35.0.1-apache@sha256:bb"]);
+        let (one_major, _, _) = run_with("one", &["docker.io/library/postgres:18.1-alpine@sha256:aa", "docker.io/library/nextcloud:34.0.9-apache@sha256:bb"]);
+        let (unrecorded, _, _) = run_with("none", &[]);
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(newer.unwrap_err(), fail(CHECK, "restore_app_newer"));
+        assert!(newer_calls.is_empty(), "nothing looked at or changed: {newer_calls:?}");
+        let f = &newer_event.summary.unwrap().failed[0];
+        assert_eq!((f.error.as_str(), f.detail.as_deref()), ("restore_app_newer", Some("docker.io/library/postgres 19 > 18")));
+        assert!(older_db.unwrap().notes.contains(&"restore_app_older"));
+        assert!(!one_major.unwrap().notes.contains(&"restore_app_older"), "Nextcloud steps one major itself");
+        assert!(!unrecorded.unwrap().notes.contains(&"restore_app_older"));
+        assert_eq!(image_major("ghcr.io/immich-app/immich-server:v3.4.2@sha256:fc"), ("ghcr.io/immich-app/immich-server", Some(3)));
+        assert_eq!(image_major("ghcr.io/immich-app/postgres:14-vectorchord0.4.3@sha256:bc"), ("ghcr.io/immich-app/postgres", Some(14)));
+        assert_eq!(image_major("docker.io/jellyfin/jellyfin@sha256:7d"), ("docker.io/jellyfin/jellyfin", None));
+        assert_eq!(image_major("localhost:5000/x:2"), ("localhost:5000/x", Some(2)));
+        let ours = fmt::compose_images(catalog::get("nextcloud").unwrap().compose);
+        assert!(ours.iter().any(|i| i.starts_with("docker.io/library/postgres:18.")), "{ours:?}");
+    }
+
+    #[test]
+    fn the_old_root_leaves_this_pcs_trusted_roots_before_a_restored_one_replaces_it() {
+        let old = crate::ca::generate_root("Konak Test Backup").unwrap();
+        let here = crate::ca::generate_root("Konak Test Here").unwrap();
+        let mut results = vec![];
+        for declined in [false, true] {
+            let (paths, file) = setup(&format!("ca-untrust-{declined}"), &[]);
+            std::fs::create_dir_all(paths.ca_dir()).unwrap();
+            std::fs::write(paths.ca_cert(), &here.cert_pem).unwrap();
+            std::fs::write(paths.ca_key(), &here.key_pem).unwrap();
+            write_backup(&file, &[], Some((&old.cert_pem, &old.key_pem)), &[("p.jpg", b"p")]);
+            let target = FakeTarget { keep_old_root: declined, ..Default::default() };
+            let summary = restore(&paths, &FakeHost::default(), &target, &Request { ca: true, ..request(&file, &[], false, true) }).unwrap();
+            let crt = std::fs::read_to_string(paths.ca_cert()).unwrap();
+            let _ = std::fs::remove_dir_all(&paths.home);
+            results.push((summary.notes, crt.trim() == old.cert_pem.trim(), target.calls.borrow().clone()));
+        }
+        assert_eq!(results[0], (vec!["restore_ca_restored", "restore_settings_kept"], true, vec!["untrust old root".to_string()]));
+        assert_eq!(results[1], (vec!["restore_ca_failed", "restore_settings_kept"], false, vec!["untrust old root".to_string()]), "still trusted: not replaced");
+    }
+
+    #[test]
+    fn precheck_and_inspect_refuse_at_once() {
+        let (paths, file) = setup("precheck", &[]);
+        let req = |path: &str, apps: &[&str]| Request { path: path.into(), ..request(&file, apps, false, false) };
+        // Other tests' runs hold the process-wide run guard for a moment, which precheck reports first.
+        let precheck = |paths: &Paths, r: &Request| loop {
+            match super::precheck(paths, r) {
+                Err(e) if e == "backup_running" => std::thread::sleep(Duration::from_millis(20)),
+                other => break other,
+            }
+        };
+        let wsl = precheck(&paths, &req(r"\\wsl.localhost\konak\var\b.konakbackup", &["forgejo"]));
+        let wsl2 = precheck(&paths, &req("//wsl$/konak/b.konakbackup", &["forgejo"]));
+        let nothing = precheck(&paths, &req(&file.to_string_lossy(), &[]));
+        let missing = precheck(&paths, &req(&file.to_string_lossy(), &["forgejo"]));
+        std::fs::write(&file, b"not a backup").unwrap();
+        let not_konak = precheck(&paths, &req(&file.to_string_lossy(), &["forgejo"]));
+        let inspect_wsl = crate::backup::inspect(&paths, r"\\wsl$\konak\b.konakbackup", "pw").err();
+        let running = {
+            let _guard = crate::backup::tests::test_guard();
+            super::precheck(&paths, &req(&file.to_string_lossy(), &["forgejo"]))
+        };
+        let mut st = State::load(&paths);
+        st.done = false;
+        st.save(&paths);
+        let not_set_up = precheck(&paths, &req(&file.to_string_lossy(), &["forgejo"]));
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(wsl.unwrap_err(), "backup_path_refused");
+        assert_eq!(wsl2.unwrap_err(), "backup_path_refused");
+        assert_eq!(nothing.unwrap_err(), "restore_nothing_chosen");
+        assert_eq!(missing.unwrap_err(), "backup_unreadable");
+        assert_eq!(not_konak.unwrap_err(), "backup_not_konak");
+        assert_eq!(inspect_wsl.as_deref(), Some("backup_path_refused"));
+        assert_eq!(running.unwrap_err(), "backup_running");
+        assert_eq!(not_set_up.unwrap_err(), "backup_not_set_up");
+    }
+
+    #[test]
+    fn a_file_changed_after_the_verify_is_not_restored() {
+        let (paths, file) = setup("swapped", &[]);
+        write_backup(&file, &[app("forgejo", "git-s", false, &[])], None, &[]);
+        let target = FakeTarget { touch_on_space: Some(file.clone()), ..Default::default() };
+        let r = restore(&paths, &FakeHost::default(), &target, &request(&file, &["forgejo"], false, false));
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(r.unwrap_err(), fail(VERIFY, "restore_file_changed"));
+        assert_eq!(*target.calls.borrow(), ["probe forgejo"], "nothing unpacked");
+    }
+
+    #[test]
+    fn volumes_left_by_a_removal_count_as_old_data_and_are_put_back_on_failure() {
+        let (paths, file) = setup("orphan", &[]);
+        write_backup(&file, &[app("nextcloud", "cloud-o", false, &["db", "nextcloud"])], None, &[]);
+        let probes = HashMap::from([("nextcloud".to_string(), Probe { volumes: true, ..Default::default() })]);
+        let target = FakeTarget { probes, fail_up: vec!["nextcloud".into()], ..Default::default() };
+        let summary = restore(&paths, &FakeHost::default(), &target, &request(&file, &["nextcloud"], true, false)).unwrap();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(summary.failed[0].error, "restore_app_unhealthy");
+        let calls = target.calls.borrow().clone();
+        assert!(calls.contains(&"aside nextcloud".to_string()) && calls.contains(&"rollback nextcloud true".to_string()), "{calls:?}");
+    }
+
+    #[test]
+    fn data_set_aside_by_an_earlier_restore_blocks_the_app() {
+        let (paths, file) = setup("aside-left", &[]);
+        write_backup(&file, &[app("forgejo", "git-a", false, &[]), app("vaultwarden", "vault-a2", false, &[])], None, &[]);
+        let probes = HashMap::from([("forgejo".to_string(), Probe { aside: true, ..Default::default() })]);
+        let target = FakeTarget { probes, ..Default::default() };
+        let summary = restore(&paths, &FakeHost::default(), &target, &request(&file, &["forgejo", "vaultwarden"], true, false)).unwrap();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        let f = &summary.failed[0];
+        assert_eq!((f.id.as_str(), f.error.as_str()), ("forgejo", "restore_aside_exists"));
+        assert!(f.detail.as_deref().is_some_and(|d| d.contains("set aside")), "{f:?}");
+        let calls = target.calls.borrow().clone();
+        assert!(!calls.iter().any(|c| c.contains("forgejo") && !c.starts_with("probe")), "{calls:?}");
+        assert_eq!(summary.restored.len(), 1, "the other app goes on");
+    }
+
+    #[test]
+    fn a_missing_chunk_fails_the_app() {
+        let (paths, file) = setup("chunk", &[]);
+        let m = Manifest { format: fmt::FORMAT, konak_version: "0.1.0".into(), created_unix: 1, apps: vec![app("forgejo", "git-c", false, &[])], photos_bytes: None, media_bytes: None, konak_files: vec![] };
+        let f = io::BufWriter::new(std::fs::File::create(&file).unwrap());
+        let mut w = fmt::Writer::new(f, &pw("the backup password"), &m, TEST_LOG_N).unwrap();
+        w.add_bytes("apps/forgejo/folder/000000", b"first", 0o600, 1).unwrap();
+        w.add_bytes("apps/forgejo/folder/000002", b"third", 0o600, 1).unwrap();
+        let (mut f, _) = w.finish(1).unwrap();
+        f.flush().unwrap();
+        let target = FakeTarget::default();
+        let summary = restore(&paths, &FakeHost::default(), &target, &request(&file, &["forgejo"], false, false)).unwrap();
+        let _ = std::fs::remove_dir_all(&paths.home);
+        let f = &summary.failed[0];
+        assert_eq!((f.error.as_str(), f.detail.as_deref()), ("backup_damaged", Some("a missing chunk")));
+        assert!(target.calls.borrow().contains(&"rollback forgejo false".to_string()));
+        assert!(!target.calls.borrow().iter().any(|c| c.starts_with("up ")));
+    }
+
+    #[test]
+    fn a_commit_that_fails_is_recorded_as_a_commit() {
+        let (paths, file) = setup("commit-phase", &[("forgejo", "git-p", false)]);
+        write_backup(&file, &[app("forgejo", "git-p", false, &[])], None, &[]);
+        let target = FakeTarget { fail_commit: true, ..Default::default() };
+        let summary = restore(&paths, &FakeHost::default(), &target, &request(&file, &["forgejo"], true, false)).unwrap();
+        let marker = std::fs::read(inflight_file(&paths)).ok().and_then(|b| serde_json::from_slice::<Inflight>(&b).ok());
+        let _ = std::fs::remove_dir_all(&paths.home);
+        assert_eq!(summary.restored.len(), 1);
+        let m = marker.expect("the marker stays for the next start");
+        assert_eq!((m.app.as_str(), m.phase.as_str()), ("forgejo", "commit"), "a crash now redoes the commit, never a rollback");
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
