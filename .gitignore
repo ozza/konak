@@ -1,6 +1,7 @@
 # Agent and tool output
 .audit/
 .claude/
+CLAUDE.md
 .superpowers/
 graphify-out/
 .playwright-mcp/
