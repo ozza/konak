@@ -74,6 +74,15 @@ pub struct AppManifest {
     pub size_bytes: u64,
     #[serde(default)]
     pub volumes: Vec<VolumeManifest>,
+    /// The catalog's image references the app ran with (`compose_images`), so a restore can tell
+    /// data from newer or much older images. Empty in files made before it was recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+}
+
+/// The `image:` references of a compose file, in order.
+pub fn compose_images(compose: &str) -> Vec<String> {
+    compose.lines().filter_map(|l| l.trim().strip_prefix("image:")).map(|i| i.trim().to_string()).filter(|i| !i.is_empty()).collect()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -511,6 +520,7 @@ pub(crate) mod tests {
                 stopped: false,
                 size_bytes: 10,
                 volumes: vec![VolumeManifest { name: "db".into(), podman_name: "nextcloud_db".into() }],
+                images: vec![],
             }],
             photos_bytes: Some(3),
             media_bytes: None,

@@ -835,6 +835,7 @@ fn run_steps(paths: &Paths, ctx: &Ctx, apps: &dyn Apps, created: u64, log_n: u8,
                 stopped: a.stopped,
                 size_bytes: app_bytes(z),
                 volumes: z.volumes.iter().map(|v| VolumeManifest { name: v.name.clone(), podman_name: v.podman_name.clone() }).collect(),
+                images: crate::catalog::get(&a.id).map(|m| fmt::compose_images(m.compose)).unwrap_or_default(),
             })
             .collect(),
         photos_bytes: photos,
@@ -1317,7 +1318,7 @@ pub(crate) mod tests {
         // install), one it does not.
         let mut other = m.clone();
         other.created_unix = 5;
-        other.apps = vec![AppManifest { id: "forgejo".into(), name: "git".into(), claimed: true, stopped: false, size_bytes: 1, volumes: vec![] }];
+        other.apps = vec![AppManifest { id: "forgejo".into(), name: "git".into(), claimed: true, stopped: false, size_bytes: 1, volumes: vec![], images: vec![] }];
         for (name, password) in [("konak-20250101-000000.konakbackup", "a long enough secret"), ("konak-20240101-000000.konakbackup", "another password!")] {
             let w = std::io::BufWriter::new(std::fs::File::create(out.join(name)).unwrap());
             let (mut f, _) = Writer::new(w, &SecretString::from(password.to_string()), &other, 10).unwrap().finish(5).unwrap();

@@ -287,6 +287,35 @@ pub fn untrust_on_this_pc(paths: &Paths) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the root in the Konak home is in the current user's Root store (reading shows no dialog).
+fn trusted_here(paths: &Paths) -> Result<bool, String> {
+    let cert = paths.ca_cert().to_string_lossy().replace('\'', "''");
+    let script = format!("$c = [Security.Cryptography.X509Certificates.X509Certificate2]::new('{cert}'); Test-Path ('Cert:\\CurrentUser\\Root\\' + $c.Thumbprint)");
+    let out = shell::run("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", &script]);
+    match out.text.trim() {
+        "True" => Ok(true),
+        "False" => Ok(false),
+        _ => Err(format!("cannot read the certificate store: {}", tail(&out.text, 2))),
+    }
+}
+
+/// Before a restored root replaces the current one: the current root leaves this user's trusted
+/// roots if it is there, since the uninstall only knows the root in the Konak home. An error when
+/// it stays trusted (the user declined Windows' confirmation): the root is then not replaced.
+pub fn untrust_if_trusted(paths: &Paths) -> Result<String, String> {
+    if !paths.ca_cert().is_file() {
+        return Ok("no root certificate yet".into());
+    }
+    if !trusted_here(paths)? {
+        return Ok("the current root is not trusted on this PC".into());
+    }
+    untrust_on_this_pc(paths)?;
+    if trusted_here(paths)? {
+        return Err("the current root is still trusted on this PC (removal declined?)".into());
+    }
+    Ok("the current root was removed from this PC's trusted roots".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
