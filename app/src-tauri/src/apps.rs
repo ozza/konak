@@ -424,6 +424,12 @@ fn windows_side_check(id: &str, port: u16, window: std::time::Duration) -> Resul
     }
 }
 
+/// Whether an install or render error says the app was started but did not pass its health checks:
+/// app-install.sh's probe ("did not answer on <path> within 5 minutes") or `windows_side_check`.
+pub(crate) fn health_failed(error: &str) -> bool {
+    error.contains(" did not answer on ") || error.contains("does not answer from Windows")
+}
+
 fn manifest(id: &str) -> Result<&'static Manifest, String> {
     catalog::get(id).ok_or_else(|| "unknown_app".into())
 }
@@ -707,6 +713,14 @@ mod tests {
         let mut s = State::default();
         s.apps = apps.iter().map(|(id, name)| InstalledApp { id: id.to_string(), name: name.to_string(), installed_unix: 0, claimed: true, stopped: false }).collect();
         s
+    }
+
+    #[test]
+    fn health_failures_are_told_from_other_install_errors() {
+        assert!(INSTALL_SH.contains(r#"echo "$id did not answer on $health within 5 minutes""#), "the message health_failed looks for");
+        assert!(health_failed("install of immich failed: curl: (7) ...\nimmich did not answer on /api/server/ping within 5 minutes"));
+        assert!(health_failed(&windows_side_check("immich", 1, std::time::Duration::ZERO).unwrap_err()));
+        assert!(!health_failed("install of immich failed: Error response from daemon: pull access denied"));
     }
 
     #[test]

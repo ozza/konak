@@ -84,9 +84,38 @@ impl Redactor {
     }
 }
 
+/// An error as the panel shows it: a locale code (`errors.<code>`), and the technical text apart
+/// (redacted), for details on demand. An error that starts with a code (`backup_damaged`,
+/// `backup_damaged: the folder is missing`, `busy (...)`) keeps it, with the rest as the detail;
+/// any other text becomes `fallback` with the whole text as the detail.
+pub fn code_and_detail(error: &str, fallback: &'static str) -> (String, Option<String>) {
+    let token: String = error.chars().take_while(|c| c.is_ascii_lowercase() || *c == '_').collect();
+    let rest = &error[token.len()..];
+    let is_code = (token.contains('_') || token == "busy") && !token.starts_with('_') && (rest.is_empty() || [": ", " (", "; "].iter().any(|p| rest.starts_with(p)));
+    let detail = |d: &str| Some(d).filter(|d| !d.is_empty()).map(|d| Redactor::new(vec![]).apply(d));
+    if is_code {
+        (token, detail(rest.strip_prefix(": ").unwrap_or(rest).trim()))
+    } else {
+        (fallback.to_string(), detail(error.trim()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn errors_split_into_a_code_and_a_detail() {
+        let f = |e: &str| code_and_detail(e, "restore_app_failed");
+        assert_eq!(f("restore_app_exists"), ("restore_app_exists".into(), None));
+        assert_eq!(f("busy"), ("busy".into(), None));
+        assert_eq!(f("backup_damaged: volume db is missing"), ("backup_damaged".into(), Some("volume db is missing".into())));
+        assert_eq!(f("restore_app_unhealthy: immich did not answer; rolling back failed: x"), ("restore_app_unhealthy".into(), Some("immich did not answer; rolling back failed: x".into())));
+        assert_eq!(f("backup_damaged (tar: bad header)"), ("backup_damaged".into(), Some("(tar: bad header)".into())));
+        assert_eq!(f("cannot write the backup file: password=hunter22"), ("restore_app_failed".into(), Some("cannot write the backup file: password=[redacted]".into())));
+        assert_eq!(f("stop of nextcloud failed"), ("restore_app_failed".into(), Some("stop of nextcloud failed".into())));
+        assert_eq!(f("immich_server exited"), ("restore_app_failed".into(), Some("immich_server exited".into())));
+    }
 
     #[test]
     fn masks_known_values_and_patterns() {

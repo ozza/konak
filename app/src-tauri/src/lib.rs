@@ -851,7 +851,7 @@ fn start_backup(app: AppHandle, why: &'static str) -> Result<(), String> {
             if let Some(id) = backup::recover(&k.paths, &apps) {
                 backup::Host::release(&host,&id, &Err("internal error".into()));
             }
-            let _ = app.emit("backup-progress", backup::Progress { state: "failed", step: "prepare", app: None, done_bytes: None, total_bytes: None, error: Some("internal error".into()) });
+            let _ = app.emit("backup-progress", backup::Progress { state: "failed", step: "prepare", app: None, done_bytes: None, total_bytes: None, error: Some("backup_failed".into()), detail: Some("internal error".into()) });
         }
         drop(guard);
     });
@@ -938,7 +938,7 @@ fn restore_backup(app: AppHandle, path: String, password: String, apps: Vec<Stri
             for id in held {
                 restore::Host::release(&host, &id, &Err("internal error".into()));
             }
-            let _ = app.emit("restore-progress", restore::Progress { state: "failed", step: "done", app: None, done_bytes: None, total_bytes: None, error: Some("internal error".into()), summary: None });
+            let _ = app.emit("restore-progress", restore::Progress { state: "failed", step: "restore_done", app: None, done_bytes: None, total_bytes: None, error: Some("backup_restore_failed".into()), detail: Some("internal error".into()), summary: None });
         }
         k.sup.tick();
         drop(guard);

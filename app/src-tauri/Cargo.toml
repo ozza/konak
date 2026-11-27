@@ -45,6 +45,21 @@ tar = "0.4"
 zstd = "0.13"
 age = "0.11"
 
+# Debug builds (the dev app and the tests) with optimized crypto and compression: unoptimized
+# scrypt takes ~17 s per opened backup file, and decryption and zstd crawl.
+[profile.dev.package]
+scrypt = { opt-level = 3 }
+salsa20 = { opt-level = 3 }
+pbkdf2 = { opt-level = 3 }
+hmac = { opt-level = 3 }
+sha2 = { opt-level = 3 }
+chacha20 = { opt-level = 3 }
+chacha20poly1305 = { opt-level = 3 }
+poly1305 = { opt-level = 3 }
+age = { opt-level = 3 }
+age-core = { opt-level = 3 }
+zstd-sys = { opt-level = 3 }
+
 [dev-dependencies]
 # `datetime!` in the schedule tests.
 time = { version = "0.3", features = ["macros"] }
