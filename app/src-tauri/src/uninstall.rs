@@ -97,7 +97,8 @@ pub fn owned_processes(procs: &[Proc], me: u32, exe: &Path, paths: &Paths, wsl: 
         let args = args_of(cmd);
         let has = |s: &str| args.iter().any(|a| a == s);
         if same_path(path, exe) {
-            konak.push((p.process_id, "konak"));
+            // An MCP server an AI agent started from the same exe is not the app.
+            konak.push((p.process_id, if has("--mcp") { "konak mcp" } else { "konak" }));
         } else if same_path(path, &paths.caddy()) && has("run") && norm(Path::new(&cmd.replace('"', ""))).contains(&caddyfile) {
             others.push((p.process_id, "caddy"));
         } else if same_path(path, &paths.mdns()) && args.last().is_some_and(|names| names.split(',').any(|n| n == crate::services::HOME_NAME)) {
@@ -121,7 +122,7 @@ fn stop_processes_of(paths: &Paths, exe: &Path, with_konak: bool) -> Result<Stri
     let procs: Vec<Proc> = serde_json::from_str(out.text.trim()).map_err(|e| format!("cannot list processes: {e}: {}", tail(&out.text, 2)))?;
     let wsl = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join(r"System32\wsl.exe");
     let mut targets = owned_processes(&procs, std::process::id(), exe, paths, &wsl);
-    targets.retain(|(_, what)| with_konak || *what != "konak");
+    targets.retain(|(_, what)| with_konak || !what.starts_with("konak"));
     if targets.is_empty() {
         return Ok("nothing running".into());
     }
@@ -193,13 +194,23 @@ pub fn run_stop(target: Option<PathBuf>) -> i32 {
     match stop_processes(&paths, &exe) {
         Ok(s) => {
             println!("Konak stop: {s}");
-            0
+            if stopped_konak(&s) { STOPPED_KONAK_EXIT } else { 0 }
         }
         Err(e) => {
             println!("Konak stop: FAILED: {e}");
             1
         }
     }
+}
+
+/// `--stop`'s exit code when it stopped the Konak app itself: the installer starts it again after
+/// a silent update (`hooks.nsh`). 0 means nothing of the app was running.
+pub const STOPPED_KONAK_EXIT: i32 = 10;
+
+/// Whether `stop_processes`' report names the Konak app, not only its MCP servers (entries are
+/// `<what> (<pid>)`; "already gone" counts too: it was running a moment ago).
+fn stopped_konak(report: &str) -> bool {
+    report.contains("konak (")
 }
 
 /// Konak only ever terminates or unregisters its own distros.
@@ -642,6 +653,8 @@ mod tests {
         ];
         let got = owned_processes(&procs, 1, &exe, &paths, wsl);
         assert_eq!(got, vec![(2, "konak"), (3, "caddy"), (4, "mdns-responder"), (5, "wsl keepalive")]);
+        assert!(stopped_konak("stopped konak (2), caddy (3)") && stopped_konak("stopped caddy (3); already gone konak (2)"));
+        assert!(!stopped_konak("stopped konak mcp (9), caddy (3)") && !stopped_konak("nothing running"), "an MCP server alone is not the app");
     }
 
     #[test]

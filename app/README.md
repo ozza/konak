@@ -99,6 +99,12 @@ delete all Konak data? The default is No. Silent (`/S`) and passive runs take No
 updates (`/UPDATE`) skip the cleanup. Then it runs `konak.exe --uninstall [--purge]`
 (`src-tauri/src/uninstall.rs`, hooked in through `src-tauri/windows/hooks.nsh`):
 
+While a backup, restore or startup recovery runs, the uninstall (and an update's `--stop`) waits up
+to 3 minutes, then refuses with exit code 3 and changes nothing. A script that needs that exit code
+must run the uninstaller in place, `uninstall.exe /S _?=<install folder>`: a plain `uninstall.exe /S`
+copies itself to a temp folder, runs from there and returns 0 at once (NSIS behaviour). After a
+silent update that stopped Konak, the installer starts it again (`--autostart`, to the tray).
+
 - `--uninstall` stops a running Konak and the caddy, mdns-responder and wsl keepalive it started.
   They are matched by exact executable path and command line, never by name. It then runs
   `wsl --terminate` on Konak's distro, removes `HKCU\...\Run\Konak` only if it points at this install,

@@ -13,6 +13,12 @@
     DetailPrint "Stopping the running Konak"
     ExecWait '"$PLUGINSDIR\konak-stop.exe" --stop "$INSTDIR\${MAINBINARYNAME}.exe"' $R7
     DetailPrint "Konak stop finished with exit code $R7"
+    ; 10 (uninstall::STOPPED_KONAK_EXIT): the Konak app was running; a silent update starts it again.
+    Var /GLOBAL KonakWasRunning
+    StrCpy $KonakWasRunning 0
+    ${If} $R7 = 10
+      StrCpy $KonakWasRunning 1
+    ${EndIf}
     Delete "$PLUGINSDIR\konak-stop.exe"
     ; 3 (uninstall::REFUSED_EXIT): a backup, restore or startup recovery still runs; nothing was
     ; written yet, so the old install stays whole.
@@ -27,6 +33,15 @@
       ; Quit, not Abort: Abort leaves the window on its "aborted" page, which needs a second click.
       Quit
     ${EndIf}
+  ${EndIf}
+!macroend
+
+; After a silent update: start Konak again (to the tray, as at sign-in) when the update stopped it.
+; An interactive install offers this on its finish page.
+!macro NSIS_HOOK_POSTINSTALL
+  ${If} ${Silent}
+  ${AndIf} $KonakWasRunning = 1
+    Exec '"$INSTDIR\${MAINBINARYNAME}.exe" --autostart'
   ${EndIf}
 !macroend
 
