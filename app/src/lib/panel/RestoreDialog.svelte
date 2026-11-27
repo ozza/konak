@@ -24,7 +24,14 @@
   let progress = $state<BackupProgress | null>(null);
   const id = $props.id();
 
-  let clashes = $derived(chosen.filter((a) => apps.some((x) => x.id === a)));
+  // Apps with data a "keep data" removal left here: the backend refused them (restore_app_data_left);
+  // they need the same Replace consent as installed apps.
+  let leftData = $state<string[]>([]);
+  let installedClashes = $derived(chosen.filter((a) => apps.some((x) => x.id === a)));
+  let dataClashes = $derived(chosen.filter((a) => leftData.includes(a) && !installedClashes.includes(a)));
+  let clashes = $derived([...installedClashes, ...dataClashes]);
+  // After a run that failed before changing anything, the choices stay and it can be started again.
+  let canStart = $derived(!progress || progress.state === "failed");
   let running = $derived(starting || progress?.state === "running");
   // The backup's certificate is put back only into a Konak with no apps yet (restore.rs `ca_action`).
   let caOffered = $derived(!!manifest?.ca_fingerprint && manifest.ca_valid);
@@ -38,9 +45,12 @@
     file = manifest = progress = error = null;
     password = "";
     replace = photos = media = ca = starting = false;
+    leftData = [];
     const off = listen<BackupProgress>("restore-progress", ({ payload }) => {
       progress = payload;
       starting = false;
+      const left = payload.summary?.failed.filter((f) => f.error === "restore_app_data_left").map((f) => f.id) ?? [];
+      if (left.length) leftData = [...new Set([...leftData, ...left])];
     });
     return () => void off.then((f) => f());
   });
@@ -69,6 +79,7 @@
   async function restore() {
     if (!file || !manifest || running) return;
     error = null;
+    progress = null;
     starting = true;
     try {
       await invoke("restore_backup", { path: file, password, apps: chosen, replace, photos, media, ca: ca && caAllowed });
@@ -132,7 +143,10 @@
     {#if clashes.length > 0}
       <label class="flex items-start gap-2.5 rounded-lg border border-error-border bg-error-bg p-3 text-sm">
         <input type="checkbox" bind:checked={replace} disabled={running} class="mt-0.5 size-4 shrink-0 accent-error" />
-        {t("panel.restore.replace", { apps: clashes.map(appName).join(", ") })}
+        <span class="flex flex-col gap-1">
+          {#if installedClashes.length}<span>{t("panel.restore.replace", { apps: installedClashes.map(appName).join(", ") })}</span>{/if}
+          {#if dataClashes.length}<span>{t("panel.restore.replace_data_left", { apps: dataClashes.map(appName).join(", ") })}</span>{/if}
+        </span>
       </label>
     {/if}
     <div class="flex flex-col gap-1.5 text-sm" role="status">
@@ -152,7 +166,7 @@
   {/if}
   {#snippet actions()}
     <button type="button" class="btn" disabled={running} onclick={onclose}>{progress && progress.state !== "running" ? t("panel.logs.close") : t("panel.rename.cancel")}</button>
-    {#if manifest && (!progress || progress.state === "running")}
+    {#if manifest && (canStart || running)}
       <button type="button" class={clashes.length ? "btn-danger" : "btn-primary"} disabled={running || chosen.length + Number(photos) + Number(media) === 0 || (clashes.length > 0 && !replace)} onclick={restore}>
         {t("panel.restore.start")}
       </button>
